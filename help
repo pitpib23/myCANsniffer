@@ -1,0 +1,124 @@
+{
+  "$comment": "CAN sniffer configuration. Passive/receive-only. Edit freely; unknown keys are preserved.",
+  "source": {
+    "type": "file",
+    "file": {
+      "path": "baseline.asc",
+      "speed": 0.0,
+      "loop": false
+    },
+    "live": {
+      "interface": "virtual",
+      "channel": "0",
+      "bitrate": 500000,
+      "data_bitrate": 2000000,
+      "fd": false,
+      "require_listen_only": true,
+      "extra_kwargs": {}
+    }
+  },
+  "capture": {
+    "queue_size": 20000,
+    "ui_refresh_ms": 100,
+    "max_frames_retained": 200000
+  },
+  "interpret": {
+    "word_size": 2,
+    "fixed_split": true,
+    "sliding_split": true,
+    "sliding_step": 1,
+    "include_remainder": true,
+    "byte_range": [
+      0,
+      64
+    ],
+    "show_orders": true,
+    "decoders": [
+      {
+        "key": "hex_be",
+        "enabled": false
+      },
+      {
+        "key": "hex_le",
+        "enabled": true
+      },
+      {
+        "key": "u16_be",
+        "enabled": true
+      },
+      {
+        "key": "u16_le",
+        "enabled": true
+      },
+      {
+        "key": "i16_be",
+        "enabled": true
+      },
+      {
+        "key": "i16_le",
+        "enabled": true
+      },
+      {
+        "key": "u8_pair",
+        "enabled": true
+      },
+      {
+        "key": "i8_pair",
+        "enabled": true
+      },
+      {
+        "key": "bin_be",
+        "enabled": true
+      },
+      {
+        "key": "u32_be",
+        "enabled": false
+      },
+      {
+        "key": "u32_le",
+        "enabled": false
+      },
+      {
+        "key": "i32_be",
+        "enabled": false
+      },
+      {
+        "key": "i32_le",
+        "enabled": false
+      },
+      {
+        "key": "f32_be",
+        "enabled": false
+      },
+      {
+        "key": "f32_le",
+        "enabled": false
+      },
+      {
+        "key": "ascii",
+        "enabled": false
+      },
+      {
+        "key": "bcd",
+        "enabled": false
+      }
+    ]
+  },
+  "filters": [],
+  "signals": [],
+  "ui": {
+    "relative_timestamps": true,
+    "highlight_changed_bytes": true,
+    "font_family": "",
+    "font_size": 9,
+    "window": {
+      "width": 1424,
+      "height": 779
+    }
+  },
+  "logging": {
+    "enabled": false,
+    "directory": "captures",
+    "format": "csv"
+  }
+}

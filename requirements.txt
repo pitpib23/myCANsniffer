@@ -1,0 +1,5 @@
+# CAN Sniffer — passive / receive-only
+# Python 3.9 compatible pins.
+
+PySide6>=6.6,<6.9      # Qt UI
+python-can>=4.2,<5     # CAN receive layer (listen-only usage only)
