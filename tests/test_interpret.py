@@ -13,7 +13,7 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from cansniff.interpret import (  # noqa: E402
-    DECODERS, SignalRule, interpret_payload, numeric_decoder_keys, split_fixed,
+    DECODERS, interpret_payload, numeric_decoder_keys, split_fixed,
     split_payload, split_sliding,
 )
 
@@ -189,17 +189,15 @@ class DecoderCoverageTests(unittest.TestCase):
             self.assertEqual(DECODERS["hex_le"].value(raw),
                              float(int.from_bytes(raw, "little")))
 
-    def test_a_rule_using_any_offered_decoder_produces_output(self):
+    def test_every_numeric_decoder_actually_produces_a_number(self):
         for key in numeric_decoder_keys():
             decoder = DECODERS[key]
             raw = bytes(range(1, (decoder.exact_len or 2) + 1))
-            rule = SignalRule(name="x", offset=0, length=len(raw),
-                              decoder=key, scale=1.0, precision=2)
             self.assertIsNotNone(
-                rule.render(raw),
-                "{} is offered to rules but produces nothing".format(key))
+                decoder.value(raw),
+                "{} is marked numeric but produces nothing".format(key))
 
-    def test_text_only_decoders_are_not_offered_to_rules(self):
+    def test_text_only_decoders_are_not_marked_numeric(self):
         for key in ("u8_pair", "i8_pair", "ascii"):
             self.assertFalse(DECODERS[key].numeric)
             self.assertNotIn(key, numeric_decoder_keys())
@@ -228,27 +226,6 @@ class ByteOrderPreviewRemovalTests(unittest.TestCase):
                          DECODERS["u16_be"].render(payload[::-1]))
 
 
-class SignalRuleTests(unittest.TestCase):
-    def test_scale_and_offset_applied(self):
-        rule = SignalRule(name="Temp", offset=0, length=2, decoder="u16_be",
-                          scale=0.1, add=-40.0, unit="degC", precision=1)
-        self.assertAlmostEqual(rule.apply(bytes.fromhex("01F4")), 10.0)
-        self.assertEqual(rule.render(bytes.fromhex("01F4")), "Temp = 10.0 degC")
-
-    def test_hex_can_id_from_config(self):
-        rule = SignalRule.from_dict({"can_id": "0x101", "offset": 3, "length": 4,
-                                     "decoder": "f32_be"})
-        self.assertEqual(rule.can_id, 0x101)
-
-    def test_rule_only_matches_its_word(self):
-        rule = SignalRule(can_id=0x101, offset=3, length=4, decoder="f32_be")
-        words = split_payload(bytes.fromhex("81000141CC000000"), 4)
-        matching = [w for w in words if rule.matches(0x101, "", w)]
-        self.assertEqual(len(matching), 1)
-        self.assertEqual(matching[0].raw, bytes.fromhex("41CC0000"))
-        self.assertFalse(rule.matches(0x100, "", matching[0]))
-
-
 class InterpretationTests(unittest.TestCase):
     def test_every_word_gets_every_decoder(self):
         result = interpret_payload(
@@ -260,18 +237,6 @@ class InterpretationTests(unittest.TestCase):
         self.assertEqual(len(result.words), 7)
         for row in result.words:
             self.assertEqual(set(row.values), {"u16_be", "u16_le", "hex_be"})
-
-    def test_physical_column_filled_for_matching_rule(self):
-        rule = SignalRule(name="Value", can_id=0x101, offset=3, length=4,
-                          decoder="f32_be", scale=1.0, precision=2)
-        result = interpret_payload(
-            bytes.fromhex("81000141CC000000"),
-            decoder_keys_enabled=["f32_be"],
-            word_size=4,
-            signals=[rule], arb_id=0x101,
-        )
-        physicals = [row.physical for row in result.words if row.physical]
-        self.assertEqual(physicals, ["Value = 25.50"])
 
     def test_unknown_decoder_key_is_ignored(self):
         result = interpret_payload(b"\x01\x02", decoder_keys_enabled=["nope", "u16_be"])

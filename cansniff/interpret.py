@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import struct
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, Sequence
+from typing import Callable, Dict, List, Optional, Sequence
 
 NA = "—"
 
@@ -351,106 +351,6 @@ def get_decoder(key: str) -> Optional[Decoder]:
 
 
 # --------------------------------------------------------------------------
-# scale / offset rules
-# --------------------------------------------------------------------------
-
-
-@dataclass
-class SignalRule:
-    """User-defined physical value: raw * scale + add."""
-
-    name: str = "signal"
-    enabled: bool = True
-    can_id: Optional[int] = None      # None = any ID
-    channel: str = ""                 # "" = any channel
-    offset: int = 0
-    length: int = 2
-    decoder: str = "u16_be"
-    scale: float = 1.0
-    add: float = 0.0
-    unit: str = ""
-    precision: int = 3
-
-    @classmethod
-    def from_dict(cls, raw: Dict[str, Any]) -> "SignalRule":
-        can_id = raw.get("can_id", None)
-        if isinstance(can_id, str):
-            can_id = can_id.strip()
-            can_id = int(can_id, 16 if can_id.lower().startswith("0x") else 10) if can_id else None
-        return cls(
-            name=str(raw.get("name", "signal")),
-            enabled=bool(raw.get("enabled", True)),
-            can_id=can_id,
-            channel=str(raw.get("channel", "")),
-            offset=int(raw.get("offset", 0)),
-            length=int(raw.get("length", 2)),
-            decoder=str(raw.get("decoder", "u16_be")),
-            scale=float(raw.get("scale", 1.0)),
-            add=float(raw.get("add", 0.0)),
-            unit=str(raw.get("unit", "")),
-            precision=int(raw.get("precision", 3)),
-        )
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "name": self.name,
-            "enabled": self.enabled,
-            "can_id": None if self.can_id is None else "0x{:X}".format(self.can_id),
-            "channel": self.channel,
-            "offset": self.offset,
-            "length": self.length,
-            "decoder": self.decoder,
-            "scale": self.scale,
-            "add": self.add,
-            "unit": self.unit,
-            "precision": self.precision,
-        }
-
-    @staticmethod
-    def parse_all(entries: Optional[Sequence[Any]]) -> List["SignalRule"]:
-        """Parse configured rules, dropping any entry that is not usable.
-
-        The configuration is hand-editable by design, so one malformed rule
-        must be ignored rather than take the interpretation panel down with
-        it — the same tolerance ``Decoder.render`` applies to a bad value.
-        """
-        rules: List["SignalRule"] = []
-        for raw in entries or ():
-            if not isinstance(raw, dict):
-                continue
-            try:
-                rules.append(SignalRule.from_dict(raw))
-            except Exception:
-                continue
-        return rules
-
-    def matches(self, arb_id: int, channel: str, word: Word) -> bool:
-        if not self.enabled:
-            return False
-        if self.can_id is not None and self.can_id != arb_id:
-            return False
-        if self.channel and self.channel != channel:
-            return False
-        return word.offset == self.offset and word.length == self.length
-
-    def apply(self, raw: bytes) -> Optional[float]:
-        decoder = DECODERS.get(self.decoder)
-        if decoder is None:
-            return None
-        base = decoder.value(raw)
-        if base is None:
-            return None
-        return base * self.scale + self.add
-
-    def render(self, raw: bytes) -> Optional[str]:
-        value = self.apply(raw)
-        if value is None:
-            return None
-        text = "{:.{p}f}".format(value, p=max(0, self.precision))
-        return "{} = {}{}".format(self.name, text, (" " + self.unit) if self.unit else "")
-
-
-# --------------------------------------------------------------------------
 # assembled result
 # --------------------------------------------------------------------------
 
@@ -459,7 +359,6 @@ class SignalRule:
 class WordRow:
     word: Word
     values: Dict[str, str]          # decoder key -> rendered text
-    physical: str = ""              # matching signal rules, joined
 
 
 @dataclass
@@ -476,11 +375,15 @@ def interpret_payload(
     sliding_step: int = 1,
     include_remainder: bool = True,
     byte_range: Optional[Sequence[int]] = None,
-    signals: Optional[Sequence[SignalRule]] = None,
-    arb_id: int = -1,
-    channel: str = "",
 ) -> Interpretation:
-    """Run every enabled decoder over every word of the payload."""
+    """Run every enabled decoder over every word of the payload.
+
+    Named-value interpretation — what used to additionally run here as
+    freeform "scaled value" rules matched by byte offset — now lives entirely
+    in the Signal Database window and the Signals workspace tab; see
+    analysis/signals.py. This function stays solely about the raw decoder
+    columns (Blocks), which need no database and never did.
+    """
     decoders = [DECODERS[k] for k in decoder_keys_enabled if k in DECODERS]
     words = split_payload(
         data,
@@ -490,15 +393,6 @@ def interpret_payload(
         byte_range=byte_range,
     )
 
-    rows: List[WordRow] = []
-    for word in words:
-        values = {d.key: d.render(word.raw) for d in decoders}
-        physical_parts: List[str] = []
-        for rule in signals or ():
-            if rule.matches(arb_id, channel, word):
-                rendered = rule.render(word.raw)
-                if rendered:
-                    physical_parts.append(rendered)
-        rows.append(WordRow(word=word, values=values, physical="; ".join(physical_parts)))
-
+    rows = [WordRow(word=word, values={d.key: d.render(word.raw) for d in decoders})
+           for word in words]
     return Interpretation(payload=data, words=rows, decoders=decoders)

@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cansniff"
+version = "1.1.0"
+description = "Passive, receive-only CAN bus sniffer and reverse-engineering aid"
+readme = "README.md"
+# 3.9 is the floor the code targets: no PEP 604 unions, no dict merge operator.
+requires-python = ">=3.9"
+license = { text = "Proprietary" }
+keywords = ["can", "canbus", "sniffer", "passive", "reverse-engineering", "dbc"]
+classifiers = [
+    "Environment :: X11 Applications :: Qt",
+    "Intended Audience :: Developers",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3.9",
+    "Topic :: Scientific/Engineering",
+]
+
+dependencies = [
+    "PySide6>=6.6,<6.9",      # Qt UI; PySide6-Addons supplies QtCharts
+    "python-can>=4.2,<5",     # receive layer + ASC/candump readers and writers
+    "cantools>=39,<41",       # read-only DBC parsing and decoding
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[project.gui-scripts]
+# GUI entry point: no console window on Windows, .desktop-friendly on Linux.
+cansniff = "main:main"
+
+[tool.setuptools]
+# main.py is a top-level module, not part of the package.
+py-modules = ["main"]
+
+[tool.setuptools.packages.find]
+include = ["cansniff*"]
+
+[tool.setuptools.package-data]
+cansniff = ["py.typed"]

@@ -21,16 +21,22 @@ from PySide6.QtWidgets import (
     QSplitter, QStackedWidget, QTableView, QVBoxLayout, QWidget,
 )
 
+from ..analysis.dbc import DbcDatabase
+from ..analysis.signals import ProfileStore, build_dbc_database
+from ..analysis.store import FrameStore
 from ..capture import CaptureWorker, FrameLogger
 from ..config import Config
+from ..export import (
+    FORMAT_ORDER, FORMATS, ExportError, describe_losses, export, format_for_path,
+)
 from ..filters import FilterSet
 from ..model import CanFrame
 from ..sources import SourceError, build_source
 from .config_dialog import ConfigDialog
+from .database_window import DatabaseWindow
 from .filter_bar import FilterBar
 from .filter_dialog import FilterDialog
 from .interpret_view import InterpretView
-from .signal_dialog import SignalDialog
 from .tables import (
     ByteHighlightDelegate, IdFilterProxy, IdTableModel, KEY_ROLE, TraceTableModel,
     exemplar_widths,
@@ -59,10 +65,28 @@ class MainWindow(QMainWindow):
         self._seen_channels: set = set()
         self._last_received = 0
         self._last_rate_at = time.monotonic()
+        #: Drop count already reported, so backpressure is announced when it
+        #: starts rather than on every status tick afterwards.
+        self._dropped_seen = 0
+        #: Shared index the passive analysis layers read from. Holds references
+        #: to the same frames the tables show, bounded like the trace view.
+        self.frame_store = FrameStore(
+            int(config.get("capture.max_frames_retained", 200000)))
+        #: Active DBC, or None. Decoding is always optional — the application
+        #: stays fully usable on unknown, undocumented traffic. Built from
+        #: profile_store.active_profile — see _apply_profile_store.
+        self.database: Optional[DbcDatabase] = None
+        #: Every known signal-database profile, and which one (if any) is
+        #: active. Replaces the old separate dbc.path / signals config keys;
+        #: see analysis/signals.py.
+        self.profile_store: ProfileStore = ProfileStore()
 
         self._build_ui()
         self._build_shortcuts()
         self._apply_config_to_widgets()
+        self.interpret_view.set_frame_store(self.frame_store)
+        self._load_profile_store()
+        self._apply_profile_store()
 
         self._status_timer = QTimer(self)
         self._status_timer.timeout.connect(self._update_status)
@@ -212,7 +236,14 @@ class MainWindow(QMainWindow):
             "Pause", slot=self._on_pause, checkable=True,
             tip="Stop adding frames to the views; reception continues  (F7)",
         )
-        for button in (self.start_button, self.stop_button, self.pause_button):
+        self.clear_button = self._bar_button(
+            "Clear", slot=self.clear_views, ghost=True,
+            tip="Discard the frames collected so far and reset the counters. "
+                "The capture log on disk, the loaded database and the filters "
+                "are untouched  (Ctrl+L)",
+        )
+        for button in (self.start_button, self.stop_button, self.pause_button,
+                       self.clear_button):
             row.addWidget(button)
 
         row.addStretch(1)
@@ -221,13 +252,27 @@ class MainWindow(QMainWindow):
         row.addWidget(self.source_chip)
         row.addSpacing(SPACE_SM)
 
+        self.dbc_chip = Chip("no database", "muted", self.theme)
+        self.dbc_chip.setToolTip(
+            "No database applied. Frames are shown raw — which is all this "
+            "tool ever needs to be useful."
+        )
+        row.addWidget(self.dbc_chip)
+        row.addSpacing(SPACE_SM)
+
+        # One button, one concept: a DBC's message-bound signals and the old
+        # "scaled value" byte rules are both just Signals now — see
+        # analysis/signals.py and ui/database_window.py.
         for text, slot, tip in (
+            ("Database", self._edit_database_window,
+             "Create, import, export and edit signal databases, and choose "
+             "which one — if any — decodes captured traffic"),
             ("Open capture", self._open_capture, "Load a capture file for offline playback"),
+            ("Export", self._export_capture,
+             "Write the observed frames to ASC, candump, CSV or JSONL"),
             ("Capture filters", self._edit_filters,
              "Choose which frames are received. To hide rows you have already "
              "captured, use the filter bar above the table."),
-            ("Scaled values", self._edit_signals,
-             "Turn raw bytes into physical values: raw × scale + offset"),
             ("Settings", self._edit_settings, "Source, capture, display and raw configuration"),
         ):
             row.addWidget(self._bar_button(text, slot=slot, ghost=True, tip=tip))
@@ -463,12 +508,29 @@ class MainWindow(QMainWindow):
         worker.statusChanged.connect(self.status_message.setText)
         worker.started.connect(self._on_source_started)
         worker.sourceFinished.connect(self._on_source_finished)
-        self.batchConsumed.connect(worker.batch_consumed)
+        # DirectConnection, emphatically. worker.run() is a blocking receive
+        # loop, so the capture thread never reaches QThread::exec() and never
+        # processes a queued slot call. With the default AutoConnection this
+        # acknowledgement was queued onto an event loop that does not run: it
+        # never arrived, the worker's in-flight count climbed to _max_pending
+        # and stuck there, and from that moment every batch was dropped. The
+        # views froze after eight batches — under a second of live capture —
+        # while reception carried on. Direct delivery runs the slot on this
+        # thread instead, which is why the counter it touches is locked.
+        self.batchConsumed.connect(worker.batch_consumed, Qt.DirectConnection)
+
+        # Carry the button's state into the new worker. Without this, pausing
+        # before pressing Start silently did nothing — the worker was built
+        # with its own default and the button was left claiming otherwise.
+        worker.set_paused(self.pause_button.isChecked())
 
         self._worker = worker
         self._thread = thread
         self._last_received = 0
         self._last_rate_at = time.monotonic()
+        # A fresh worker starts at zero drops; carrying the previous capture's
+        # figure over would announce a stall that has not happened.
+        self._dropped_seen = 0
         self.start_button.setEnabled(False)
         self.stop_button.setEnabled(True)
         thread.start()
@@ -486,6 +548,11 @@ class MainWindow(QMainWindow):
         self._worker = None
         self.start_button.setEnabled(True)
         self.stop_button.setEnabled(False)
+        # A finished capture leaves nothing to pause. Clearing the button means
+        # the next Start runs, rather than coming up frozen with no visible
+        # reason why no frames are arriving.
+        if self.pause_button.isChecked():
+            self.pause_button.setChecked(False)
 
     def _on_source_started(self, description: str) -> None:
         self.status_message.setText(description)
@@ -525,9 +592,29 @@ class MainWindow(QMainWindow):
         self.status_message.setText("Error: {}".format(message.splitlines()[0]))
 
     def _on_pause(self, paused: bool) -> None:
+        paused = bool(paused)
         if self._worker is not None:
             self._worker.set_paused(paused)
         self.pause_button.setText("Resume" if paused else "Pause")
+        tip = ("Resume updating the views; reception and logging never stopped"
+               " (F7)" if paused else
+               "Freeze the views; frames keep being received and logged  (F7)")
+        self.pause_button.setToolTip(tip)
+        self.pause_button.setAccessibleName("Resume display" if paused
+                                            else "Pause display")
+        # The status line must describe what is actually happening. Claiming
+        # frames are still being received while no capture is running would be
+        # a plausible-sounding lie about a bus nobody is listening to.
+        if paused and self._worker is not None:
+            self.status_message.setText(
+                "Display paused — still receiving and logging")
+        elif paused:
+            self.status_message.setText(
+                "Display paused — nothing is running; Start will come up paused")
+        elif self._thread is not None:
+            self.status_message.setText("Capturing")
+        else:
+            self.status_message.setText("Idle — press Start")
 
     # ------------------------------------------------------------------
     # frame intake
@@ -537,6 +624,10 @@ class MainWindow(QMainWindow):
         try:
             self.id_model.add_frames(frames)
             self.trace_model.add_frames(frames)
+            # The analysis layers index the same frame objects the tables hold;
+            # the store keeps references, so this costs a pointer per frame and
+            # its retention limit is kept in step with the trace view's.
+            self.frame_store.add(frames)
 
             channels = {f.channel for f in frames if f.channel}
             if channels - self._seen_channels:
@@ -642,12 +733,40 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def clear_views(self) -> None:
+        """Discard everything collected so far and start counting again.
+
+        Clears: the Messages and Trace tables, the shared frame store every
+        analysis workspace reads from, the derived analysis caches, the current
+        selection and the panel it feeds, the remembered channel list, and the
+        capture counters (Received / Shown / Dropped / Rate).
+
+        Deliberately leaves alone: the capture log already written to disk, the
+        loaded signal database, the capture filters, the display filter, and
+        the running capture itself — Clear resets the view of the bus, not the
+        observation of it.
+        """
         self.id_model.clear()
         self.trace_model.clear()
+        self.frame_store.clear()
         self._seen_channels.clear()
         self._selected_key = None
-        self.interpret_view.show_frame(None)
+        self.interpret_view.reset_content()
+        self._dropped_seen = 0
+
+        # The counters describe frames that no longer exist anywhere in the UI,
+        # so leaving them running would make them unreadable. Reception is not
+        # interrupted: the worker keeps receiving, filtering and logging.
+        if self._worker is not None:
+            self._worker.reset_counters()
+        self._last_received = 0
+        self._last_rate_at = time.monotonic()
+        for metric in (self.metric_received, self.metric_shown):
+            metric.set_value("0")
+        self.metric_dropped.set_value("0", "muted")
+        self.metric_rate.set_value("—", "muted")
+
         self._update_match_count()
+        self._update_status()
 
     def _open_capture(self) -> None:
         start_dir = os.path.dirname(str(self.config.get("source.file.path", "")) or ".")
@@ -667,6 +786,159 @@ class MainWindow(QMainWindow):
         self._update_source_chip()
         self.start_capture()
 
+    def _export_capture(self) -> None:
+        """Write the retained frames to a file in the chosen format."""
+        frames = list(self.frame_store.all_frames())
+        if not frames:
+            QMessageBox.information(
+                self, "Nothing to export",
+                "No frames have been observed yet. Start a capture or open a "
+                "capture file first.")
+            return
+
+        filters = ";;".join(FORMATS[key].filter for key in FORMAT_ORDER)
+        start_dir = str(self.config.get("export.last_directory", "") or "")
+        path, chosen = QFileDialog.getSaveFileName(
+            self, "Export capture",
+            os.path.join(start_dir, "capture"), filters)
+        if not path:
+            return
+
+        # The dialog's selected filter decides the format, so a name typed
+        # without an extension still lands in the format the user picked.
+        spec = None
+        for key in FORMAT_ORDER:
+            if FORMATS[key].filter == chosen:
+                spec = FORMATS[key]
+                break
+        if spec is None:
+            spec = format_for_path(path) or FORMATS["asc"]
+        if not os.path.splitext(path)[1]:
+            path += spec.extension
+
+        note = describe_losses(spec, frames)
+        if note:
+            proceed = QMessageBox.warning(
+                self, "Format limitation",
+                "{}\n\nExport anyway?".format(note),
+                QMessageBox.Yes | QMessageBox.Cancel, QMessageBox.Yes)
+            if proceed != QMessageBox.Yes:
+                return
+
+        try:
+            count, spec = export(frames, path, spec.key)
+        except ExportError as exc:
+            QMessageBox.warning(self, "Export failed", str(exc))
+            return
+
+        self.config.set("export.last_directory", os.path.dirname(path))
+        self.config.save()
+        self.status_message.setText("Exported {:,} frames to {}".format(
+            count, os.path.basename(path)))
+
+    # ------------------------------------------------------------------
+    # signal database
+    # ------------------------------------------------------------------
+
+    def _edit_database_window(self) -> None:
+        """Open the unified Signal Database window.
+
+        The window mutates ``self.profile_store`` live — Use Database and
+        Unapply Database (and, for the currently active profile, any signal
+        edit) take effect immediately via ``storeChanged`` while the window is
+        still open, not on some later confirmation. There is nothing to
+        commit when it closes; ``_persist_profile_store`` afterwards only
+        catches edits to a profile that was never the active one, which
+        ``storeChanged`` has no reason to fire for.
+        """
+        dialog = DatabaseWindow(
+            self.profile_store, self, self.theme,
+            self.interpret_view.current_frame(),
+        )
+        dialog.storeChanged.connect(self._on_profile_store_changed)
+        dialog.exec()
+        self._persist_profile_store()
+
+    def _on_profile_store_changed(self, store: ProfileStore) -> None:
+        self.profile_store = store
+        self._apply_profile_store()
+        self._persist_profile_store()
+
+    def _apply_profile_store(self) -> None:
+        """Rebuild the decode artifact from the active profile, or clear it.
+
+        One artifact: a DbcDatabase for the Signals workspace tab, built from
+        the active profile's message-bound signals. The Blocks table's old
+        "Scaled value" column and the SignalRule mechanism feeding it are
+        gone — a signal's scale now shows up exactly one way, through the
+        database that is applied. See analysis/signals.build_dbc_database.
+        """
+        profile = self.profile_store.active_profile
+        self._set_database(None if profile is None else build_dbc_database(profile))
+        self.interpret_view.refresh()
+
+    def _set_database(self, database: Optional[DbcDatabase]) -> None:
+        self.database = database
+        self.interpret_view.set_database(database)
+        if database is None:
+            self.dbc_chip.set_text_and_tone("no database", "muted")
+            self.dbc_chip.setToolTip(
+                "No database applied. Frames are shown raw — which is all "
+                "this tool ever needs to be useful."
+            )
+            self.status_message.setText("No database applied")
+        else:
+            self.dbc_chip.set_text_and_tone(database.name, "accent")
+            self.dbc_chip.setToolTip(
+                "{}\nDecoding is an added layer; raw frames stay exactly as "
+                "visible as before.".format(database.describe())
+            )
+            self.status_message.setText("Applied {}".format(database.describe()))
+
+    def _load_profile_store(self) -> None:
+        """Load every known profile, migrating the old dbc.path/signals once.
+
+        Migration is guarded by database.migrated rather than by "is the
+        profile list empty", so an operator who deliberately empties it later
+        never has stale legacy config silently reappear on the next start.
+        """
+        section = self.config.database_section
+        store = ProfileStore.from_config(section)
+        if not section.get("migrated", False):
+            legacy_path = str(self.config.get("dbc.path", "") or "")
+            # Read directly, not via the (now removed) Config.signals typed
+            # accessor: this is a one-time read of whatever an old install
+            # left behind, not an ongoing first-class config section anymore.
+            legacy_store, notes = ProfileStore.migrate_legacy(
+                legacy_path, self.config.get("signals", []) or [])
+            for profile in legacy_store.profiles:
+                store.add(profile)
+            if store.active is None:
+                store.active = legacy_store.active
+            self.profile_store = store
+            self._persist_profile_store(migrated=True)
+            if notes:
+                # Deferred rather than a blocking QMessageBox at start-up:
+                # this runs during __init__, before the window is even shown,
+                # and a modal dialog there blocks the whole application coming
+                # up for no reason a status line and a tooltip cannot cover.
+                # One tick later runs after _apply_profile_store's own status
+                # text, so this is the message left on screen, not overwritten
+                # by it.
+                text = ("Migrated your previous database and scaled-value "
+                        "rules into the new Database window. " + " ".join(notes))
+                self.dbc_chip.setToolTip(text)
+                QTimer.singleShot(0, lambda: self.status_message.setText(
+                    "Signal database migrated — see Database for details"))
+        self.profile_store = store
+
+    def _persist_profile_store(self, migrated: bool = True) -> None:
+        data = self.profile_store.to_config()
+        data["migrated"] = migrated or bool(
+            self.config.database_section.get("migrated", False))
+        self.config.data["database"] = data
+        self.config.save()
+
     def _edit_filters(self) -> None:
         dialog = FilterDialog(self.config.filters, self, self.theme,
                               sample=self.interpret_view.current_frame())
@@ -681,17 +953,6 @@ class MainWindow(QMainWindow):
                 len(self.config.filters)
             )
         )
-
-    def _edit_signals(self) -> None:
-        # The message on screen is what the preview computes against, so a
-        # rule can be checked before it is saved.
-        dialog = SignalDialog(self.config.signals, self, self.theme,
-                              sample=self.interpret_view.current_frame())
-        if dialog.exec() != SignalDialog.Accepted:
-            return
-        self.config.data["signals"] = dialog.signals_config()
-        self.config.save()
-        self.interpret_view.refresh()
 
     def _edit_settings(self) -> None:
         dialog = ConfigDialog(self.config, self)
@@ -760,6 +1021,21 @@ class MainWindow(QMainWindow):
         self.metric_dropped.set_value(
             "{:,}".format(worker.dropped), "warning" if worker.dropped else "muted"
         )
+        # Frames arriving but not appearing must never be silent. A dropped
+        # batch was received, filtered and logged — it simply did not reach the
+        # views, and the operator has to be told which of those it was.
+        if worker.dropped > self._dropped_seen:
+            self._dropped_seen = worker.dropped
+            self.metric_dropped.setToolTip(
+                "Batches the views could not keep up with. Those frames were "
+                "still received, filtered and written to the capture log; they "
+                "are missing only from the tables and the analysis panel."
+            )
+            if not self.pause_button.isChecked():
+                self.status_message.setText(
+                    "Display behind — {:,} frames received and logged but not "
+                    "shown".format(worker.dropped)
+                )
 
         if final:
             self.metric_rate.set_value("—", "muted")

@@ -116,6 +116,37 @@ class AscParserSyntheticTests(unittest.TestCase):
             self.assertEqual(frame.dlc, length)
             self.assertEqual(len(frame.data), length)
 
+    def test_fd_line_without_a_message_name_is_parsed(self):
+        """The ASC FD name field is optional; python-can's writer omits it.
+
+        Regression: assuming it was always present shifted every later field by
+        one, and a 64-byte frame read back as carrying zero bytes — silently,
+        because the shifted length field still parsed as a number.
+        """
+        payload = " ".join("{:02X}".format(i) for i in range(64))
+        path = self._write(
+            "base hex  timestamps absolute\n"
+            "  0.000000 CANFD   2 Rx        123    1 0 f 64 {}"
+            "        0    0     3000        0        0        0\n".format(payload)
+        )
+        frames = parse_asc(path).frames
+        self.assertEqual(len(frames), 1)
+        self.assertTrue(frames[0].is_fd)
+        self.assertEqual(len(frames[0].data), 64)
+        self.assertEqual(frames[0].dlc, 64)
+        self.assertTrue(frames[0].is_bitrate_switch)
+
+    def test_fd_line_with_a_message_name_is_still_parsed(self):
+        payload = " ".join("{:02X}".format(i) for i in range(8))
+        path = self._write(
+            "base hex  timestamps absolute\n"
+            "  0.100000 CANFD   1 Rx   200  EngineData 1 0 8 8 {}\n".format(payload)
+        )
+        frames = parse_asc(path).frames
+        self.assertEqual(len(frames), 1)
+        self.assertEqual(frames[0].arb_id, 0x200)
+        self.assertEqual(frames[0].data, bytes(range(8)))
+
     def test_classic_frame_dlc_still_matches_its_payload(self):
         path = self._write("   0.6 1  100             Rx   d 3 01 00 01\n")
         frame = parse_asc(path).frames[0]

@@ -80,9 +80,39 @@ def _parse_classic(tokens: List[str], base: str, raw_line: str) -> Optional[CanF
     )
 
 
+def _is_hex_byte(token: str) -> bool:
+    return len(token) <= 2 and all(c in "0123456789abcdefABCDEF" for c in token)
+
+
+def _fd_fields(tokens: List[str], start: int) -> Optional[Tuple[bool, bool, int, int]]:
+    """Read <brs> <esi> <dlc> <len> at ``start``, if they are really there."""
+    if start + 4 > len(tokens):
+        return None
+    brs_token, esi_token, dlc_token, len_token = tokens[start:start + 4]
+    if brs_token not in ("0", "1") or esi_token not in ("0", "1"):
+        return None
+    try:
+        int(dlc_token, 16)
+        length = int(len_token, 10)
+    except ValueError:
+        return None
+    if not 0 <= length <= 64:
+        return None
+    data_tokens = tokens[start + 4:start + 4 + length]
+    if len(data_tokens) != length or not all(_is_hex_byte(t) for t in data_tokens):
+        return None
+    return (brs_token == "1", esi_token == "1", length, start + 4)
+
+
 def _parse_fd(tokens: List[str], base: str, raw_line: str) -> Optional[CanFrame]:
-    # <time> CANFD <channel> <dir> <id> <name> <brs> <esi> <dlc> <len> <bytes...>
-    if len(tokens) < 11:
+    # <time> CANFD <channel> <dir> <id> [<name>] <brs> <esi> <dlc> <len> <bytes...>
+    #
+    # The message-name field is optional: Vector writes it, python-can's
+    # ASCWriter omits it entirely. Assuming it was always present shifted every
+    # later field by one, which read a 64-byte CAN FD frame as carrying zero
+    # bytes — silently, because the shifted length field happened to parse.
+    # Both layouts are tried and the one that actually validates is used.
+    if len(tokens) < 9:
         return None
     timestamp = float(tokens[0])
     channel = tokens[2]
@@ -90,13 +120,12 @@ def _parse_fd(tokens: List[str], base: str, raw_line: str) -> Optional[CanFrame]
         arb_id, extended = _parse_id(tokens[4], base)
     except ValueError:
         return None
-    try:
-        brs = tokens[6] == "1"
-        esi = tokens[7] == "1"
-        length = int(tokens[9], 10)
-    except ValueError:
+
+    fields = _fd_fields(tokens, 5) or _fd_fields(tokens, 6)
+    if fields is None:
         return None
-    payload = bytes(int(t, 16) for t in tokens[10:10 + length])
+    brs, esi, length, data_at = fields
+    payload = bytes(int(t, 16) for t in tokens[data_at:data_at + length])
     if len(payload) != length:
         return None
     # The ASC FD line carries both the 0-15 DLC code (token 8) and the byte

@@ -11,6 +11,7 @@ from __future__ import annotations
 import csv
 import json
 import os
+import threading
 import time
 from typing import List, Optional
 
@@ -96,10 +97,15 @@ class CaptureWorker(QObject):
         self._running = False
         self._paused = False
         self._pending = 0
+        # Incremented on this worker's thread and decremented on the UI thread,
+        # so the counter itself needs a lock: "-= 1" is not atomic under the GIL.
+        self._pending_lock = threading.Lock()
 
         self.received = 0
         self.accepted = 0
         self.dropped = 0
+        #: Frames kept and logged but not shown, because the display was paused.
+        self.display_skipped = 0
 
     # -- control (called from the UI thread) ----------------------------
 
@@ -112,11 +118,38 @@ class CaptureWorker(QObject):
     def set_filters(self, filter_set: FilterSet) -> None:
         self._filters = filter_set
 
+    def reset_counters(self) -> None:
+        """Zero the capture statistics without disturbing the receive loop.
+
+        Used by Clear, which discards what has been collected so far; leaving
+        the counters running would make them describe frames the operator can
+        no longer see anywhere. The pipeline depth is deliberately *not* reset:
+        it tracks batches genuinely in flight to the UI, and zeroing it would
+        let more batches through than the UI has acknowledged.
+        """
+        self.received = 0
+        self.accepted = 0
+        self.dropped = 0
+        self.display_skipped = 0
+
+    @property
+    def pending(self) -> int:
+        """Batches delivered to the UI but not yet acknowledged."""
+        with self._pending_lock:
+            return self._pending
+
     @Slot()
     def batch_consumed(self) -> None:
-        """UI acknowledges a delivered batch, freeing pipeline capacity."""
-        if self._pending > 0:
-            self._pending -= 1
+        """UI acknowledges a delivered batch, freeing pipeline capacity.
+
+        Deliberately safe to call from the UI thread directly. ``run()`` is a
+        blocking loop, so this worker's thread never reaches its event loop and
+        a *queued* invocation of this slot would never execute — the pipeline
+        would fill to ``_max_pending`` and drop every batch from then on.
+        """
+        with self._pending_lock:
+            if self._pending > 0:
+                self._pending -= 1
 
     # -- worker body ----------------------------------------------------
 
@@ -151,7 +184,13 @@ class CaptureWorker(QObject):
 
                 if frame is not None:
                     self.received += 1
-                    if not self._paused and self._filters.accepts(frame):
+                    # Pause is deliberately NOT applied here. Pause freezes the
+                    # display; it must not stop the frame being accepted or
+                    # written to the capture log. Discarding here meant a
+                    # recording taken while paused had a silent hole in it,
+                    # which for a tool whose whole job is observing a bus is
+                    # the worst possible way to lose data.
+                    if self._filters.accepts(frame):
                         self.accepted += 1
                         batch.append(frame)
                 elif self._source.exhausted:
@@ -184,9 +223,19 @@ class CaptureWorker(QObject):
                 self._logger = None
                 self.errorOccurred.emit("Logging stopped: {}".format(exc))
 
-        if self._pending >= self._max_pending:
-            # UI is behind: drop this batch instead of queueing without bound.
-            self.dropped += len(batch)
+        if self._paused:
+            # Frozen display: the frames were received, filtered and logged;
+            # they are simply not delivered to the views. Buffering them
+            # instead would grow without bound for as long as the operator
+            # left it paused.
+            self.display_skipped += len(batch)
             return
-        self._pending += 1
+
+        with self._pending_lock:
+            if self._pending >= self._max_pending:
+                # UI is behind: drop this batch instead of queueing without
+                # bound. This must stay recoverable — see batch_consumed.
+                self.dropped += len(batch)
+                return
+            self._pending += 1
         self.framesReady.emit(batch)

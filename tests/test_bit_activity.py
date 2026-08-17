@@ -203,11 +203,16 @@ class BitMatrixTests(unittest.TestCase):
         self.view.resize(1100, 700)
         self.view.show()
         self._show([bytes(range(8))] * 20)
-        tall = self.view.payload_detail.height()
+        # sizeHint rather than height(): it reflects what the layout will ask
+        # for from the visible children, without depending on when Qt happens
+        # to have run the next layout pass.
+        tall = self.view.payload_detail.sizeHint().height()
         self.assertGreater(tall, 0)
+
         self.view.bits_toggle.setChecked(False)
+        self.view.payload_detail.layout().activate()
         self.app.processEvents()
-        self.assertLess(self.view.payload_detail.height(), tall)
+        self.assertLess(self.view.payload_detail.sizeHint().height(), tall)
         self.view.hide()
 
     def test_matrix_columns_align_with_the_strip(self):

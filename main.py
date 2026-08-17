@@ -15,7 +15,7 @@ import argparse
 import os
 import sys
 
-from cansniff.config import CONFIG_FILENAME, Config
+from cansniff.config import Config, default_config_path
 
 
 def parse_args(argv=None) -> argparse.Namespace:
@@ -24,8 +24,10 @@ def parse_args(argv=None) -> argparse.Namespace:
         description="Passive CAN bus sniffer (receive-only).",
     )
     parser.add_argument(
-        "--config", default=CONFIG_FILENAME,
-        help="path to the JSON configuration (created on first run)",
+        "--config", default=None,
+        help="path to the JSON configuration (created on first run); defaults "
+             "to ./sniffer_config.json if present, else the per-user "
+             "configuration directory for this platform",
     )
     parser.add_argument(
         "--capture", default=None,
@@ -44,14 +46,15 @@ def parse_args(argv=None) -> argparse.Namespace:
 
 def main(argv=None) -> int:
     args = parse_args(argv)
+    config_path = args.config or default_config_path()
 
     if args.reset_config:
-        Config.defaults(args.config).save()
+        Config.defaults(config_path).save()
 
     try:
-        config = Config.load(args.config)
+        config = Config.load(config_path)
     except Exception as exc:
-        sys.stderr.write("Could not read configuration {}: {}\n".format(args.config, exc))
+        sys.stderr.write("Could not read configuration {}: {}\n".format(config_path, exc))
         return 2
 
     if args.capture:

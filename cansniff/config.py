@@ -11,9 +11,47 @@ from __future__ import annotations
 import copy
 import json
 import os
+import sys
 from typing import Any, Dict, List
 
 CONFIG_FILENAME = "sniffer_config.json"
+
+#: Directory name used under the platform's per-user configuration root.
+APP_DIRNAME = "cansniff"
+
+
+def user_config_dir() -> str:
+    """Per-user configuration directory for this platform.
+
+    Linux follows the XDG base directory spec; Windows uses APPDATA; anything
+    else falls back to a dotted directory in the home folder. Built with
+    ``os.path.join`` throughout so no separator is ever hard-coded.
+    """
+    if sys.platform.startswith("win"):
+        root = os.environ.get("APPDATA") or os.path.join(
+            os.path.expanduser("~"), "AppData", "Roaming")
+        return os.path.join(root, APP_DIRNAME)
+    if sys.platform == "darwin":
+        return os.path.join(os.path.expanduser("~"), "Library",
+                            "Application Support", APP_DIRNAME)
+    root = os.environ.get("XDG_CONFIG_HOME") or os.path.join(
+        os.path.expanduser("~"), ".config")
+    return os.path.join(root, APP_DIRNAME)
+
+
+def default_config_path() -> str:
+    """Where the configuration lives when none was given on the command line.
+
+    A ``sniffer_config.json`` beside the working directory wins if it already
+    exists. That keeps every existing install working exactly as before —
+    relocating somebody's saved filters and signal rules without asking would
+    be a poor trade for tidiness. Fresh installs get the platform directory,
+    which is what a packaged Linux desktop application is expected to use.
+    """
+    local = os.path.abspath(CONFIG_FILENAME)
+    if os.path.exists(local):
+        return local
+    return os.path.join(user_config_dir(), CONFIG_FILENAME)
 
 DEFAULTS: Dict[str, Any] = {
     "$comment": "CAN sniffer configuration. Passive/receive-only. Edit freely; "
@@ -56,6 +94,12 @@ DEFAULTS: Dict[str, Any] = {
         # Retired in whole buckets, so the real span is 512-1024 frames and the
         # panel reports the actual figure. 0 turns per-bit tracking off.
         "bit_window": 512,
+        # Plot workspace. The window is how many seconds back from the newest
+        # frame to draw; 0 draws the whole retained capture. A long capture
+        # spans hundreds of seconds and collapses into an unreadable band when
+        # drawn end to end, so a minute is the default.
+        "plot_window_s": 60.0,
+        "plot_block_size": 2,       # bytes per block in the plot's block strip
         # Decoder columns, in display order. Toggle "enabled" to show/hide.
         "decoders": [
             # hex_be is off by default: the always-present "Raw" column already
@@ -92,9 +136,25 @@ DEFAULTS: Dict[str, Any] = {
     #   2. if at least one "allow" rule is enabled, the frame must match one
     #   3. otherwise the frame is kept
     "filters": [],
-    # Physical-value rules: raw -> value * scale + offset, shown in the
-    # "Physical" column of the interpretation table.
-    "signals": [],
+    # "dbc.path" and "signals" (a single database path, and a flat list of
+    # byte-offset scaled-value rules) are the pre-unification config keys.
+    # Nothing writes them anymore — decoding is one path now, through
+    # "database" below — but neither is in DEFAULTS: an old install's config
+    # file still carries them (unknown keys survive _deep_merge untouched),
+    # and _load_profile_store reads them exactly once, opportunistically, to
+    # migrate into a profile. See analysis/signals.ProfileStore.migrate_legacy.
+    #
+    # The unified Signal Database: every known profile (a DBC file, or a
+    # freestanding collection of signals with no file yet) and which one, if
+    # any, is currently decoding captured traffic. "migrated" guards the
+    # one-time move of "dbc"/"signals" above into a profile here — once it has
+    # run, an empty profile list means the operator emptied it on purpose, not
+    # that migration has not happened yet.
+    "database": {
+        "profiles": [],
+        "active": "",
+        "migrated": False,
+    },
     "ui": {
         "relative_timestamps": True,
         "highlight_changed_bytes": True,
@@ -197,8 +257,9 @@ class Config:
         return rules
 
     @property
-    def signals(self) -> List[Dict[str, Any]]:
-        return self.data.setdefault("signals", [])
+    def database_section(self) -> Dict[str, Any]:
+        return self.data.setdefault(
+            "database", {"profiles": [], "active": "", "migrated": False})
 
     def enabled_decoders(self) -> List[str]:
         out = []

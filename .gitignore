@@ -12,3 +12,14 @@ captures/
 build/
 dist/
 *.spec
+
+# Test / build artifacts
+.pytest_cache/
+*.egg-info/
+.eggs/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

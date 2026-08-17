@@ -261,7 +261,6 @@ class ColumnOrderInTableTests(QtCase):
         headers = self._headers()
         self.assertEqual(headers[2], "u16 LE")
         self.assertEqual(headers[:2], ["Bytes", "Raw"])
-        self.assertEqual(headers[-1], "Scaled value")
 
     def test_grid_type_column_is_gone(self):
         headers = self._headers()

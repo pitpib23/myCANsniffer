@@ -1,5 +1,9 @@
 # CAN Sniffer — passive / receive-only
-# Python 3.9 compatible pins.
+# Python 3.9 compatible pins. Also declared in pyproject.toml; this file stays
+# for `pip install -r`, which is what the README tells first-time users to run.
 
-PySide6>=6.6,<6.9      # Qt UI
-python-can>=4.2,<5     # CAN receive layer (listen-only usage only)
+PySide6>=6.6,<6.9      # Qt UI. PySide6-Addons provides QtCharts (signal plots).
+python-can>=4.2,<5     # CAN receive layer (listen-only usage only).
+                       # Also supplies the ASC and candump readers/writers.
+cantools>=39,<41       # Read-only DBC parsing/decoding. Only decode is wrapped;
+                       # its frame-encoding API is never surfaced.

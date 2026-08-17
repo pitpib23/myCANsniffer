@@ -38,7 +38,7 @@ On first run `sniffer_config.json` is created next to `main.py`.
 ## The interface
 
 ```
-┌ top bar ────── Start · Stop · Pause ── source · Open · Capture filters · Scaled values · Settings ┐
+┌ top bar ── Start · Stop · Pause · Clear ── source · Database · Open · Export · Filters · Settings ┐
 ├────┬─────────────────────────────────────────────────────────────────────────────────────────────┤
 │ ▤  │ MESSAGES                                                                                    │
 │Msgs│ [Search ID or payload…] [More filters]                              Showing 1 of 2          │
@@ -46,7 +46,7 @@ On first run `sniffer_config.json` is created next to `main.py`.
 │ ⎍  │ Filters  [Search: 101 ×]  [Clear all]                                                       │
 │Trce│─────────────────────────────── drag to resize ──────────────────────────────────────────────│
 │    │           0    1    2    3    4    5    6    7                                              │
-│    │ 0x101    81   00   03  [40] [4C] [CC] [CD]  00     Last seen  [ ] Freeze    Copy table      │
+│    │ 0x101    81   00   03  [40] [4C] [CC] [CD]  00     Last seen  [ ] Hold      Copy table      │
 │    │                        └──── 3-6 ────┘                                                      │
 │    │ [Ch 1][11-bit][8 bytes][3.0 Hz][1,332 frames]                            bytes 3-6         │
 │    │ ▾ Bit activity   last 512 frames   rarely ▁▂▃▅▇ every frame                                  │
@@ -54,7 +54,7 @@ On first run `sniffer_config.json` is created next to `main.py`.
 │    │       ...  ░    ·    ░    ▓    ▓    █    █    ·                                             │
 │    │     bit 0  █    ·    ░    ▓    ▓    █    █    ·                                             │
 │    │ BLOCK SIZE [1│2│4│8]  BYTES 0 to 63                                          Columns         │
-│    │ Bytes   Raw   <one column per decoder>   Scaled value                                       │
+│    │ Bytes   Raw   <one column per decoder>                                                      │
 ├────┴─────────────────────────────────────────────────────────────────────────────────────────────┤
 │ Received · Shown · Dropped · IDs · Rate                    status                 [receive-only]  │
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘
@@ -141,7 +141,10 @@ One row per block, one column per decoder.
 | `Bytes` | **inclusive** payload byte range of this block, e.g. `3-6` covers bytes 3, 4, 5 and 6 |
 | `Raw` | the bytes of that block |
 | decoder columns | one per enabled decoding |
-| `Scaled value` | any scale/offset signal rule that matches this block |
+
+Named, scaled values live in the **Database** window and the Signals tab
+instead — see below. This table is raw decoding only, with no database
+involved, so it means the same thing whether or not one is applied.
 
 Every block the payload can yield is listed: the aligned grid (bytes 0-1, 2-3,
 4-5 …) merged with a block starting at every byte (0-1, 1-2, 2-3 …), with
@@ -157,7 +160,9 @@ Controls above the table (all persisted to the config file):
 - **Bytes _n_ to _m_** — restrict decoding to part of the payload. Both ends
   are inclusive, matching the byte numbers on the strip.
 - **Columns** — pick which decodings get a column.
-- **Freeze** — stop the panel updating so a value can be read off a live bus.
+- **Hold** — pin *this panel* to the message on screen while the tables keep
+  filling, so a value can be read off a live bus. Distinct from **Pause** in the
+  top bar, which freezes every view at once.
 - **Copy table** — the whole table as tab-separated text.
 
 The panel presents data only. It does not score, rank, recommend or conclude:
@@ -171,7 +176,7 @@ values, not something the tool will assert.
 | --- | --- |
 | `F5` / `F6` | Start / Stop capture |
 | `F7` | Pause or resume the display |
-| `Ctrl+L` | Clear all views |
+| `Ctrl+L` | Clear all views (also the **Clear** button) |
 | `Ctrl+F` | Focus the search box |
 
 ### Available decoders
@@ -252,7 +257,7 @@ and they cannot hide frames already captured. Evaluation order:
 3. otherwise the frame is received.
 
 The editor lists the rules on the left and edits one at a time on the right,
-the same shape as **Scaled values**. Because the order above means a rule can
+the same master/detail shape as the **Database** window. Because the order above means a rule can
 match and the frame still be dropped by a discard rule elsewhere, it reports
 both — the rule's own verdict and the whole set's — against the message on
 screen:
@@ -268,33 +273,177 @@ rather than a range lives behind **ID mask matching**.
 
 ---
 
-## Scaled values
+## Signal Database
 
-**Scaled values** turns raw bytes into physical ones:
-`value = decoded_raw × scale + offset`.
-A rule matches the block starting at `from byte` that is `length` bytes long,
-optionally restricted to one CAN ID and channel. Matching values appear in the
-`Scaled value` column.
-
-The editor lists the rules on the left and edits one at a time on the right,
-with a **preview computed from the message currently on screen** — so a rule
-can be checked before it is saved:
+**Database** is one window for everything that turns raw bytes into named,
+scaled values — a `.dbc` file's signals and the old free-form "scaled value"
+rules are both just **Signals** now, edited the same way:
 
 ```
-0x101  bytes 3-6  =  40 4C CC CD  ->  Level = 3.20 m
+┌──────────────┬──────────────────────────────────────────────────────┐
+│ Profiles     │ Signals in industrial.dbc          [Add][Duplicate]   │
+│              │                                     [Remove Signal]   │
+│ ● industrial │ 0x100  Engine                                        │
+│   test.dbc   │   Rpm  0..15                                         │
+│   Any ID     │ Any ID                                               │
+│   FreeFlag   │   FreeFlag  0..7                                     │
+│              ├──────────────────────────────────────────────────────┤
+│              │ Name       [ Rpm______________ ]                     │
+│              │ CAN ID     [ 0x100 ] extended  Channel [ any ]        │
+│              │ Bits       start [ 0 ] length [ 16 ]                  │
+│              │ Byte order Intel   [ ] signed   read as Integer       │
+│              │ Value      raw × [ 0.25 ] + [ 0 ]                     │
+│              │ PREVIEW    0x100  13 8C ...  ->  Rpm = 8964.75 rpm    │
+├──────────────┴──────────────────────────────────────────────────────┤
+│ [New DBC][Import DBC][Export DBC][Remove DBC]  [Unapply][Use Database]│
+└────────────────────────────────────────────────────────────────────┘
 ```
 
-Two things it will not let you get wrong:
+- A **profile** is one document — an imported `.dbc`, or an empty one from
+  **New DBC**. `●` marks the one currently decoding traffic.
+- **Signals** grouped by CAN ID, the way a `.dbc` groups them by message; a
+  signal with no CAN ID (the old "any ID" scaled-value rules) sits under its
+  own **Any ID** group, since a `.dbc` has no way to describe one.
+- One field set covers both cases: **start bit** and **length** are
+  bit-precise (matching `.dbc`, and — unlike the old byte-only scaled values —
+  able to read a single flag bit out of a byte, not just a whole byte); **read
+  as** chooses Integer / Float32 / Float64, or the legacy **BCD** encoding
+  kept for rules that used it before.
+- **Selecting a profile is not the same as using it.** Clicking through the
+  list only looks; **Use Database** is the one action that makes a profile
+  decode captured traffic, and **Unapply Database** stops any database
+  decoding without removing the profile — it stays in the list, ready to use
+  again.
+- Every action — adding a signal, applying a profile, exporting — takes effect
+  immediately. There is no OK/Cancel to remember to press.
+- **Remove DBC** removes a profile from this application only; the `.dbc` file
+  on disk, if any, is never touched.
+- There is exactly one place an applied signal's value shows up live: the
+  **Signals** tab, decoded through the applied database. An "any ID" signal
+  has no CAN ID to build that decode path from, so it only ever shows a value
+  in this window's own preview — the same is true of a signal using the
+  legacy **BCD** encoding.
 
-- **Read as** offers only decoders that produce a number. A text-only decoder
-  (`uint8 a/b`, `int8 a/b`, `ASCII`) has nothing to multiply, so a rule using
-  one would save happily and then produce nothing at all.
-- A length the decoder cannot read is flagged as you type — `float32 BE` reads
-  exactly 4 bytes, so a 2-byte rule is called out immediately rather than
-  after pressing OK.
+### What export can and cannot represent
 
-`Scale` and `offset` are free text, not spin boxes, so a genuine `1/128 =
-0.0078125` is expressible and a scale of 1 reads as `1`.
+**Export DBC** writes the profile's message-bound signals to a `.dbc`,
+validated first — bits that do not fit the message, a scale of 0, or an
+inverted range are refused with a reason rather than written out. Two things a
+`.dbc` genuinely cannot express are excluded and named in a warning rather
+than silently dropped:
+
+- a signal with no CAN ID ("any ID") — every `.dbc` signal must belong to one
+  message;
+- a signal using the legacy **BCD** encoding — packed decimal digits are not a
+  linear function of the raw bits.
+
+A channel restriction is also not something `.dbc` can express, so it exports
+but is warned about: the signal applies to every channel once written out.
+
+### What this cannot do
+
+`cantools` can build a frame's bytes from signal values, which is the first
+half of transmitting one. That API is not called, not wrapped and not
+re-exported anywhere in this window: signals are read with `load_file` and
+`Message.decode`, and written with `dump_file`. Editing a database changes a
+description of a bus, not the bus.
+
+---
+
+## The plot
+
+The **Plot** workspace draws one value over time, selected the way the block
+table is read:
+
+```
+BLOCK SIZE [1│2│4│8]   READ AS [uint32 BE ▾]   WINDOW [10s│30s│60s│5m│All]
+
+          0    1    2    3    4    5    6    7
+0x101    81   00   03  [40] [4C] [CC] [CD]  00     ← click a byte here
+                       └───── 3-6 ─────┘
+```
+
+- **Click a byte in the payload strip** to plot the block starting there. The
+  strip is the selector: it already shows the real bytes and brackets the
+  selection, so there is no second row of block buttons to keep in step with
+  it. If a full block would run off the end of the payload the start is pulled
+  back — `[4-7]` for a 4-byte block clicked at byte 7 — rather than the block
+  being quietly shortened, because the width is what the decoder reads.
+- **Block size** sets how many bytes that click takes; changing it keeps the
+  byte you were looking at.
+- **Read as** offers only the decoders that fit the selected block's width, so
+  a reading that could never produce a value is not offered at all.
+- **Window** is how far back from the newest frame to draw, defaulting to the
+  last 60 seconds. A capture running for several minutes collapses into an
+  unreadable band when drawn end to end.
+- With a database loaded, a **Signal** list appears alongside and plots named
+  signals instead.
+
+The note beside the tabs reports what is actually on the axis — a 60-second
+window over a 4-second capture says so rather than claiming a minute.
+
+---
+
+## ISO-TP
+
+The **ISO-TP** workspace answers a different question than the other tabs: not
+"what does this message mean" but *"which CAN IDs on this bus actually use
+ISO-TP, and what evidence says so"*. It looks at the whole capture, not just
+the selected message — a single periodic sensor frame parses as a perfectly
+valid ISO-TP Single Frame, and the only way to tell it apart from a real
+diagnostic channel is to see it next to everything else on the bus.
+
+```
+ISO-TP EVIDENCE BY CAN ID
+
+CAN ID   Peer   Frames   SF   FF   CF   FC   Other  Transfers  Complete  Evidence
+0x7E8    0x7E0     48    12   12   24    —      —        24        24    Strong
+0x100      —    1,332  1332    —    —    —      —     1,332     1,332    Weak
+
+TRANSFERS ON 0x7E8
+
+Start     Duration  Bytes  Frames  Status     Diagnostic              Payload
+5.014s    0.010s    20     3       Complete   ReadDataByIdentifier…   62 F1 90 …
+
+FRAMES IN THIS TRANSFER
+
+Time     CAN ID  DLC  Type  PCI     Seq/Flow  Declared  Data          Extra  Raw frame
+5.014s   0x7E8   8    FF    10 14   —         20        62 F1 90 57   —      10 14 62 F1 …
+```
+
+Three levels, top to bottom: pick a CAN ID in the evidence summary, its
+transfers appear below; pick a transfer, its raw frames appear below that.
+Selection survives sorting and filtering — the transfer table never silently
+shows a different ID's data than the one highlighted above it.
+
+**Evidence is a label, never a percentage.** A capture can only show that
+multi-frame machinery was or wasn't exercised; a number would dress that up as
+more certainty than a sniffer can have.
+
+- **Strong** — a First Frame was followed by correctly numbered Consecutive
+  Frames that reassembled to the declared length, ideally with a Flow Control
+  observed from another ID.
+- **Possible** — multi-frame frames are present, but something about the
+  sequence didn't complete cleanly (an orphan Consecutive Frame, a First Frame
+  with no continuation, a sequence-number error).
+- **Weak** — every candidate frame is a Single Frame. This is the ceiling for
+  an ID that never shows multi-frame behaviour, however many such frames it
+  sends: repetition of a guess is still a guess. `0x7E0` and `0x7E8` earn
+  nothing from their numeric value alone — an ID has to demonstrate multi-frame
+  behaviour in the capture to rank above Weak, common diagnostic addresses
+  included.
+- **None** — no frame on the ID has an ISO-TP PCI nibble at all.
+
+Hovering any cell in a row shows the reasoning the label was built from.
+
+**Nothing is hidden.** A frame's payload is split into what the ISO-TP reading
+used (`Data`) and what it didn't (`Extra`) — a Single Frame reading
+`01 00 03` shows `Data = 00` and `Extra = 03` rather than quietly dropping the
+third byte. `Raw frame` is always the bytes exactly as captured.
+
+Flow Control frames are **observed and reported only**. This tab — like the
+rest of the application — never sends one, never sends an ISO-TP request, and
+never probes for a response.
 
 ---
 
