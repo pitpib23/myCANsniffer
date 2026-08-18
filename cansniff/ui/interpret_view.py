@@ -65,10 +65,60 @@ _ISOTP_MIN_INTERVAL = 1.5
 #: Disclosure caption; {} carries the chevron for the open/closed state.
 _BITS_LABEL = "{}  Bit activity"
 
-#: Analysis workspaces. Blocks is first and default: it needs no database, so
-#: the panel is unchanged for undocumented traffic.
-_WORKSPACES = ["Blocks", "Signals", "Range", "Plot", "ISO-TP"]
+#: Analysis modes. Stable identifiers -- MainWindow, tests and the
+#: `self.workspace` QStackedWidget all address a page by one of these,
+#: never by a position in whichever sub-navigation control happens to be
+#: showing it.
 BLOCKS, SIGNALS, RANGE, PLOT, ISOTP = range(5)
+
+#: The two primary sections a message/frame is examined under -- exactly
+#: MainWindow's own Messages/Trace nav rail destinations, never a second,
+#: independent navigation concept. Every mode belongs to exactly one.
+MESSAGES, TRACE = "messages", "trace"
+
+#: Children offered under each section, in the order their own
+#: sub-navigation control shows them.
+_SECTION_MODES = {
+    MESSAGES: (RANGE, PLOT, ISOTP),
+    TRACE: (BLOCKS, SIGNALS),
+}
+_MODE_SECTION = {
+    mode: section for section, modes in _SECTION_MODES.items() for mode in modes
+}
+_MODE_LABELS = {
+    RANGE: "Range", PLOT: "Plot", ISOTP: "ISO-TP",
+    BLOCKS: "Blocks", SIGNALS: "Signals",
+}
+_SECTION_TITLES = {MESSAGES: "Messages", TRACE: "Trace"}
+
+#: Child shown on first entering a section this session, and whenever no
+#: other child has been chosen there yet -- see InterpretView.set_section.
+#: Range over Blocks for Messages: it is also database-free, and "what value
+#: did this message's bytes take across the frames observed" is exactly what
+#: the aggregate/message-level section is for. Trace keeps Blocks: decoding
+#: one exact frame's payload is what an individual-frame section is for.
+_DEFAULT_MODE = {MESSAGES: RANGE, TRACE: BLOCKS}
+
+
+class _ModeSelector:
+    """Facade over InterpretView's two per-section Segmented controls.
+
+    A caller that only cares which analysis child is active -- tests,
+    chiefly -- still addresses it with one flat mode constant (BLOCKS ..
+    ISOTP), the same as when a single five-way Segmented held all of them.
+    Which of the two section-specific controls is actually showing that mode
+    is InterpretView's own business.
+    """
+
+    def __init__(self, view: "InterpretView") -> None:
+        self._view = view
+
+    def set_current(self, mode: int) -> None:
+        self._view._on_workspace_changed(mode)
+
+    def current(self) -> int:
+        return self._view._mode
+
 
 #: QSS gives QHeaderView::section 10px of padding on each side; the rest is
 #: headroom so a bold header label never lands on the clipping boundary.
@@ -141,29 +191,85 @@ class InterpretView(QWidget):
         summary_layout.addWidget(self.payload_detail, 2, 1)
         root.addWidget(summary)
 
-        # Card 2: the analysis workspace. Blocks is first and is the default,
-        # so the panel behaves exactly as before for traffic with no database.
+        # Card 2: the analysis workspace. Which children are even on offer
+        # depends on the section MainWindow's own Messages/Trace nav is
+        # showing -- see set_section, called from there. That stays the
+        # window's only primary navigation concept; this card only adds a
+        # caption plus a sub-navigation control scoped to that section,
+        # rather than presenting five equally-weighted tabs of its own.
+        self._section = MESSAGES
+        #: Child last active in each section this session, so leaving a
+        #: section and coming back returns to where the operator left it
+        #: instead of always resetting to the section's default.
+        self._last_mode = dict(_DEFAULT_MODE)
+        self._mode = _DEFAULT_MODE[MESSAGES]
+
         interpretation = QFrame()
         interpretation.setObjectName("Panel")
         table_layout = QVBoxLayout(interpretation)
         table_layout.setContentsMargins(SPACE_LG, SPACE_MD, SPACE_LG, SPACE_MD)
         table_layout.setSpacing(SPACE_MD)
 
-        self.view_tabs = Segmented(_WORKSPACES, 0)
-        self.view_tabs.setToolTip(
-            "Blocks: every decoding of every payload block.\n"
-            "Signals: named values, when a database is loaded.\n"
-            "Range: what value each byte actually took.\n"
-            "Plot: how a value moves over time."
-        )
-        self.view_tabs.changed.connect(self._on_workspace_changed)
-
         tab_row = QHBoxLayout()
-        tab_row.setSpacing(SPACE_MD)
-        tab_row.addWidget(self.view_tabs)
+        tab_row.setSpacing(SPACE_SM)
+
+        # Same idiom as "Block size" beside its own Segmented below: a small
+        # caption naming what the control to its right belongs to.
+        self.section_caption = SectionLabel(_SECTION_TITLES[self._section], self.theme)
+        self.section_caption.setToolTip(
+            "Which section this analysis belongs to -- set by the Messages/"
+            "Trace nav on the left, not chosen here."
+        )
+        tab_row.addWidget(self.section_caption)
+
+        self.view_tabs_messages = Segmented(
+            [_MODE_LABELS[m] for m in _SECTION_MODES[MESSAGES]], 0)
+        self.view_tabs_messages.setToolTip(
+            "Range: what value each byte actually took across every frame "
+            "observed for this message.\n"
+            "Plot: how a value moves over time.\n"
+            "ISO-TP: which CAN IDs in the whole capture look like ISO-TP."
+        )
+        self.view_tabs_trace = Segmented(
+            [_MODE_LABELS[m] for m in _SECTION_MODES[TRACE]], 0)
+        self.view_tabs_trace.setToolTip(
+            "Blocks: every decoding of every block of this exact frame's "
+            "payload.\n"
+            "Signals: named values, when a database is loaded."
+        )
+        for section, control in ((MESSAGES, self.view_tabs_messages),
+                                  (TRACE, self.view_tabs_trace)):
+            control.changed.connect(
+                lambda local, section=section: self._on_workspace_changed(
+                    _SECTION_MODES[section][local]))
+
+        # CurrentPageStack, not a plain QStackedWidget: Messages' control has
+        # three buttons and Trace's has two, and only the active section's
+        # own children should ever take up room here -- a Signals or Blocks
+        # button must never appear while Messages is the active section.
+        self.view_tabs_stack = CurrentPageStack()
+        self.view_tabs_stack.addWidget(self.view_tabs_messages)
+        self.view_tabs_stack.addWidget(self.view_tabs_trace)
+        tab_row.addWidget(self.view_tabs_stack)
+
+        # The one flat mode constant (BLOCKS .. ISOTP) is the stable thing
+        # callers address; which of the two Segmented controls above is
+        # actually showing it is this facade's own business -- see
+        # _ModeSelector.
+        self.view_tabs = _ModeSelector(self)
+
         tab_row.addStretch(1)
         self.workspace_note = QLabel("")
         self.workspace_note.setObjectName("Muted")
+        # Ignored, not the default Preferred: its text is a per-mode status
+        # line (frame counts, ISO-TP survey summaries, ...) with no natural
+        # upper bound, and a plain QLabel's minimumSizeHint is its full,
+        # unwrapped text -- left at the default, a long note silently made
+        # the whole tab row (and everything containing it, up to the
+        # top-level window) demand however much width THAT particular
+        # mode's text happened to need. Same idiom as isotp_view's own
+        # evidence_reason label.
+        self.workspace_note.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         tab_row.addWidget(self.workspace_note)
         table_layout.addLayout(tab_row)
 
@@ -186,6 +292,11 @@ class InterpretView(QWidget):
         root.addWidget(interpretation, 1)
 
         self._sync_controls()
+        # Bring the workspace page, the Blocks-only controls' visibility and
+        # the sub-navigation's own checked button into step with the
+        # Messages/Range default set above -- construction only adds the
+        # widgets, it does not otherwise activate any of them.
+        self._on_workspace_changed(self._mode)
 
     # ------------------------------------------------------------------
     # construction
@@ -270,6 +381,14 @@ class InterpretView(QWidget):
         self.selection_label = QLabel("")
         self.selection_label.setFont(self.theme.mono_font(0.5, bold=True))
         self.selection_label.setStyleSheet("color: {};".format(self.theme.hex("accent")))
+        # Ignored: whether this shows text at all -- and how much -- depends
+        # on the active analysis mode (Blocks/Plot bracket a byte range here;
+        # Range/Signals/ISO-TP leave it empty). Left at the default Preferred
+        # policy, that made this whole card's minimum width -- and so the
+        # top-level window's -- shift by however wide the current bracket
+        # label happens to be, purely from switching modes. Same idiom as
+        # workspace_note below.
+        self.selection_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         row.addWidget(self.selection_label)
 
         self.chip_channel = Chip("", "muted", self.theme)
@@ -553,7 +672,7 @@ class InterpretView(QWidget):
 
         self.plot = SignalPlot(self.theme)
         layout.addWidget(self.plot, 1)
-        return container
+        return self._scrollable_page(container)
 
     def _build_isotp(self) -> QWidget:
         # Capture-wide, unlike the other workspaces: the question this page
@@ -562,7 +681,56 @@ class InterpretView(QWidget):
         # so arriving here from a selection still lands where expected.
         self.isotp = IsoTpView(self.theme)
         self.isotp.frameActivated.connect(self._on_isotp_frame_activated)
-        return self.isotp
+        return self._scrollable_page(self.isotp)
+
+    def _scrollable_page(self, content: QWidget) -> QScrollArea:
+        """Wrap a workspace page that can genuinely need more room than the
+        viewport gives it, so the overflow scrolls instead of either
+        clipping below the window's bottom edge or dragging the top-level
+        window's minimum size up to fit it.
+
+        The second half matters as much as the first: ``self.workspace``
+        (a CurrentPageStack, see widgets.py) reports whichever page is
+        current's own minimumSizeHint() as its own -- by design, so the
+        stack is never held hostage to the *largest* page while showing a
+        small one. Plot's chooser row and ISO-TP's three stacked tables each
+        have a real, largely fixed minimum footprint of their own (block/
+        window controls; a splitter whose panes each refuse to show fewer
+        than a handful of rows) that is fine in itself but, reported
+        directly as "the current page's minimum", would still propagate
+        through that stack, through every ancestor layout, up to the
+        QMainWindow -- which, being top-level, has Qt apply its own layout's
+        computed minimum size to the *native window* (WM_GETMINMAXINFO and
+        friends). A maximized or fullscreen window whose current geometry no
+        longer satisfies that freshly-grown minimum gets resized by the
+        window manager to fit it -- exactly the "selecting a tool
+        un-maximizes or resizes the window" bug this wrapper exists to
+        prevent. A QScrollArea's own minimumSizeHint is small and constant
+        regardless of its contents, so wrapping the page here is what keeps
+        "the current page's own minimum" -- the thing CurrentPageStack
+        (deliberately) still reports upward -- always small too.
+
+        Only Plot and ISO-TP use this. Blocks, Signals and Range are a
+        QTableWidget behind an empty-state page, and a QTableWidget already
+        is a scroll area for its own rows -- wrapping it in a second one
+        would just nest two scrollbars over the same content for no benefit.
+        Plot's chooser row and ISO-TP's stacked evidence/transfers/frames
+        tables are different: their own natural size can exceed the viewport
+        as a *whole page*, not row-by-row, which is exactly what an outer
+        scroll area is for.
+        """
+        scroll = QScrollArea()
+        scroll.setObjectName("WorkspaceScroll")
+        scroll.setFrameShape(QFrame.NoFrame)
+        # Resizable: the content widget is resized to the viewport rather
+        # than kept at its own sizeHint, so it expands to fill genuinely
+        # available room and only overflows -- triggering a scrollbar --
+        # when the viewport is smaller than the content's own minimum.
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll.setWidget(content)
+        return scroll
 
     # ------------------------------------------------------------------
     # analysis wiring
@@ -582,17 +750,64 @@ class InterpretView(QWidget):
         self._render_key = None          # decoded columns may now differ
         self.refresh(force=True)
 
-    def _on_workspace_changed(self, index: int) -> None:
-        self.workspace.setCurrentIndex(index)
+    def _tabs_for(self, section: str) -> Segmented:
+        return self.view_tabs_messages if section == MESSAGES else self.view_tabs_trace
+
+    def _sync_section_ui(self) -> None:
+        self.section_caption.setText(_SECTION_TITLES[self._section])
+        self.view_tabs_stack.setCurrentWidget(self._tabs_for(self._section))
+
+    def set_section(self, section: str) -> None:
+        """Switch the primary section, mirroring MainWindow's own Messages/
+        Trace nav -- the only thing that decides which analysis children are
+        even offered, so there is never a second, disagreeing nav concept.
+
+        Restores whichever child was last active in that section this
+        session, defaulting to Range (Messages) or Blocks (Trace) the first
+        time -- see _DEFAULT_MODE.
+        """
+        if section not in _SECTION_MODES:
+            return
+        self._on_workspace_changed(self._last_mode.get(section, _DEFAULT_MODE[section]))
+
+    def current_section(self) -> str:
+        return self._section
+
+    def current_mode(self) -> int:
+        return self._mode
+
+    def _on_workspace_changed(self, mode: int) -> None:
+        """Activate one analysis child.
+
+        The single place that changes what is on screen: the workspace page,
+        the Blocks-only controls' visibility, and -- when ``mode`` belongs to
+        the other section -- the active section itself, so this can never
+        leave a child showing under the wrong parent's caption. Reached from
+        a real click on either sub-navigation control, from set_section's own
+        default/remembered choice, and directly by tests.
+        """
+        section = _MODE_SECTION[mode]
+        if section != self._section:
+            self._section = section
+            self._sync_section_ui()
+        self._last_mode[section] = mode
+        self._mode = mode
+
+        tabs = self._tabs_for(section)
+        blocked = tabs.blockSignals(True)
+        tabs.set_current(_SECTION_MODES[section].index(mode))
+        tabs.blockSignals(blocked)
+
+        self.workspace.setCurrentIndex(mode)
         # Block size and byte range only mean anything to the Blocks table.
-        self.controls.setVisible(index == BLOCKS)
+        self.controls.setVisible(mode == BLOCKS)
         self._refresh_workspace()
         # The strip's bracket belongs to whichever workspace is using it as a
         # selector. Leaving the plot's block bracketed after switching back to
         # the table would point at a row that is not selected.
-        if index == BLOCKS:
+        if mode == BLOCKS:
             self._on_row_selected()
-        elif index != PLOT:
+        elif mode != PLOT:
             self.strip.set_highlight(None)
             self.bit_matrix.set_highlight(None)
             self.selection_label.setText("")
@@ -603,7 +818,7 @@ class InterpretView(QWidget):
         return self._store.window_for_key(self._frame.key)
 
     def _refresh_workspace(self) -> None:
-        index = self.view_tabs.current()
+        index = self._mode
         if index == SIGNALS:
             self._refresh_signals()
         elif index == RANGE:
@@ -1431,7 +1646,7 @@ class InterpretView(QWidget):
         at a time and the strip *is* its selector, while the Blocks table shows
         every block at once and the click moves its selection.
         """
-        if self.view_tabs.current() == PLOT:
+        if self._mode == PLOT:
             self._pick_plot_block(index)
             return
         if self._result is None:

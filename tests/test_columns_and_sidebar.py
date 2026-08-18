@@ -542,6 +542,53 @@ class NavToggleTests(QtCase):
         self.assertNotIn("Hide", buttons[1].toolTip())
 
 
+class NavWorkspaceLinkTests(QtCase):
+    """The Messages/Trace nav is the *only* primary navigation concept:
+    switching it also narrows which analysis children InterpretView offers,
+    rather than leaving an unrelated second five-way selector beside it.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.window = MainWindow(self.config, Theme())
+        self.window.resize(1400, 900)
+        self.window.show()
+        self.app.processEvents()
+
+    def tearDown(self):
+        self.window.close()
+        self.window.deleteLater()
+        self.app.processEvents()
+
+    def _click(self, index):
+        self.window.nav.group.button(index).click()
+        self.app.processEvents()
+
+    def test_messages_is_the_section_on_startup_with_range_as_its_child(self):
+        from cansniff.ui.interpret_view import MESSAGES, RANGE
+        self.assertEqual(self.window.interpret_view.current_section(), MESSAGES)
+        self.assertEqual(self.window.interpret_view.current_mode(), RANGE)
+
+    def test_clicking_trace_switches_the_analysis_section_and_defaults_to_blocks(self):
+        from cansniff.ui.interpret_view import BLOCKS, TRACE
+        self.window._on_view_changed(0)          # Messages, open
+        self._click(1)                            # Trace
+        self.assertEqual(self.window.interpret_view.current_section(), TRACE)
+        self.assertEqual(self.window.interpret_view.current_mode(), BLOCKS)
+
+    def test_a_child_never_shows_under_the_wrong_parent(self):
+        from cansniff.ui.interpret_view import MESSAGES, PLOT, TRACE
+        self.window._on_view_changed(0)
+        self.window.interpret_view._on_workspace_changed(PLOT)
+        self._click(1)                            # Trace
+        self.assertEqual(self.window.interpret_view.current_section(), TRACE)
+        self.assertNotEqual(self.window.interpret_view.current_mode(), PLOT)
+        self._click(0)                            # back to Messages
+        self.assertEqual(self.window.interpret_view.current_section(), MESSAGES)
+        # The Messages child chosen earlier (Plot) is remembered.
+        self.assertEqual(self.window.interpret_view.current_mode(), PLOT)
+
+
 class SidebarStateTests(QtCase):
     def test_collapsed_state_and_width_round_trip_through_config(self):
         self.config.set("ui.sidebar_width", 512)

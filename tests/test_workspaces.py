@@ -34,7 +34,9 @@ if HAVE_QT:
     from cansniff.analysis.store import FrameStore
     from cansniff.config import Config
     from cansniff.model import CanFrame, FrameStats
-    from cansniff.ui.interpret_view import BLOCKS, PLOT, RANGE, SIGNALS, InterpretView
+    from cansniff.ui.interpret_view import (
+        BLOCKS, MESSAGES, PLOT, RANGE, SIGNALS, TRACE, InterpretView,
+    )
     from cansniff.ui.theme import Theme
     if HAVE_CANTOOLS:
         from cansniff.analysis.dbc import DbcDatabase
@@ -82,12 +84,31 @@ class WorkspaceTests(unittest.TestCase):
 
     # -- defaults --------------------------------------------------------
 
-    def test_blocks_is_the_default_workspace(self):
-        self.assertEqual(self.view.view_tabs.current(), BLOCKS)
+    def test_range_is_messages_default_workspace(self):
+        """A freshly built view starts on Messages, whose own default child
+        is Range -- see InterpretView._DEFAULT_MODE."""
+        self.assertEqual(self.view.current_section(), MESSAGES)
+        self.assertEqual(self.view.current_mode(), RANGE)
+        # Blocks is still computed in the background even though it is not
+        # the child currently on screen.
         self.assertGreater(self.view.table.rowCount(), 0)
+
+    def test_blocks_is_traces_default_workspace(self):
+        self.view.set_section(TRACE)
+        self.assertEqual(self.view.current_mode(), BLOCKS)
+
+    def test_switching_sections_remembers_the_last_child_chosen(self):
+        self._switch(PLOT)
+        self.view.set_section(TRACE)
+        self._switch(SIGNALS)
+        self.view.set_section(MESSAGES)
+        self.assertEqual(self.view.current_mode(), PLOT)
+        self.view.set_section(TRACE)
+        self.assertEqual(self.view.current_mode(), SIGNALS)
 
     def test_block_controls_only_show_on_the_blocks_tab(self):
         """Block size and byte range mean nothing to the other workspaces."""
+        self._switch(BLOCKS)
         self.assertTrue(self.view.controls.isVisibleTo(self.view))
         self._switch(RANGE)
         self.assertFalse(self.view.controls.isVisibleTo(self.view))

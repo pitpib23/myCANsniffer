@@ -36,7 +36,7 @@ from .config_dialog import ConfigDialog
 from .database_window import DatabaseWindow
 from .filter_bar import FilterBar
 from .filter_dialog import FilterDialog
-from .interpret_view import InterpretView
+from .interpret_view import MESSAGES, TRACE, InterpretView
 from .tables import (
     ByteHighlightDelegate, IdFilterProxy, IdTableModel, KEY_ROLE, TraceTableModel,
     exemplar_widths,
@@ -927,6 +927,10 @@ class MainWindow(QMainWindow):
         self.section_label.setText("Messages" if index == 0 else "Trace")
         self.nav.update_hints(self._sidebar_collapsed)
         self._update_match_count()
+        # The only primary navigation concept in the window: which analysis
+        # children InterpretView even offers follows this same Messages/
+        # Trace choice, rather than exposing an unrelated second selector.
+        self.interpret_view.set_section(MESSAGES if index == 0 else TRACE)
 
     def _on_filter_changed(self, display_filter) -> None:
         # The same filter drives both views, so switching sections never

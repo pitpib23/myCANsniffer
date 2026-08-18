@@ -53,6 +53,7 @@ On first run `sniffer_config.json` is created next to `main.py`.
 │    │     bit 7  ░    ·    ░    ▓    ▓    █    █    ·   ← flips per bit, recent frames            │
 │    │       ...  ░    ·    ░    ▓    ▓    █    █    ·                                             │
 │    │     bit 0  █    ·    ░    ▓    ▓    █    █    ·                                             │
+│    │ Messages  [Range│Plot│ISO-TP]              ← analysis children of the section on the left   │
 │    │ BLOCK SIZE [1│2│4│8]  BYTES 0 to 63                                          Columns         │
 │    │ Bytes   Raw   <one column per decoder>                                                      │
 ├────┴─────────────────────────────────────────────────────────────────────────────────────────────┤
@@ -78,6 +79,34 @@ While the list is closed neither icon is marked active — with nothing on
 screen there is no current section to advertise, though the section a click
 will reopen is still remembered. The width you dragged to is restored on
 reopening, and the open/closed state persists to the config file.
+
+### Analysis children follow the section
+
+The rail is the only primary navigation in the window. The analysis panel on
+the right never offers a second, competing choice of its own — instead, which
+of its tabs are even on offer follows whichever section the rail is showing:
+
+```text
+Messages                    Trace
+├─ Range   (default)        ├─ Blocks   (default)
+├─ Plot                     └─ Signals
+└─ ISO-TP
+```
+
+**Messages** is the aggregate view — one row per CAN ID — so its children
+analyse a message across everything observed for it: **Range** (what each
+byte's value has been), **Plot** (a value over time) and **ISO-TP** (which
+CAN IDs across the *whole* capture look like ISO-TP — see below). **Trace** is
+individual received frames in arrival order, so its children decode one exact
+frame's payload: **Blocks** (every decoding of every block) and **Signals**
+(named, scaled values, when a database is loaded).
+
+Switching sections restores whichever child you last had open there — Range
+the first time you visit Messages, Blocks the first time you visit Trace,
+and after that whatever you chose, so `Messages → Plot → Trace → Signals →
+Messages` lands back on Plot. The message or frame you had selected is never
+disturbed by switching sections or children — only picking a different row
+in Messages or Trace changes what is on screen.
 
 ### The payload strip
 
@@ -132,7 +161,7 @@ is retired in whole buckets, so the real span sits between `interpret.bit_window
 and twice it; the header states the actual figure. **Bit activity** toggles the
 matrix, and the state persists.
 
-### The block table
+### The block table (Trace ▸ Blocks)
 
 One row per block, one column per decoder.
 
@@ -370,7 +399,7 @@ description of a bus, not the bus.
 
 ---
 
-## The plot
+## The plot (Messages ▸ Plot)
 
 The **Plot** workspace draws one value over time, selected the way the block
 table is read:
@@ -404,7 +433,7 @@ window over a 4-second capture says so rather than claiming a minute.
 
 ---
 
-## ISO-TP
+## ISO-TP (Messages ▸ ISO-TP)
 
 The **ISO-TP** workspace answers a different question than the other tabs: not
 "what does this message mean" but *"which CAN IDs on this bus actually use
@@ -412,6 +441,11 @@ ISO-TP, and what evidence says so"*. It looks at the whole capture, not just
 the selected message — a single periodic sensor frame parses as a perfectly
 valid ISO-TP Single Frame, and the only way to tell it apart from a real
 diagnostic channel is to see it next to everything else on the bus.
+
+It lives under **Messages** because it is still traffic analysed by CAN
+ID, not because it is scoped to whichever one message happens to be
+selected — the survey and the tables below stay capture-wide regardless of
+what is selected in Messages or Trace.
 
 ```
 ISO-TP EVIDENCE BY CAN ID
