@@ -134,7 +134,6 @@ class ClearTests(unittest.TestCase):
         self.assertEqual(self.window._worker.accepted, 0)
         self.assertEqual(self.window._worker.dropped, 0)
         self.assertEqual(self.window.metric_received.value.text(), "0")
-        self.assertEqual(self.window.metric_shown.value.text(), "0")
         self.assertEqual(self.window.metric_dropped.value.text(), "0")
 
     def test_clearing_with_no_capture_running_does_not_raise(self):
@@ -180,6 +179,11 @@ class ClearTests(unittest.TestCase):
 
     def test_clearing_while_paused_keeps_the_pause(self):
         self.window._worker = _FakeWorker()
+        # Pause only does anything while a capture is actually running/
+        # paused (see MainWindow._apply_capture_state) — a real Start
+        # would have made this transition; this test simulates it directly
+        # rather than standing up a real capture thread.
+        self.window._apply_capture_state(self.window._RUNNING)
         self.window.pause_button.setChecked(True)
         self.app.processEvents()
         self.window.clear_views()

@@ -277,65 +277,85 @@ rather than a range lives behind **ID mask matching**.
 
 **Database** is one window for everything that turns raw bytes into named,
 scaled values — a `.dbc` file's signals and the old free-form "scaled value"
-rules are both just **Signals** now, edited the same way:
+rules are both just **Signals** now, organised the way a real `.dbc` already
+is: by **message**, not as one flat list.
 
 ```
-┌──────────────┬──────────────────────────────────────────────────────┐
-│ Profiles     │ Signals in industrial.dbc          [Add][Duplicate]   │
-│              │                                     [Remove Signal]   │
-│ ● industrial │ 0x100  Engine                                        │
-│   test.dbc   │   Rpm  0..15                                         │
-│   Any ID     │ Any ID                                               │
-│   FreeFlag   │   FreeFlag  0..7                                     │
-│              ├──────────────────────────────────────────────────────┤
-│              │ Name       [ Rpm______________ ]                     │
-│              │ CAN ID     [ 0x100 ] extended  Channel [ any ]        │
-│              │ Bits       start [ 0 ] length [ 16 ]                  │
-│              │ Byte order Intel   [ ] signed   read as Integer       │
-│              │ Value      raw × [ 0.25 ] + [ 0 ]                     │
-│              │ PREVIEW    0x100  13 8C ...  ->  Rpm = 8964.75 rpm    │
-├──────────────┴──────────────────────────────────────────────────────┤
-│ [New DBC][Import DBC][Export DBC][Remove DBC]  [Unapply][Use Database]│
-└────────────────────────────────────────────────────────────────────┘
+┌──────┬────────────────────────────────┬──────────────────────────────────┐
+│ ...  │ Messages (CAN IDs)  [Add][Del]  │ Message Details                  │
+│ Data-│ [Search by name or CAN ID...]   │ CAN ID [0x100] ext[] FD[]        │
+│ base │  CAN ID  Name     Sig  Length   │ Message Name [Engine__________]  │
+│      │  0x100   Engine    4   8 bytes  │ DLC [8]   Transmitter [ECU1___]  │
+│ ● ind│  0x101   Status    2   4 bytes  ├──────────────────────────────────┤
+│ ustr-│  Any ID  (Unassi.) 1   –        │ Signals              [Add][Edit] │
+│ ial  │                                 │                          [Del]   │
+│      │                                 │ [Search signals...]              │
+│ Sig- │                                 │  Name   Start  Len  Order  ...   │
+│ nals:│                                 │  Rpm     0    16b  Intel   ...   │
+│ 23   │                                 │  Cool-   2     8b  Intel   ...   │
+├──────┴─────────────────────────────────┴──────────────────────────────────┤
+│ [New DBC][Import DBC][Export DBC][Remove DBC]   Database: industrial.dbc  │
+│                                        ●Applied  [Unapply][Use Database]  │
+└─────────────────────────────────────────────────────────────────────────┘
 ```
 
 - A **profile** is one document — an imported `.dbc`, or an empty one from
   **New DBC**. `●` marks the one currently decoding traffic.
-- **Signals** grouped by CAN ID, the way a `.dbc` groups them by message; a
-  signal with no CAN ID (the old "any ID" scaled-value rules) sits under its
-  own **Any ID** group, since a `.dbc` has no way to describe one.
-- One field set covers both cases: **start bit** and **length** are
-  bit-precise (matching `.dbc`, and — unlike the old byte-only scaled values —
-  able to read a single flag bit out of a byte, not just a whole byte); **read
-  as** chooses Integer / Float32 / Float64, or the legacy **BCD** encoding
-  kept for rules that used it before.
+- The **Messages** table has one row per CAN ID; **Add Message** creates one
+  (it always starts with a first signal — there is no such thing as an empty,
+  signal-less message to go stale), **Delete Message** removes it and every
+  signal on it. A signal with no CAN ID (the old "any ID" scaled-value rules)
+  is not a message — it gets its own **Any ID** row, distinguished by name
+  ("(Unassigned)") and by not offering Delete Message, since there is no
+  message there to delete.
+- Selecting a message fills in **Message Details** (CAN ID, extended, CAN FD,
+  name, DLC, transmitter) live, the way every other field in this window
+  edits — and, unlike the signal editor before it, edits the *whole* message
+  at once: renaming it, or moving its CAN ID, updates every signal that
+  belongs to it in one step, so they can never end up disagreeing about which
+  message they're part of.
+- **Signals** below show only the selected message's own signals — **Add
+  Signal** always adds to whichever message is selected (including Any ID, if
+  that's what's selected), never as a fallback default. **Edit Signal** opens
+  the same small dialog: name, bit-precise **start bit**/**length** (matching
+  `.dbc`, and able to read a single flag bit out of a byte, not just a whole
+  byte), byte order/signed/**read as** (Integer / Float32 / Float64, or the
+  legacy **BCD** encoding), scale/offset, unit, range, channel, and a live
+  preview. CAN ID and message name are not there — those are message-level,
+  edited once in Message Details, not copied into every signal's own editor.
 - **Selecting a profile is not the same as using it.** Clicking through the
   list only looks; **Use Database** is the one action that makes a profile
   decode captured traffic, and **Unapply Database** stops any database
   decoding without removing the profile — it stays in the list, ready to use
   again.
 - Every action — adding a signal, applying a profile, exporting — takes effect
-  immediately. There is no OK/Cancel to remember to press.
+  immediately. There is no OK/Cancel to remember to press for the window
+  itself; only the small Add Message/Add Signal/Edit Signal dialogs have their
+  own explicit OK, since each one is a single deliberate action, not a form
+  left open to react to.
 - **Remove DBC** removes a profile from this application only; the `.dbc` file
   on disk, if any, is never touched.
 - There is exactly one place an applied signal's value shows up live: the
   **Signals** tab, decoded through the applied database. An "any ID" signal
   has no CAN ID to build that decode path from, so it only ever shows a value
-  in this window's own preview — the same is true of a signal using the
-  legacy **BCD** encoding.
+  in the Edit Signal dialog's own preview — the same is true of a signal using
+  the legacy **BCD** encoding.
 
 ### What export can and cannot represent
 
 **Export DBC** writes the profile's message-bound signals to a `.dbc`,
 validated first — bits that do not fit the message, a scale of 0, or an
-inverted range are refused with a reason rather than written out. Two things a
-`.dbc` genuinely cannot express are excluded and named in a warning rather
-than silently dropped:
+inverted range are refused with a reason rather than written out. A few
+things are excluded (or degraded) and named in a warning rather than silently
+dropped:
 
 - a signal with no CAN ID ("any ID") — every `.dbc` signal must belong to one
   message;
 - a signal using the legacy **BCD** encoding — packed decimal digits are not a
-  linear function of the raw bits.
+  linear function of the raw bits;
+- a message marked **CAN FD** is written as classic CAN — the writer does not
+  yet emit the `VFrameFormat` attribute a real CAN FD `.dbc` needs to carry
+  that flag. The flag is not lost from this application, only from the file.
 
 A channel restriction is also not something `.dbc` can express, so it exports
 but is warned about: the signal applies to every channel once written out.

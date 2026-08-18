@@ -15,6 +15,7 @@ from typing import List, Optional
 from ..model import CanFrame
 from . import CanFrameSource, SourceError
 from .asc_reader import parse_asc
+from .candump_reader import parse_candump
 
 
 def _load_via_python_can(path: str) -> List[CanFrame]:
@@ -77,6 +78,16 @@ class FileSource(CanFrameSource):
         extension = os.path.splitext(self.path)[1].lower()
         if extension == ".asc":
             result = parse_asc(self.path)
+            self._frames = result.frames
+            self._skipped = result.skipped
+        elif extension == ".log":
+            # In-house, not python-can's CanutilsLogReader: that reader only
+            # tolerates one specific trailing field (an rx/tx " r"/" t"
+            # flag) after id#data and hard-fails — ValueError: too many
+            # values to unpack — on any other trailing token, which several
+            # published capture datasets have (e.g. a plain 0/1 label).
+            # See candump_reader.py.
+            result = parse_candump(self.path)
             self._frames = result.frames
             self._skipped = result.skipped
         else:

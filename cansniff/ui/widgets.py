@@ -15,7 +15,8 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QButtonGroup, QFrame, QHBoxLayout, QLabel, QPushButton, QSizePolicy,
-    QStyle, QStyledItemDelegate, QStyleOptionViewItem, QVBoxLayout, QWidget,
+    QStackedWidget, QStyle, QStyledItemDelegate, QStyleOptionViewItem,
+    QVBoxLayout, QWidget,
 )  # noqa: F401  (QSizePolicy used by NavRail and PayloadStrip)
 
 from .theme import RADIUS_MD, RADIUS_SM, ROW_HEIGHT, SPACE_SM, SPACE_XS, Theme
@@ -90,6 +91,44 @@ class Divider(QFrame):
         self.setObjectName("Divider")
         self.setFrameShape(QFrame.HLine)
         self.setFixedHeight(1)
+
+
+class CurrentPageStack(QStackedWidget):
+    """A QStackedWidget sized to its *current* page only.
+
+    Plain QStackedWidget reserves room for every page it holds, including
+    ones nobody can currently see — its own minimumSizeHint() is the max
+    over all pages, since Qt has no way to know a hidden page will never
+    become current. For a workspace switcher whose pages genuinely differ in
+    footprint, that means the smallest page is held hostage to the largest
+    one's minimum size forever — inflating the whole top-level window's
+    minimum size well past what the currently visible content needs, which
+    a maximized top-level window can be silently resized to satisfy the
+    moment anything elsewhere invalidates its layout (see MainWindow's
+    capture-control buttons).
+
+    Switching pages never shrinks an already-larger window: sizeHint() only
+    ever matters as a floor/preference when there is slack to give it, not
+    by forcibly shrinking a window that is already bigger — so this does
+    not make switching tabs visually jump around.
+    """
+
+    def setCurrentIndex(self, index: int) -> None:
+        super().setCurrentIndex(index)
+        self.updateGeometry()
+
+    def setCurrentWidget(self, widget: QWidget) -> None:
+        super().setCurrentWidget(widget)
+        self.updateGeometry()
+
+    def sizeHint(self) -> QSize:
+        current = self.currentWidget()
+        return current.sizeHint() if current is not None else super().sizeHint()
+
+    def minimumSizeHint(self) -> QSize:
+        current = self.currentWidget()
+        return (current.minimumSizeHint() if current is not None
+                else super().minimumSizeHint())
 
 
 class MetricChip(QWidget):

@@ -265,6 +265,28 @@ class ImportTests(unittest.TestCase):
         groups = profile.message_groups()
         self.assertIsNone(groups[-1][0])
 
+    def test_message_is_fd_is_read_from_a_properly_flagged_dbc(self):
+        """cantools derives is_fd from the message's VFrameFormat attribute
+        — not every writer emits one, so this only fires for a real CAN FD
+        .dbc, not a plain classic-CAN one (see the fixture, which has none)."""
+        dbc_text = (
+            'VERSION ""\n\n'
+            'NS_ :\n\tNS_DESC_\n\tCM_\n\tBA_DEF_\n\tBA_\n\tVAL_\n\tBA_DEF_DEF_\n\n'
+            'BS_:\n\nBU_: ECU1\n\n'
+            'BA_DEF_ BO_  "VFrameFormat" ENUM  "StandardCAN","ExtendedCAN",'
+            '"reserved","StandardCAN_FD","ExtendedCAN_FD";\n'
+            'BA_DEF_DEF_  "VFrameFormat" "StandardCAN";\n\n'
+            'BO_ 256 Test: 8 ECU1\n'
+            ' SG_ X : 0|8@1+ (1,0) [0|255] "" ECU1\n\n'
+            'BA_ "VFrameFormat" BO_ 256 3;\n'
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "fd.dbc")
+            with open(path, "w") as handle:
+                handle.write(dbc_text)
+            profile = S.import_dbc(path)
+        self.assertTrue(profile.signals[0].message_is_fd)
+
 
 # ---------------------------------------------------------------------------
 # DBC export
@@ -344,6 +366,148 @@ class ExportTests(_TempDir):
         path = os.path.join(self._dir, "a", "b", "out.dbc")
         S.export_dbc(profile, path)
         self.assertTrue(os.path.exists(path))
+
+    def test_can_fd_flag_is_warned_about_since_the_writer_cannot_emit_it(self):
+        """A freshly-built cantools Database has no VFrameFormat attribute
+        definition to hang the flag on — see the reading half of this in
+        ImportTests.test_message_is_fd_is_read_from_a_properly_flagged_dbc.
+        Nothing here silently drops the flag from the application itself;
+        only the written file loses it, and that must be visible."""
+        profile = S.Profile()
+        profile.signals.append(S.Signal(name="X", can_id=0x100, start=0,
+                                        length=8, message_is_fd=True))
+        path = self._path("fd_out.dbc")
+        written, warnings = S.export_dbc(profile, path)
+        self.assertEqual(written, 1)
+        self.assertTrue(any("CAN FD" in w for w in warnings))
+        self.assertTrue(profile.signals[0].message_is_fd,
+                        "the flag must survive in the application regardless")
+
+
+# ---------------------------------------------------------------------------
+# message-level CRUD (the Signal Database window's Add/Delete Message and
+# Message Details operate through these)
+# ---------------------------------------------------------------------------
+
+
+class MessageCrudTests(unittest.TestCase):
+    def test_add_signal_to_a_new_message_gets_a_default_name(self):
+        profile = S.Profile()
+        signal = profile.add_signal(0x100, False)
+        self.assertEqual(signal.can_id, 0x100)
+        self.assertEqual(signal.message_name, "Msg_100")
+
+    def test_add_signal_to_an_existing_message_inherits_its_metadata(self):
+        profile = S.Profile()
+        profile.add_signal(0x100, False, S.Signal(
+            name="First", message_name="Engine", message_length=8,
+            message_is_fd=True, message_senders=("ECU1",)))
+        second = profile.add_signal(0x100, False, S.Signal(name="Second"))
+        self.assertEqual(second.message_name, "Engine")
+        self.assertEqual(second.message_length, 8)
+        self.assertTrue(second.message_is_fd)
+        self.assertEqual(second.message_senders, ("ECU1",))
+
+    def test_add_signal_with_can_id_none_is_any_id_and_unnamed(self):
+        profile = S.Profile()
+        signal = profile.add_signal(None, False, S.Signal(name="Loose"))
+        self.assertIsNone(signal.can_id)
+        self.assertFalse(signal.is_extended)
+        self.assertEqual(signal.message_name, "")
+
+    def test_add_signal_given_an_explicit_name_keeps_it(self):
+        profile = S.Profile()
+        signal = profile.add_signal(0x100, False, S.Signal(message_name="Custom"))
+        self.assertEqual(signal.message_name, "Custom")
+
+    def test_has_message_reflects_signals_sharing_a_can_id(self):
+        profile = S.Profile()
+        self.assertFalse(profile.has_message(0x100, False))
+        profile.add_signal(0x100, False)
+        self.assertTrue(profile.has_message(0x100, False))
+        # extended-ness is part of the key, not just the numeric ID
+        self.assertFalse(profile.has_message(0x100, True))
+
+    def test_set_message_meta_updates_every_signal_in_the_group(self):
+        profile = S.Profile()
+        profile.add_signal(0x100, False, S.Signal(name="A"))
+        profile.add_signal(0x100, False, S.Signal(name="B"))
+        profile.add_signal(0x200, False, S.Signal(name="Elsewhere"))
+        changed = profile.set_message_meta(0x100, False, name="Engine", length=8)
+        self.assertTrue(changed)
+        engine = [s for s in profile.signals if s.can_id == 0x100]
+        self.assertTrue(all(s.message_name == "Engine" for s in engine))
+        self.assertTrue(all(s.message_length == 8 for s in engine))
+        elsewhere = next(s for s in profile.signals if s.can_id == 0x200)
+        self.assertEqual(elsewhere.message_name, "Msg_200",
+                         "a signal on a different message must be untouched")
+
+    def test_set_message_meta_with_no_changes_reports_nothing_changed(self):
+        profile = S.Profile()
+        profile.add_signal(0x100, False, S.Signal(message_name="Engine"))
+        changed = profile.set_message_meta(0x100, False, name="Engine")
+        self.assertFalse(changed)
+
+    def test_set_message_meta_leaves_unspecified_fields_alone(self):
+        profile = S.Profile()
+        profile.add_signal(0x100, False, S.Signal(
+            message_name="Engine", message_length=8))
+        profile.set_message_meta(0x100, False, name="Renamed")
+        self.assertEqual(profile.signals[0].message_length, 8)
+
+    def test_move_message_rekeys_every_signal_together(self):
+        profile = S.Profile()
+        profile.add_signal(0x100, False, S.Signal(name="A"))
+        profile.add_signal(0x100, False, S.Signal(name="B"))
+        moved = profile.move_message(0x100, False, 0x150, False)
+        self.assertTrue(moved)
+        self.assertTrue(all(s.can_id == 0x150 for s in profile.signals))
+
+    def test_move_message_to_its_own_key_is_a_no_op(self):
+        profile = S.Profile()
+        profile.add_signal(0x100, False)
+        profile.dirty = False
+        moved = profile.move_message(0x100, False, 0x100, False)
+        self.assertFalse(moved)
+        self.assertFalse(profile.dirty)
+
+    def test_move_message_onto_an_existing_message_raises(self):
+        profile = S.Profile()
+        profile.add_signal(0x100, False, S.Signal(name="A"))
+        profile.add_signal(0x200, False, S.Signal(name="B"))
+        with self.assertRaises(S.SignalError):
+            profile.move_message(0x100, False, 0x200, False)
+        # nothing moved
+        self.assertTrue(any(s.can_id == 0x100 for s in profile.signals))
+        self.assertTrue(any(s.can_id == 0x200 for s in profile.signals))
+
+    def test_move_message_extended_ness_is_part_of_the_key(self):
+        profile = S.Profile()
+        profile.add_signal(0x100, False, S.Signal(name="Standard"))
+        profile.add_signal(0x100, True, S.Signal(name="Extended"))
+        # moving the standard-frame message onto the same numeric ID but
+        # extended must not collide with the *different* extended message
+        moved = profile.move_message(0x100, False, 0x180, False)
+        self.assertTrue(moved)
+        self.assertEqual(
+            {s.can_id for s in profile.signals if s.name == "Extended"}, {0x100})
+
+    def test_remove_message_deletes_every_signal_on_that_can_id(self):
+        profile = S.Profile()
+        profile.add_signal(0x100, False, S.Signal(name="A"))
+        profile.add_signal(0x100, False, S.Signal(name="B"))
+        profile.add_signal(0x200, False, S.Signal(name="C"))
+        removed = profile.remove_message(0x100, False)
+        self.assertEqual(removed, 2)
+        self.assertEqual([s.name for s in profile.signals], ["C"])
+
+    def test_remove_message_on_an_unknown_id_removes_nothing(self):
+        profile = S.Profile()
+        profile.add_signal(0x100, False)
+        profile.dirty = False
+        removed = profile.remove_message(0x999, False)
+        self.assertEqual(removed, 0)
+        self.assertFalse(profile.dirty)
 
 
 # ---------------------------------------------------------------------------

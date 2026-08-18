@@ -155,6 +155,17 @@ class CaptureWorker(QObject):
 
     @Slot()
     def run(self) -> None:
+        # Set *before* open(), not after: open() can block for a while (a
+        # real device, a slow file), and request_stop() — called from the
+        # UI thread — can arrive during that wait. Setting this to True
+        # only once open() returns would silently overwrite that stop
+        # request back to "running" the instant open() finally completes,
+        # and the receive loop below would then run forever, unstoppably:
+        # nothing would ever emit sourceFinished, so the UI's Stopping
+        # state (which disables Start, Stop, and Pause alike) would never
+        # clear and Start would never re-enable. Setting it here first
+        # means a stop requested mid-open() simply sticks.
+        self._running = True
         try:
             self._source.open()
         except SourceError as exc:
@@ -166,8 +177,13 @@ class CaptureWorker(QObject):
             self.sourceFinished.emit()
             return
 
-        self._running = True
-        self.started.emit(self._source.describe())
+        # A stop requested while still inside open() above must stick: skip
+        # announcing a capture that is already being torn down before it
+        # ever received anything. The `while` below then simply does not
+        # run, and the existing `finally` handles cleanup and
+        # sourceFinished exactly as it would for any other stop.
+        if self._running:
+            self.started.emit(self._source.describe())
 
         batch: List[CanFrame] = []
         last_emit = time.monotonic()

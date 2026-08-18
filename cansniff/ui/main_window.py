@@ -48,6 +48,34 @@ from .widgets import Chip, MetricChip, NavRail, SectionLabel
 class MainWindow(QMainWindow):
     batchConsumed = Signal()
 
+    #: Capture control state machine. One centralized function
+    #: (_apply_capture_state) owns every Start/Stop/Pause enabled/checked/
+    #: text mutation; see its docstring for why that used to be scattered
+    #: and what that cost.
+    _IDLE = "idle"
+    _RUNNING = "running"
+    _PAUSED = "paused"
+    _STOPPING = "stopping"
+
+    #: Shared floor for every top-bar button's *minimum* width (not its
+    #: preferred/shown width, which stays whatever its label needs — see
+    #: _bar_button). Deliberately small: a maximized top-level window can be
+    #: silently resized to satisfy the toolbar's *minimum* size the moment
+    #: any descendant's layout is invalidated (e.g. Pause/Resume's own text
+    #: change), so nothing in this toolbar should carry an unnecessarily
+    #: large hard floor even though its normal, comfortable appearance never
+    #: changes as a result of lowering it.
+    _BAR_BUTTON_MIN_WIDTH = 64
+    #: Same idea for the two status chips, whose *text* is dynamic (a file
+    #: path, an interface name) and therefore has no natural upper bound.
+    _CHIP_MAX_WIDTH = 200
+
+    #: Brief post-action lockout for Start/Stop/Pause/Resume — see
+    #: _lock_interactions. Long enough to absorb a rapid double-click or a
+    #: shortcut fired twice, short enough that a deliberate second action
+    #: (a real Pause right after a real Start) never feels delayed.
+    _INTERACTION_LOCK_MS = 400
+
     def __init__(self, config: Config, theme: Theme):
         super().__init__()
         self.config = config
@@ -56,6 +84,22 @@ class MainWindow(QMainWindow):
 
         self._thread: Optional[QThread] = None
         self._worker: Optional[CaptureWorker] = None
+        #: Idle / Running / Paused / Stopping — see _apply_capture_state.
+        self._capture_state = self._IDLE
+        #: Re-entrancy guard for _apply_capture_state <-> _on_pause_toggled:
+        #: returning to Idle programmatically unchecks the Pause button,
+        #: which itself emits toggled() — without this flag that would
+        #: re-enter _apply_capture_state while the first call is still
+        #: running.
+        self._updating_capture_controls = False
+        #: True for a brief window after any accepted Start/Stop/Pause/
+        #: Resume — see _lock_interactions. Gates whether a *new* such
+        #: action is even attempted; it never decides what state capture
+        #: is actually in, which stays _capture_state's job alone.
+        self._interaction_locked = False
+        self._interaction_lock_timer = QTimer(self)
+        self._interaction_lock_timer.setSingleShot(True)
+        self._interaction_lock_timer.timeout.connect(self._on_interaction_unlocked)
         self._selected_key: Optional[str] = None
         self._follow_trace = True
         #: Tracked rather than read back from widget visibility: isVisible() is
@@ -82,6 +126,7 @@ class MainWindow(QMainWindow):
         self.profile_store: ProfileStore = ProfileStore()
 
         self._build_ui()
+        self._apply_capture_state(self._IDLE)
         self._build_shortcuts()
         self._apply_config_to_widgets()
         self.interpret_view.set_frame_store(self.frame_store)
@@ -165,9 +210,16 @@ class MainWindow(QMainWindow):
         self._sidebar_width = max(
             self._min_sidebar, int(self.config.get("ui.sidebar_width", 470))
         )
-        self.set_sidebar_collapsed(
-            bool(self.config.get("ui.sidebar_collapsed", False)), remember=False
-        )
+        # Applied once real geometry exists (showEvent), not here: this
+        # widget has not been shown yet, so QSplitter.setSizes() has no
+        # valid on-screen state to reconcile a requested split against and
+        # silently substitutes something else regardless of what total this
+        # would compute — the same underlying staleness _current_content_
+        # width()'s docstring describes for splitter.width(), one layer
+        # deeper (the splitter's own internal layout, not just its reported
+        # width).
+        self._pending_sidebar_collapsed = bool(
+            self.config.get("ui.sidebar_collapsed", False))
 
     # ------------------------------------------------------------------
     # sidebar
@@ -185,21 +237,41 @@ class MainWindow(QMainWindow):
         self.nav.set_collapsed(collapsed)
         self.nav.update_hints(collapsed)
 
+        total_width = self._current_content_width()
         if collapsed:
             self.sidebar.setFixedWidth(self.nav.WIDTH)
             # Hand the reclaimed width to the workspace explicitly; the
             # splitter keeps its stored sizes otherwise.
-            total = max(self.splitter.width(), self.nav.WIDTH + 520)
+            total = max(total_width, self.nav.WIDTH + 520)
             self.splitter.setSizes([self.nav.WIDTH, total - self.nav.WIDTH])
         else:
             self.sidebar.setMinimumWidth(self._min_sidebar)
             self.sidebar.setMaximumWidth(16777215)
-            total = max(self.splitter.width(), self._sidebar_width + 520)
+            total = max(total_width, self._sidebar_width + 520)
             self.splitter.setSizes(
                 [self._sidebar_width, max(520, total - self._sidebar_width)]
             )
         if remember:
             self.config.set("ui.sidebar_collapsed", collapsed)
+
+    def _current_content_width(self) -> int:
+        """The width to size the splitter against — never ``self.splitter.
+        width()`` directly.
+
+        Before the window has ever been shown (e.g. this method's first
+        caller, at the end of __init__), the splitter's own reported
+        width() is a stale pre-layout default that has nothing to do with
+        the size just requested via resize() a few lines earlier — sizing
+        the initial sidebar/workspace split against it clamps to the wrong
+        (usually much smaller) total, not "the actual current window
+        width" this is supposed to reflect. self.width() — the top-level
+        window's own, which resize()/setGeometry() update immediately,
+        with no dependency on a layout pass ever having run — is reliable
+        at every point this is called, before or after the window is shown,
+        maximized, or resized, since the splitter spans the window's full
+        client width with no margin either side of it.
+        """
+        return self.width()
 
     def _remember_width(self) -> None:
         sizes = self.splitter.sizes()
@@ -223,6 +295,9 @@ class MainWindow(QMainWindow):
         title.setObjectName("AppTitle")
         title_block.addWidget(title)
         row.addLayout(title_block)
+        # Lowers only the hard floor, same reasoning as _bar_button below —
+        # the title still shows in full at any realistic window width.
+        title.setMinimumWidth(min(title.sizeHint().width(), self._BAR_BUTTON_MIN_WIDTH))
 
         row.addSpacing(SPACE_LG)
 
@@ -231,10 +306,18 @@ class MainWindow(QMainWindow):
                                                  "receiving  (F5)")
         self.stop_button = self._bar_button("Stop", slot=self.stop_capture,
                                             tip="Close the source  (F6)")
-        self.stop_button.setEnabled(False)
+        # Stable, not just sized-to-fit: this button's own text toggles
+        # between "Pause" and "Resume" for as long as the window is open,
+        # and QPushButton.setText() unconditionally invalidates its cached
+        # size hint even when the *result* happens to be the same width —
+        # see _apply_capture_state for what that invalidation can do to a
+        # maximized top-level window. Sizing this button's floor to fit
+        # both labels up front means that invalidation never has an actual
+        # width change to propagate.
         self.pause_button = self._bar_button(
-            "Pause", slot=self._on_pause, checkable=True,
+            "Pause", slot=self._on_pause_toggled, checkable=True,
             tip="Stop adding frames to the views; reception continues  (F7)",
+            stable_texts=("Pause", "Resume"),
         )
         self.clear_button = self._bar_button(
             "Clear", slot=self.clear_views, ghost=True,
@@ -248,11 +331,15 @@ class MainWindow(QMainWindow):
 
         row.addStretch(1)
 
+        # Capped, not left to grow with whatever the configured file path or
+        # live interface name happens to be — see _set_chip_text.
         self.source_chip = Chip("no source", "muted", self.theme)
+        self.source_chip.setMaximumWidth(self._CHIP_MAX_WIDTH)
         row.addWidget(self.source_chip)
         row.addSpacing(SPACE_SM)
 
         self.dbc_chip = Chip("no database", "muted", self.theme)
+        self.dbc_chip.setMaximumWidth(self._CHIP_MAX_WIDTH)
         self.dbc_chip.setToolTip(
             "No database applied. Frames are shown raw — which is all this "
             "tool ever needs to be useful."
@@ -279,7 +366,8 @@ class MainWindow(QMainWindow):
         return bar
 
     def _bar_button(self, text: str, slot=None, primary: bool = False, ghost: bool = False,
-                    checkable: bool = False, tip: str = "") -> QPushButton:
+                    checkable: bool = False, tip: str = "",
+                    stable_texts: tuple = ()) -> QPushButton:
         button = QPushButton(text)
         if primary:
             button.setObjectName("Primary")
@@ -294,6 +382,20 @@ class MainWindow(QMainWindow):
                 button.toggled.connect(slot)
             else:
                 button.clicked.connect(slot)
+
+        # A *minimum* width, never the button's shown/preferred size: a
+        # QHBoxLayout still lays each button out at its full sizeHint
+        # whenever there is room for it, which there always is at any
+        # realistic window width, so nothing about how this button looks
+        # changes. Only the hard floor a maximized window can be forced to
+        # satisfy (see _apply_capture_state) gets smaller.
+        metrics = button.fontMetrics()
+        if stable_texts:
+            pad = button.sizeHint().width() - metrics.horizontalAdvance(text)
+            widest = max(metrics.horizontalAdvance(t) for t in stable_texts)
+            button.setMinimumWidth(widest + pad)
+        else:
+            button.setMinimumWidth(min(button.sizeHint().width(), self._BAR_BUTTON_MIN_WIDTH))
         return button
 
     def _build_browser(self) -> QWidget:
@@ -402,11 +504,10 @@ class MainWindow(QMainWindow):
         row.setSpacing(SPACE_LG)
 
         self.metric_received = MetricChip("Received", self.theme)
-        self.metric_shown = MetricChip("Shown", self.theme)
         self.metric_dropped = MetricChip("Dropped", self.theme, "muted")
         self.metric_ids = MetricChip("IDs", self.theme)
         self.metric_rate = MetricChip("Rate", self.theme, "muted")
-        for metric in (self.metric_received, self.metric_shown, self.metric_dropped,
+        for metric in (self.metric_received, self.metric_dropped,
                        self.metric_ids, self.metric_rate):
             row.addWidget(metric)
 
@@ -440,7 +541,7 @@ class MainWindow(QMainWindow):
 
         pause = QAction("Pause", self)
         pause.setShortcut(QKeySequence("F7"))
-        pause.triggered.connect(lambda: self.pause_button.toggle())
+        pause.triggered.connect(self._toggle_pause_shortcut)
         self.addAction(pause)
 
     def _apply_config_to_widgets(self) -> None:
@@ -460,21 +561,41 @@ class MainWindow(QMainWindow):
         kind = str(self.config.get("source.type", "file"))
         if kind == "file":
             name = os.path.basename(str(self.config.get("source.file.path", "")) or "—")
-            self.source_chip.set_text_and_tone("file · {}".format(name), "muted")
+            self._set_chip_text(self.source_chip, "file · {}".format(name), "muted")
         else:
-            self.source_chip.set_text_and_tone(
-                "live · {} {}".format(
-                    self.config.get("source.live.interface", "?"),
-                    self.config.get("source.live.channel", ""),
-                ).strip(), "accent",
-            )
+            text = "live · {} {}".format(
+                self.config.get("source.live.interface", "?"),
+                self.config.get("source.live.channel", ""),
+            ).strip()
+            self._set_chip_text(self.source_chip, text, "accent")
+
+    def _set_chip_text(self, chip: Chip, text: str, tone: str) -> None:
+        """Elide long, content-driven chip text rather than let it grow.
+
+        source_chip's text is a file path or a live interface name;
+        dbc_chip's is a profile's own filename — neither has any natural
+        upper bound. Left unelided, a long one inflates this chip's own
+        minimumSizeHint, and from there the whole top bar's, with nothing
+        to stop it — precisely the kind of "expanding widget that
+        unnecessarily forces the main window beyond the available desktop
+        geometry" this window must not have (see _apply_capture_state for
+        why that specifically matters here). The full text is never lost:
+        it's always in the tooltip, and callers that already set a more
+        detailed tooltip of their own may still overwrite this one
+        afterwards.
+        """
+        metrics = chip.fontMetrics()
+        available = self._CHIP_MAX_WIDTH - 16   # ~ the chip's own padding
+        elided = metrics.elidedText(text, Qt.ElideMiddle, available)
+        chip.set_text_and_tone(elided, tone)
+        chip.setToolTip(text)
 
     # ------------------------------------------------------------------
     # capture control
     # ------------------------------------------------------------------
 
     def start_capture(self) -> None:
-        if self._thread is not None:
+        if self._capture_state != self._IDLE or self._interaction_locked:
             return
         try:
             source = build_source(self.config)
@@ -519,11 +640,6 @@ class MainWindow(QMainWindow):
         # thread instead, which is why the counter it touches is locked.
         self.batchConsumed.connect(worker.batch_consumed, Qt.DirectConnection)
 
-        # Carry the button's state into the new worker. Without this, pausing
-        # before pressing Start silently did nothing — the worker was built
-        # with its own default and the button was left claiming otherwise.
-        worker.set_paused(self.pause_button.isChecked())
-
         self._worker = worker
         self._thread = thread
         self._last_received = 0
@@ -531,14 +647,22 @@ class MainWindow(QMainWindow):
         # A fresh worker starts at zero drops; carrying the previous capture's
         # figure over would announce a stall that has not happened.
         self._dropped_seen = 0
-        self.start_button.setEnabled(False)
-        self.stop_button.setEnabled(True)
+        # Reaching here required _capture_state == Idle, and Idle always
+        # forces the Pause button unchecked (see _apply_capture_state) — so
+        # the worker's own unpaused default always matches the button; there
+        # is no state left to carry over the way there once was.
+        self._apply_capture_state(self._RUNNING)
+        self._lock_interactions()
         thread.start()
 
     def stop_capture(self) -> None:
+        if self._capture_state not in (self._RUNNING, self._PAUSED) \
+                or self._interaction_locked:
+            return
         if self._worker is not None:
             self._worker.request_stop()
-        self.stop_button.setEnabled(False)
+        self._apply_capture_state(self._STOPPING)
+        self._lock_interactions()
 
     def _teardown_thread(self) -> None:
         if self._thread is not None:
@@ -546,13 +670,12 @@ class MainWindow(QMainWindow):
             self._thread.wait(3000)
             self._thread = None
         self._worker = None
-        self.start_button.setEnabled(True)
-        self.stop_button.setEnabled(False)
-        # A finished capture leaves nothing to pause. Clearing the button means
-        # the next Start runs, rather than coming up frozen with no visible
-        # reason why no frames are arriving.
-        if self.pause_button.isChecked():
-            self.pause_button.setChecked(False)
+        # Returning to Idle resets Pause — unchecked, disabled, labelled
+        # "Pause" — so a stopped-while-paused capture never comes back up
+        # already claiming "Resume" for a capture that has not even
+        # started, and the next Start always runs rather than coming up
+        # frozen with no visible reason why no frames are arriving.
+        self._apply_capture_state(self._IDLE)
 
     def _on_source_started(self, description: str) -> None:
         self.status_message.setText(description)
@@ -591,30 +714,156 @@ class MainWindow(QMainWindow):
         QMessageBox.critical(self, "Capture error", message)
         self.status_message.setText("Error: {}".format(message.splitlines()[0]))
 
-    def _on_pause(self, paused: bool) -> None:
-        paused = bool(paused)
+    def _on_pause_toggled(self, checked: bool) -> None:
+        """The Pause button's own toggled signal. A real user click can only
+        reach here while the button is enabled — Running or Paused and not
+        interaction-locked, see _refresh_capture_controls — but this still
+        checks explicitly, since a raw ``setChecked()`` call (a test, some
+        future caller) is not guaranteed to have checked first, and the
+        promise "paused" makes is specifically about a capture that is
+        actually happening.
+        """
+        if self._updating_capture_controls:
+            return
+        if self._interaction_locked:
+            # The button's own checked state already flipped before this
+            # slot ran (that is how toggled() works) — put it back rather
+            # than just ignoring the click, or the button would disagree
+            # with _capture_state about whether capture is paused.
+            self._apply_capture_state(self._capture_state)
+            return
+        if self._capture_state not in (self._RUNNING, self._PAUSED):
+            return
+        checked = bool(checked)
         if self._worker is not None:
-            self._worker.set_paused(paused)
-        self.pause_button.setText("Resume" if paused else "Pause")
-        tip = ("Resume updating the views; reception and logging never stopped"
-               " (F7)" if paused else
-               "Freeze the views; frames keep being received and logged  (F7)")
-        self.pause_button.setToolTip(tip)
-        self.pause_button.setAccessibleName("Resume display" if paused
-                                            else "Pause display")
-        # The status line must describe what is actually happening. Claiming
-        # frames are still being received while no capture is running would be
-        # a plausible-sounding lie about a bus nobody is listening to.
-        if paused and self._worker is not None:
-            self.status_message.setText(
-                "Display paused — still receiving and logging")
-        elif paused:
-            self.status_message.setText(
-                "Display paused — nothing is running; Start will come up paused")
-        elif self._thread is not None:
-            self.status_message.setText("Capturing")
-        else:
-            self.status_message.setText("Idle — press Start")
+            self._worker.set_paused(checked)
+        self._apply_capture_state(self._PAUSED if checked else self._RUNNING)
+        self._lock_interactions()
+
+    def _toggle_pause_shortcut(self) -> None:
+        """F7. A QAction's shortcut fires regardless of whether the button
+        it is nominally attached to is enabled — unlike a real click, which
+        the button's own disabled state already blocks — so without this
+        guard, F7 pressed while idle would still check the button and claim
+        a paused state with no capture running to actually honour.
+        """
+        if self.pause_button.isEnabled():
+            self.pause_button.toggle()
+
+    def _refresh_capture_controls(self) -> None:
+        """The one place Start/Stop/Pause's *enabled* state is computed.
+
+        Two independent inputs, neither the other's source of truth:
+        ``_capture_state`` (what capture is actually doing — the only thing
+        that decides which actions would ever make sense) and
+        ``_interaction_locked`` (whether a brief post-action debounce is
+        still running — see _lock_interactions). A button is enabled only
+        when both agree it should be. Called from _apply_capture_state on
+        every real state transition, and from the lock/unlock methods on
+        every debounce edge, so this is the only function that ever
+        actually flips one of these three buttons' enabled bit.
+        """
+        state = self._capture_state
+        active = state in (self._RUNNING, self._PAUSED)
+        interactive = not self._interaction_locked
+        self.start_button.setEnabled(state == self._IDLE and interactive)
+        self.stop_button.setEnabled(active and interactive)
+        self.pause_button.setEnabled(active and interactive)
+
+    def _lock_interactions(self) -> None:
+        """Start a brief lockout after an accepted Start/Stop/Pause/Resume.
+
+        Not a queue: a click or shortcut that arrives while locked is
+        rejected outright (see the guards at the top of start_capture,
+        stop_capture and _on_pause_toggled), never deferred or replayed
+        once the lock lifts. QTimer, not time.sleep(): this must not block
+        the UI thread — capture keeps delivering frames, the window stays
+        responsive, only a *new* control action is refused for a moment.
+        """
+        self._interaction_locked = True
+        self._refresh_capture_controls()
+        self._interaction_lock_timer.start(self._INTERACTION_LOCK_MS)
+
+    def _on_interaction_unlocked(self) -> None:
+        self._interaction_locked = False
+        # Re-checks the *current* _capture_state, not whatever it was when
+        # the lock started — if Stop's teardown already reached Idle while
+        # this was still running, Start becomes enabled here; if teardown
+        # is still in flight, _apply_capture_state's own later call to
+        # _refresh_capture_controls picks it up the moment it does.
+        self._refresh_capture_controls()
+
+    def _apply_capture_state(self, state: str) -> None:
+        """The single place Start/Stop/Pause's enabled/checked/text and the
+        status line get set for a capture-state transition.
+
+        Previously scattered across start_capture, stop_capture,
+        _teardown_thread and the old _on_pause: Pause had no enabled/
+        disabled logic *anywhere*, so it was enabled while idle with
+        nothing ever having disabled it, and F7 could arm a "start paused"
+        flag with no capture to apply it to. Centralizing here is what
+        makes "Pause disabled while idle" (and every other rule below) hold
+        regardless of which of those four call sites triggered the
+        transition.
+
+        State model:
+          Idle     - Start enabled; Stop, Pause disabled; Pause unchecked,
+                     labelled "Pause".
+          Running  - Start disabled; Stop, Pause enabled; Pause "Pause".
+          Paused   - Start disabled; Stop enabled; Pause enabled, checked,
+                     labelled "Resume".
+          Stopping - Start, Stop, Pause all disabled, until teardown
+                     completes and this runs again with Idle.
+        """
+        if self._updating_capture_controls:
+            return
+        self._updating_capture_controls = True
+        try:
+            self._capture_state = state
+            self._refresh_capture_controls()
+            # Idle and Running both force *unchecked*, not just Idle: the
+            # button is disabled outside Running/Paused, but setChecked()
+            # still works on a disabled widget (only real clicks are
+            # blocked), so a click that landed while idle — or a raw
+            # setChecked() from a test — could otherwise leave it checked
+            # right through a subsequent Start, showing "Pause" (never
+            # refreshed, since it was blocked from getting here) on a
+            # button that secretly still reports itself checked. Forcing
+            # it here, on every transition into Idle *or* Running, makes
+            # this the single source of truth for "checked" the same way
+            # it already is for "enabled" and "text" — never inferred from
+            # whatever the button happened to already say.
+            #
+            # Guarded by _updating_capture_controls (set above): the
+            # toggled() this emits when it actually changes something
+            # re-enters _on_pause_toggled, not this method, and that
+            # early-returns too while the flag is set — so this cannot
+            # recurse back into a second, nested _apply_capture_state.
+            if state == self._IDLE or state == self._RUNNING:
+                self.pause_button.setChecked(False)
+            elif state == self._PAUSED:
+                self.pause_button.setChecked(True)
+        finally:
+            self._updating_capture_controls = False
+
+        checked = self.pause_button.isChecked()
+        self.pause_button.setText("Resume" if checked else "Pause")
+        self.pause_button.setToolTip(
+            "Resume updating the views; reception and logging never stopped"
+            " (F7)" if checked else
+            "Freeze the views; frames keep being received and logged  (F7)")
+        self.pause_button.setAccessibleName(
+            "Resume display" if checked else "Pause display")
+
+        # The status line must describe what is actually happening — saying
+        # frames are still arriving while no capture is running would be a
+        # plausible-sounding lie about a bus nobody is listening to.
+        self.status_message.setText({
+            self._IDLE: "Idle — press Start",
+            self._RUNNING: "Capturing",
+            self._PAUSED: "Display paused — still receiving and logging",
+            self._STOPPING: "Stopping…",
+        }[state])
 
     # ------------------------------------------------------------------
     # frame intake
@@ -760,8 +1009,7 @@ class MainWindow(QMainWindow):
             self._worker.reset_counters()
         self._last_received = 0
         self._last_rate_at = time.monotonic()
-        for metric in (self.metric_received, self.metric_shown):
-            metric.set_value("0")
+        self.metric_received.set_value("0")
         self.metric_dropped.set_value("0", "muted")
         self.metric_rate.set_value("—", "muted")
 
@@ -881,14 +1129,14 @@ class MainWindow(QMainWindow):
         self.database = database
         self.interpret_view.set_database(database)
         if database is None:
-            self.dbc_chip.set_text_and_tone("no database", "muted")
+            self._set_chip_text(self.dbc_chip, "no database", "muted")
             self.dbc_chip.setToolTip(
                 "No database applied. Frames are shown raw — which is all "
                 "this tool ever needs to be useful."
             )
             self.status_message.setText("No database applied")
         else:
-            self.dbc_chip.set_text_and_tone(database.name, "accent")
+            self._set_chip_text(self.dbc_chip, database.name, "accent")
             self.dbc_chip.setToolTip(
                 "{}\nDecoding is an added layer; raw frames stay exactly as "
                 "visible as before.".format(database.describe())
@@ -1017,7 +1265,6 @@ class MainWindow(QMainWindow):
             return
 
         self.metric_received.set_value("{:,}".format(worker.received))
-        self.metric_shown.set_value("{:,}".format(worker.accepted))
         self.metric_dropped.set_value(
             "{:,}".format(worker.dropped), "warning" if worker.dropped else "muted"
         )
@@ -1059,6 +1306,16 @@ class MainWindow(QMainWindow):
                     getattr(source, "progress", 0.0) * 100,
                 )
             )
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        if getattr(self, "_sized", False):
+            return
+        self._sized = True
+        # The one-time initial sidebar split — see _build_ui's comment on
+        # why this is deferred here rather than applied directly during
+        # construction.
+        self.set_sidebar_collapsed(self._pending_sidebar_collapsed, remember=False)
 
     def closeEvent(self, event) -> None:
         self.config.set("ui.window", {"width": self.width(), "height": self.height()})

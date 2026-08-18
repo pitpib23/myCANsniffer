@@ -40,8 +40,8 @@ from .theme import (
 )
 from .widgets import (
     CELL_PADDING, MONO_ROLE, TONE_ROLE, ActivityLegend, BitMatrix, Chip,
-    EmptyState, InterpretCellDelegate, PayloadStrip, SectionLabel,
-    Segmented,
+    CurrentPageStack, EmptyState, InterpretCellDelegate, PayloadStrip,
+    SectionLabel, Segmented,
 )
 
 _BLOCK_SIZES = [1, 2, 4, 8]
@@ -170,7 +170,13 @@ class InterpretView(QWidget):
         self.controls = self._build_controls()
         table_layout.addWidget(self.controls)
 
-        self.workspace = QStackedWidget()
+        # CurrentPageStack, not a plain QStackedWidget: this switcher's pages
+        # (Blocks/Signals/Range/Plot/ISO-TP) differ substantially in their
+        # own minimum footprint, and a plain QStackedWidget reserves room
+        # for the *largest* page even while a smaller one is showing — see
+        # widgets.CurrentPageStack for why that matters for the top-level
+        # window's own minimum size.
+        self.workspace = CurrentPageStack()
         self.workspace.addWidget(self._build_body())        # 0 Blocks
         self.workspace.addWidget(self._build_signals())      # 1 Signals
         self.workspace.addWidget(self._build_range())        # 2 Range

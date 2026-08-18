@@ -147,13 +147,19 @@ class Signal(object):
     choices: Tuple[Tuple[int, str], ...] = ()
     #: Denormalised message context, present when can_id is not None. Several
     #: signals sharing a can_id are expected to agree; the group's export uses
-    #: whichever signal it meets first, which normal use never disagrees on
-    #: since there is no per-signal UI to set these differently.
+    #: whichever signal it meets first. Kept in agreement by the UI layer
+    #: (Profile.set_message_meta), which edits a message's fields across
+    #: every signal in its group at once rather than one at a time.
     message_name: str = ""
     message_length: Optional[int] = None
     message_comment: str = ""
     message_senders: Tuple[str, ...] = ()
     message_cycle_time: Optional[int] = None
+    #: CAN FD, at message granularity (cantools' own Message.is_fd). Receive
+    #: metadata only — this project never sends, so nothing here selects a
+    #: data bitrate or a BRS flag; it only records/exports what a frame's
+    #: message declares.
+    message_is_fd: bool = False
 
     def __post_init__(self) -> None:
         self.start = int(self.start)
@@ -265,6 +271,7 @@ class Signal(object):
             "message_comment": self.message_comment,
             "message_senders": list(self.message_senders),
             "message_cycle_time": self.message_cycle_time,
+            "message_is_fd": self.message_is_fd,
         }
 
     @classmethod
@@ -307,6 +314,7 @@ class Signal(object):
             message_comment=str(raw.get("message_comment", "") or ""),
             message_senders=tuple(raw.get("message_senders", ()) or ()),
             message_cycle_time=raw.get("message_cycle_time"),
+            message_is_fd=bool(raw.get("message_is_fd", False)),
         )
 
 
@@ -345,12 +353,13 @@ def _cantools_signal(signal: Signal):
 
 
 def _cantools_message(frame_id: int, is_extended: bool, name: str,
-                      length: int, cantools_signals: Sequence[Any]):
+                      length: int, cantools_signals: Sequence[Any],
+                      is_fd: bool = False):
     from cantools.database.can.message import Message
     return Message(
         frame_id=frame_id, name=name or "Msg_{:X}".format(frame_id),
         length=max(1, int(length)), signals=list(cantools_signals),
-        is_extended_frame=bool(is_extended), strict=False,
+        is_extended_frame=bool(is_extended), is_fd=bool(is_fd), strict=False,
     )
 
 
@@ -472,6 +481,126 @@ class Profile(object):
         self.dirty = True
         return signal
 
+    def has_message(self, can_id: int, is_extended: bool) -> bool:
+        return any(s.can_id == can_id and s.is_extended == is_extended
+                  for s in self.signals)
+
+    def add_signal(self, can_id: Optional[int], is_extended: bool = False,
+                   signal: Optional[Signal] = None) -> Signal:
+        """Add a signal under a specific message (or "any ID" if ``can_id``
+        is None) — the message-oriented replacement for ``add()``: the
+        caller says *which* message a new signal belongs to instead of
+        adding it loose and leaving it to be assigned afterwards.
+
+        Inherits the group's shared message metadata (name, length, ...)
+        from an existing sibling signal, if there is one, so a signal added
+        to an existing message always agrees with the rest of its group —
+        message_groups() and export() both trust that agreement rather than
+        reconciling it themselves.
+        """
+        signal = signal or Signal(name="signal {}".format(len(self.signals) + 1))
+        signal.can_id = can_id
+        signal.is_extended = bool(is_extended) if can_id is not None else False
+        if can_id is not None:
+            sibling = next((s for s in self.signals if s.can_id == can_id
+                           and s.is_extended == signal.is_extended), None)
+            if sibling is not None:
+                signal.message_name = sibling.message_name
+                signal.message_length = sibling.message_length
+                signal.message_comment = sibling.message_comment
+                signal.message_senders = sibling.message_senders
+                signal.message_cycle_time = sibling.message_cycle_time
+                signal.message_is_fd = sibling.message_is_fd
+            elif not signal.message_name:
+                signal.message_name = "Msg_{:X}".format(can_id)
+        else:
+            signal.message_name = ""
+        self.signals.append(signal)
+        self.dirty = True
+        return signal
+
+    def set_message_meta(self, can_id: int, is_extended: bool, *,
+                         name: Optional[str] = None,
+                         length: Optional[int] = None,
+                         is_fd: Optional[bool] = None,
+                         senders: Optional[Tuple[str, ...]] = None,
+                         comment: Optional[str] = None,
+                         cycle_time: Optional[int] = None) -> bool:
+        """Update message-level fields across every signal that shares this
+        CAN ID at once. A ``None`` argument leaves that field alone.
+
+        A message's signals are expected to agree on its name, length, and
+        so on — this is the one place that assumption is upheld: editing a
+        message updates its *entire* group in one step, rather than one
+        signal's copy at a time the way the old per-signal editor did.
+        Returns whether anything actually changed.
+        """
+        changed = False
+        for sig in self.signals:
+            if sig.can_id != can_id or sig.is_extended != is_extended:
+                continue
+            if name is not None and sig.message_name != name:
+                sig.message_name = name
+                changed = True
+            if length is not None and sig.message_length != length:
+                sig.message_length = length
+                changed = True
+            if is_fd is not None and sig.message_is_fd != is_fd:
+                sig.message_is_fd = is_fd
+                changed = True
+            if senders is not None and sig.message_senders != senders:
+                sig.message_senders = senders
+                changed = True
+            if comment is not None and sig.message_comment != comment:
+                sig.message_comment = comment
+                changed = True
+            if cycle_time is not None and sig.message_cycle_time != cycle_time:
+                sig.message_cycle_time = cycle_time
+                changed = True
+        if changed:
+            self.dirty = True
+        return changed
+
+    def move_message(self, can_id: int, is_extended: bool,
+                     new_can_id: int, new_is_extended: bool) -> bool:
+        """Re-key an entire message's CAN ID / extended-ness in one step.
+
+        The message, not the signal, is the unit that moves: every signal
+        in the group is re-keyed together, so they can never end up
+        disagreeing about which message they belong to the way independent
+        per-signal CAN ID edits once could. Raises SignalError if the
+        destination is already a different message.
+        """
+        if (new_can_id, new_is_extended) == (can_id, is_extended):
+            return False
+        if self.has_message(new_can_id, new_is_extended):
+            raise SignalError(
+                "0x{:X} is already used by another message.".format(new_can_id))
+        moved = False
+        for sig in self.signals:
+            if sig.can_id == can_id and sig.is_extended == is_extended:
+                sig.can_id = new_can_id
+                sig.is_extended = new_is_extended
+                moved = True
+        if moved:
+            self.dirty = True
+        return moved
+
+    def remove_message(self, can_id: int, is_extended: bool) -> int:
+        """Delete a whole message: every signal that belongs to it.
+
+        Returns how many signals were removed. "Any ID" is not a message —
+        callers must not pass ``can_id=None`` here; individual any-ID
+        signals are removed one at a time with ``remove()``, same as before.
+        """
+        before = len(self.signals)
+        self.signals = [s for s in self.signals
+                        if not (s.can_id == can_id and s.is_extended == is_extended)]
+        removed = before - len(self.signals)
+        if removed:
+            self.dirty = True
+        return removed
+
     def duplicate(self, index: int) -> Optional[Signal]:
         if not (0 <= index < len(self.signals)):
             return None
@@ -578,6 +707,7 @@ def import_dbc(path: str) -> Profile:
                 message_comment=str(getattr(message, "comment", "") or ""),
                 message_senders=tuple(getattr(message, "senders", ()) or ()),
                 message_cycle_time=getattr(message, "cycle_time", None),
+                message_is_fd=bool(getattr(message, "is_fd", False)),
             ))
     return profile
 
@@ -629,6 +759,20 @@ def export_dbc(profile: Profile, path: str) -> Tuple[int, List[str]]:
             "{} signal{} are channel-restricted; DBC has no channel concept, "
             "so exported signals apply to every channel.".format(
                 len(channelled), "" if len(channelled) == 1 else "s"))
+    fd_ids: List[int] = []
+    for s in profile.signals:
+        if s.can_id is not None and s.message_is_fd and s.can_id not in fd_ids:
+            fd_ids.append(s.can_id)
+    if fd_ids:
+        warnings.append(
+            "{} message{} marked CAN FD will be written as classic CAN — "
+            "this writer does not yet emit the VFrameFormat attribute a "
+            "real CAN FD .dbc needs to carry that flag. The flag itself is "
+            "not lost from this application, only from the exported file. "
+            "Affected: {}".format(
+                len(fd_ids), "" if len(fd_ids) == 1 else "s",
+                ", ".join("0x{:X}".format(i) for i in fd_ids[:6])
+                + (", ..." if len(fd_ids) > 6 else "")))
 
     messages = []
     written = 0
@@ -643,7 +787,8 @@ def export_dbc(profile: Profile, path: str) -> Tuple[int, List[str]]:
         length = first.message_length or max(
             (s.start + s.length + 7) // 8 for s in exportable)
         messages.append(_cantools_message(
-            can_id, is_extended, first.message_name, length, ct_signals))
+            can_id, is_extended, first.message_name, length, ct_signals,
+            is_fd=first.message_is_fd))
         written += len(exportable)
 
     db = CtDatabase(messages=messages, strict=False)
@@ -689,7 +834,8 @@ def build_dbc_database(profile: Profile) -> Optional[DbcDatabase]:
             (s.start + s.length + 7) // 8 for s in usable)
         try:
             messages.append(_cantools_message(
-                can_id, is_extended, first.message_name, length, ct_signals))
+                can_id, is_extended, first.message_name, length, ct_signals,
+                is_fd=first.message_is_fd))
         except Exception:
             continue          # one malformed message must not sink the rest
     if not messages:
