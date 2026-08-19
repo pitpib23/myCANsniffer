@@ -44,8 +44,15 @@ class CanFrameSource(abc.ABC):
         return False
 
 
-def build_source(config) -> CanFrameSource:
-    """Instantiate the source selected in the configuration."""
+def build_source(config, resume_from: Optional[float] = None) -> CanFrameSource:
+    """Instantiate the source selected in the configuration.
+
+    ``resume_from``: forwarded to FileSource, and only ever meaningful for
+    one -- see its own docstring. Live monitoring has no capture to rewind
+    and no playback-session timeline to continue; a caller passing this for
+    a live source simply gets it ignored, never a live-specific analogue of
+    "continuing from where the last one left off".
+    """
     from .file_source import FileSource
     from .live import LiveSource
 
@@ -55,6 +62,7 @@ def build_source(config) -> CanFrameSource:
             path=config.get("source.file.path", "baseline.asc"),
             speed=float(config.get("source.file.speed", 0.0) or 0.0),
             loop=bool(config.get("source.file.loop", False)),
+            resume_from=resume_from,
         )
     if kind == "live":
         return LiveSource(config.get("source.live", {}) or {})

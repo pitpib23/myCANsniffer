@@ -368,6 +368,21 @@ QPushButton#Disclosure {
 QPushButton#Disclosure:hover   { color: $accent; }
 QPushButton#Disclosure:checked { color: $text; }
 
+/* Compact prev/next transfer navigator -- see isotp_view.py's own
+   _build_navigator. Small and round rather than the default button padding,
+   which would make a `<` on its own look like an oddly narrow label. */
+QPushButton#NavArrow {
+    background-color: $raised;
+    border: 1px solid $border;
+    border-radius: 12px;
+    padding: 0px;
+    font-weight: 700;
+    color: $text_secondary;
+}
+QPushButton#NavArrow:hover    { background-color: $hover; color: $text; border-color: $border_strong; }
+QPushButton#NavArrow:pressed  { background-color: $overlay; }
+QPushButton#NavArrow:disabled { color: $text_muted; background-color: $surface; border-color: $border_subtle; }
+
 QLabel#CountBadge {
     background-color: $accent;
     color: $text_inverted;

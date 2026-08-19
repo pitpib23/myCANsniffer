@@ -210,7 +210,7 @@ class WindowKeepsUpdatingTests(unittest.TestCase):
         # A live-like source, so the capture does not simply end. Patched in
         # rather than opened: no interface is touched by this test.
         self._real_build = module.build_source
-        module.build_source = lambda _config: _EndlessSource(interval=0.0004)
+        module.build_source = lambda _config, resume_from=None: _EndlessSource(interval=0.0004)
         self.addCleanup(lambda: setattr(module, "build_source", self._real_build))
 
     def _spin(self, seconds):

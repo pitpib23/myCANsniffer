@@ -14,9 +14,9 @@ from PySide6.QtGui import (
     QColor, QFont, QFontMetrics, QFontMetricsF, QPainter, QPainterPath, QPen,
 )
 from PySide6.QtWidgets import (
-    QButtonGroup, QFrame, QHBoxLayout, QLabel, QPushButton, QSizePolicy,
-    QStackedWidget, QStyle, QStyledItemDelegate, QStyleOptionViewItem,
-    QVBoxLayout, QWidget,
+    QButtonGroup, QFrame, QHBoxLayout, QLabel, QPushButton, QScrollArea,
+    QSizePolicy, QStackedWidget, QStyle, QStyledItemDelegate,
+    QStyleOptionViewItem, QVBoxLayout, QWidget,
 )  # noqa: F401  (QSizePolicy used by NavRail and PayloadStrip)
 
 from .theme import RADIUS_MD, RADIUS_SM, ROW_HEIGHT, SPACE_SM, SPACE_XS, Theme
@@ -131,6 +131,52 @@ class CurrentPageStack(QStackedWidget):
                 else super().minimumSizeHint())
 
 
+def scrollable(content: QWidget) -> QScrollArea:
+    """Wrap a page that can genuinely need more room than the viewport gives
+    it, so the overflow scrolls instead of either clipping below the
+    window's bottom edge or dragging the top-level window's minimum size up
+    to fit it.
+
+    The second half matters as much as the first: a CurrentPageStack (above)
+    reports whichever page is current's own minimumSizeHint() as its own —
+    by design, so the stack is never held hostage to the *largest* page
+    while showing a small one. A page with a real, largely fixed minimum
+    footprint of its own (Plot's control row; ISO-TP's splitter, whose
+    panes each refuse to show fewer than a handful of rows) is fine in
+    itself but, reported directly as "the current page's minimum", would
+    still propagate through that stack, through every ancestor layout, up
+    to the QMainWindow — which, being top-level, has Qt apply its own
+    layout's computed minimum size to the *native window* (WM_GETMINMAXINFO
+    and friends). A maximized or fullscreen window whose current geometry
+    no longer satisfies that freshly-grown minimum gets resized by the
+    window manager to fit it — exactly the "selecting a tool un-maximizes
+    or resizes the window" bug this function exists to prevent. A
+    QScrollArea's own minimumSizeHint is small and constant regardless of
+    its contents, so wrapping a page here is what keeps "the current page's
+    own minimum" — the thing CurrentPageStack (deliberately) still reports
+    upward — always small too.
+
+    Not every page needs this: one that is already a QAbstractScrollArea
+    (a QTableWidget/QTableView behind an empty-state page, for instance)
+    already handles its own overflow row-by-row, and wrapping it a second
+    time would just nest two scrollbars over the same content for no
+    benefit. Use this only for a page whose own natural size can exceed the
+    viewport as a *whole page*, not row-by-row.
+    """
+    scroll = QScrollArea()
+    scroll.setObjectName("WorkspaceScroll")
+    scroll.setFrameShape(QFrame.NoFrame)
+    # Resizable: the content widget is resized to the viewport rather than
+    # kept at its own sizeHint, so it expands to fill genuinely available
+    # room and only overflows -- triggering a scrollbar -- when the
+    # viewport is smaller than the content's own minimum.
+    scroll.setWidgetResizable(True)
+    scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+    scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+    scroll.setWidget(content)
+    return scroll
+
+
 class MetricChip(QWidget):
     """Label + value pair for the status bar."""
 
@@ -220,14 +266,26 @@ class NavRail(QFrame):
     WIDTH = 76
 
     def __init__(self, destinations: Sequence[Tuple[str, str, str]],
-                 theme: Theme, current: int = 0, parent=None):
-        """``destinations`` is a sequence of ``(glyph, label, tooltip)``."""
+                 theme: Theme, current: int = 0, parent=None,
+                 toggleable: Optional[Sequence[int]] = None):
+        """``destinations`` is a sequence of ``(glyph, label, tooltip)``.
+
+        ``toggleable``: which destination indexes double as a collapse
+        control for a panel beside them -- see update_hints. Defaults to
+        every destination (the original, and still the common, case); a
+        destination *not* listed there replaces the whole workspace on its
+        own rather than opening/closing a panel next to this rail, so its
+        own tooltip never changes to "Show X"/"Hide X" the way a toggleable
+        one's does.
+        """
         super().__init__(parent)
         self.setObjectName("NavRail")
         self.setFixedWidth(self.WIDTH)
         self._theme = theme
         self._collapsed = False
         self._destinations = list(destinations)
+        self._toggleable = (set(range(len(self._destinations)))
+                            if toggleable is None else set(toggleable))
 
         column = QVBoxLayout(self)
         column.setContentsMargins(SPACE_XS + 2, SPACE_SM, SPACE_XS + 2, SPACE_SM)
@@ -266,16 +324,21 @@ class NavRail(QFrame):
     def update_hints(self, collapsed: bool) -> None:
         """Retarget the tooltips at what a click will actually do.
 
-        The destinations double as the show/hide control for the panel beside
-        them, so "Trace" means *open the trace* when the panel is hidden and
-        *hide it* when that section is already the one on screen.
+        A toggleable destination (see __init__) doubles as the show/hide
+        control for the panel beside it, so "Trace" means *open the trace*
+        when the panel is hidden and *hide it* when that section is already
+        the one on screen. A non-toggleable one (ISO-TP) replaces the whole
+        workspace outright rather than opening or closing anything beside
+        this rail, so it always keeps its own plain, unchanging tooltip.
         """
         current = self.current()
         for index, (_glyph, label, tooltip) in enumerate(self._destinations):
             button = self.group.button(index)
             if button is None:
                 continue
-            if collapsed:
+            if index not in self._toggleable:
+                hint = tooltip
+            elif collapsed:
                 hint = "Show {}".format(label.lower())
             elif index == current:
                 hint = "Hide {}".format(label.lower())
@@ -379,6 +442,21 @@ class _NavButton(QPushButton):
             ]
             for (x1, y1), (x2, y2) in zip(points, points[1:]):
                 painter.drawLine(int(x1), int(y1), int(x2), int(y2))
+        elif self._glyph == "chain":
+            # Three separate frames, linked into one reassembled transfer.
+            size = 5.0
+            nodes = [
+                (box.left(), box.bottom() - size),
+                (box.left() + (box.width() - size) / 2, box.top() + (box.height() - size) / 2),
+                (box.right() - size, box.top()),
+            ]
+            for x, y in nodes:
+                painter.drawRect(QRectF(x, y, size, size))
+            for (x1, y1), (x2, y2) in zip(nodes, nodes[1:]):
+                painter.drawLine(
+                    int(x1 + size), int(y1 + size / 2),
+                    int(x2), int(y2 + size / 2),
+                )
 
 
 class FilterChip(QFrame):

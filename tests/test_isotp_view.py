@@ -29,8 +29,8 @@ if HAVE_QT:
     from cansniff.analysis.isotp_survey import POSSIBLE, STRONG, WEAK, survey
     from cansniff.analysis.store import FrameStore
     from cansniff.config import Config
-    from cansniff.ui.interpret_view import ISOTP, InterpretView
     from cansniff.ui.isotp_view import IsoTpView
+    from cansniff.ui.main_window import MainWindow
     from cansniff.ui.theme import Theme
 
 
@@ -64,7 +64,9 @@ class StandaloneWidgetTests(unittest.TestCase):
 
     def setUp(self):
         self.theme = Theme()
-        self.widget = IsoTpView(self.theme)
+        self.config = Config.defaults(
+            os.path.join(os.environ.get("TEMP", "."), "cansniff_isotp_widget_test.json"))
+        self.widget = IsoTpView(self.config, self.theme)
         self.addCleanup(self.widget.deleteLater)
         self.store = FrameStore(200000)
         self.store.add(_mixed_capture())
@@ -211,8 +213,11 @@ class StandaloneWidgetTests(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_QT, "PySide6 not available")
-class InterpretViewWiringTests(unittest.TestCase):
-    """The page as reached through the real workspace tab."""
+class MainWindowIsoTpWiringTests(unittest.TestCase):
+    """The page as reached through MainWindow's own top-level ISO-TP nav —
+    ISO-TP is a standalone workspace now, not a contextual InterpretView
+    mode, so this exercises MainWindow rather than InterpretView directly.
+    """
 
     app = None
 
@@ -223,90 +228,80 @@ class InterpretViewWiringTests(unittest.TestCase):
     def setUp(self):
         self.config = Config.defaults(
             os.path.join(os.environ.get("TEMP", "."), "cansniff_isotp_view.json"))
-        self.view = InterpretView(self.config, Theme())
-        self.addCleanup(self.view.deleteLater)
-        self.store = FrameStore(200000)
+        self.window = MainWindow(self.config, Theme())
+        self.addCleanup(self.window.deleteLater)
         self.frames = _mixed_capture()
-        self.store.add(self.frames)
-        self.view.set_frame_store(self.store)
+        self.window.frame_store.add(self.frames)
 
     def _switch(self):
-        self.view.show_frame(self.frames[-1])
-        self.view.view_tabs.set_current(ISOTP)
-        self.view._on_workspace_changed(ISOTP)
+        self.window._activate_isotp()
         self.app.processEvents()
 
     def test_switching_to_isotp_populates_the_summary(self):
         self._switch()
-        self.assertGreater(self.view.isotp.summary_model.rowCount(), 0)
+        self.assertGreater(self.window.isotp_view.summary_model.rowCount(), 0)
 
     def test_the_note_reports_frame_and_id_counts(self):
         self._switch()
-        note = self.view.workspace_note.text()
+        note = self.window.isotp_note.text()
         self.assertIn("frames", note)
         self.assertIn("ISO-TP-shaped", note)
 
     def test_the_survey_is_not_recomputed_on_an_unrelated_refresh(self):
         """Selecting a message must not force a fresh capture-wide survey."""
         self._switch()
-        first_rows = self.view._isotp_rows
+        first_rows = self.window._isotp_rows
         other = _f(0x999, "01 00 01", 999.0)   # not added to the store
-        self.view.show_frame(other, None, 0.0)
-        self.view._refresh_isotp()
-        self.assertIs(self.view._isotp_rows, first_rows)
+        self.window.interpret_view.show_frame(other, None, 0.0)
+        self.window._refresh_isotp()
+        self.assertIs(self.window._isotp_rows, first_rows)
 
     def test_new_frames_eventually_refresh_the_survey(self):
         self._switch()
-        before = self.view._isotp_rows[0].frames if self.view._isotp_rows else 0
+        before = self.window._isotp_rows[0].frames if self.window._isotp_rows else 0
         # Force past the throttle so the new frames are not masked by it.
-        self.view._isotp_built_at = 0.0
-        self.store.add([_f(0x100, "01 00 09", 999.0)])
-        self.view._refresh_isotp()
-        after_total = sum(r.frames for r in self.view._isotp_rows)
+        self.window._isotp_built_at = 0.0
+        self.window.frame_store.add([_f(0x100, "01 00 09", 999.0)])
+        self.window._refresh_isotp()
+        after_total = sum(r.frames for r in self.window._isotp_rows)
         before_total = sum(r.frames for r in
-                           (self.view._isotp_rows or [])) if before else 0
+                           (self.window._isotp_rows or [])) if before else 0
         self.assertGreaterEqual(after_total, before_total)
 
-    def test_double_clicking_a_frame_selects_it_in_the_panel(self):
+    def test_double_clicking_a_frame_routes_to_trace_and_selects_it(self):
         self._switch()
-        for row in range(self.view.isotp.summary_model.rowCount()):
-            if self.view.isotp.summary_model.row_at(row).id_label == "0x7E8":
-                self.view.isotp.summary_view.selectRow(row)
+        for row in range(self.window.isotp_view.summary_model.rowCount()):
+            if self.window.isotp_view.summary_model.row_at(row).id_label == "0x7E8":
+                self.window.isotp_view.summary_view.selectRow(row)
                 break
         self.app.processEvents()
-        self.view.isotp.transfer_view.selectRow(0)
+        self.window.isotp_view.transfer_view.selectRow(0)
         self.app.processEvents()
-        target_frame = self.view.isotp.frame_model._facts[0].frame
-        self.view._on_isotp_frame_activated(target_frame)
-        self.assertIs(self.view.current_frame(), target_frame)
+        target_frame = self.window.isotp_view.frame_model._facts[0].frame
+        self.window._on_isotp_frame_activated(target_frame)
+        self.assertIs(self.window.interpret_view.current_frame(), target_frame)
+        # Routes to Trace: back on the Messages/Trace content area, on the
+        # Trace section specifically -- not left showing ISO-TP.
+        self.assertEqual(self.window.top_stack.currentIndex(),
+                         self.window._STACK_BROWSER)
+        self.assertEqual(self.window.browser_stack.currentIndex(), 1)
 
-    def test_the_raw_strip_is_unaffected_by_visiting_isotp(self):
-        # _switch() selects the capture's last frame to give the survey
-        # something interesting; here the frame must stay fixed, so the tab is
-        # changed directly instead.
-        self.view.show_frame(self.frames[0])
-        before = bytes(self.view.strip._data)
-        self.view.view_tabs.set_current(ISOTP)
-        self.view._on_workspace_changed(ISOTP)
-        self.app.processEvents()
-        self.assertEqual(bytes(self.view.strip._data), before)
-
-    def test_no_store_does_not_crash(self):
-        view = InterpretView(self.config, Theme())
-        self.addCleanup(view.deleteLater)
-        view.view_tabs.set_current(ISOTP)
-        view._on_workspace_changed(ISOTP)
-        self.app.processEvents()
-        self.assertEqual(view.isotp.summary_model.rowCount(), 0)
+    def test_isotp_does_not_depend_on_a_messages_selection(self):
+        """Arriving at ISO-TP with nothing selected in Messages/Trace still
+        surveys the whole capture -- it must never require a selection to
+        be useful.
+        """
+        self.assertIsNone(self.window.interpret_view.current_frame())
+        self._switch()
+        self.assertGreater(self.window.isotp_view.summary_model.rowCount(), 0)
 
     def test_an_empty_capture_shows_the_empty_state(self):
-        view = InterpretView(self.config, Theme())
-        self.addCleanup(view.deleteLater)
-        view.set_frame_store(FrameStore())
-        view.view_tabs.set_current(ISOTP)
-        view._on_workspace_changed(ISOTP)
+        window = MainWindow(self.config, Theme())
+        self.addCleanup(window.deleteLater)
+        window._activate_isotp()
         self.app.processEvents()
-        self.assertTrue(view.isotp.summary_empty.isVisibleTo(view.isotp))
+        self.assertTrue(
+            window.isotp_view.summary_empty.isVisibleTo(window.isotp_view))
 
 
 if __name__ == "__main__":

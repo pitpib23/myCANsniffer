@@ -49,7 +49,7 @@ if HAVE_QT:
     from cansniff.analysis.store import FrameStore
     from cansniff.config import Config
     from cansniff.ui.interpret_view import (
-        BLOCKS, ISOTP, MESSAGES, PLOT, RANGE, SIGNALS, TRACE, InterpretView,
+        BLOCKS, MESSAGES, PLOT, RANGE, SIGNALS, TRACE, InterpretView,
     )
     from cansniff.ui.main_window import MainWindow
     from cansniff.ui.theme import Theme
@@ -78,10 +78,20 @@ def _sample_frames():
 #: implementation anywhere -- only used here, to drive the tests.
 _RESOLUTIONS = [(1920, 1080), (1366, 768), (1280, 720)]
 
-#: Every contextual mode, paired with the primary nav index that owns it.
+#: Every Messages/Trace *contextual* mode, paired with the primary nav index
+#: that owns it. ISO-TP is deliberately not one of these any more -- it is
+#: its own top-level page (see MainWindow._activate_isotp), not a mode
+#: InterpretView switches between -- so it is covered separately below via
+#: the ``"isotp"`` sentinel in _TOP_LEVEL_SEQUENCE.
 _ALL_MODES = [
-    (0, RANGE), (0, PLOT), (0, ISOTP), (1, BLOCKS), (1, SIGNALS),
+    (0, RANGE), (0, PLOT), (1, BLOCKS), (1, SIGNALS),
 ]
+
+#: Every top-level destination worth warming up / cycling through for
+#: geometry-stability testing: the four contextual modes above, plus ISO-TP
+#: itself (the ``"isotp"`` sentinel), interleaved the way the task's own
+#: required interaction sequence lists them.
+_TOP_LEVEL_SEQUENCE = [(0, RANGE), (0, PLOT), "isotp", (1, BLOCKS), (1, SIGNALS)]
 
 
 @unittest.skipUnless(HAVE_QT, "PySide6 not available")
@@ -130,15 +140,31 @@ class WindowCase(unittest.TestCase):
         self.window.setWindowState(Qt.WindowMaximized)
         self.app.processEvents()
         self.assertTrue(self.window.isMaximized())
-        for nav_index, mode in _ALL_MODES:
-            self._select(nav_index, mode)
+        for entry in _TOP_LEVEL_SEQUENCE:
+            self._visit(entry)
 
     def _select(self, nav_index: int, mode: int) -> None:
+        # A real click, not a direct _on_nav_clicked() call: that is what
+        # actually updates the nav's own checked state (QButtonGroup), which
+        # the short-circuit above depends on to mean anything -- and ISO-TP
+        # visits (see _visit) go through the same real button, so the two
+        # must agree on how "already there" is decided.
         if self.window.nav.current() != nav_index:
-            self.window._on_nav_clicked(nav_index)
+            self.window.nav.group.button(nav_index).click()
             self.app.processEvents()
         self.window.interpret_view._on_workspace_changed(mode)
         self.app.processEvents()
+
+    def _visit(self, entry) -> None:
+        """Visit one entry of _TOP_LEVEL_SEQUENCE: either a (nav_index, mode)
+        Messages/Trace contextual pair, or the ``"isotp"`` sentinel for
+        ISO-TP's own top-level page.
+        """
+        if entry == "isotp":
+            self.window.nav.group.button(self.window._NAV_ISOTP).click()
+            self.app.processEvents()
+        else:
+            self._select(*entry)
 
 
 # ---------------------------------------------------------------------------
@@ -152,36 +178,35 @@ class MaximizedStabilityTests(WindowCase):
             with self.subTest(resolution=(width, height)):
                 self._maximize_at(width, height)
                 before = self.window.geometry()
-                for nav_index, mode in _ALL_MODES:
-                    self._select(nav_index, mode)
+                for entry in _TOP_LEVEL_SEQUENCE:
+                    self._visit(entry)
                     self.assertTrue(
                         self.window.isMaximized(),
-                        "no longer maximized after selecting mode {}".format(mode))
+                        "no longer maximized after selecting {}".format(entry))
                     self.assertEqual(
                         self.window.geometry(), before,
-                        "geometry changed after selecting mode {}".format(mode))
+                        "geometry changed after selecting {}".format(entry))
 
     def test_the_required_interaction_sequence(self):
         """Messages -> Range -> Plot -> ISO-TP -> Trace -> Blocks -> Signals,
         exactly the task's own required test, at a realistic resolution."""
         self._maximize_at(1920, 1080)
         before = self.window.geometry()
-        for nav_index, mode in [(0, RANGE), (0, PLOT), (0, ISOTP),
-                                 (1, BLOCKS), (1, SIGNALS)]:
-            self._select(nav_index, mode)
+        for entry in _TOP_LEVEL_SEQUENCE:
+            self._visit(entry)
             self.assertTrue(self.window.isMaximized())
             self.assertEqual(self.window.geometry(), before)
             self.assertTrue(self.window.statusBar().isVisible())
 
     def test_navigation_stability_has_no_cumulative_drift(self):
-        """Messages/Plot, Trace/Signals, Messages/ISO-TP, Trace/Blocks,
-        Messages/Range, repeated -- no accumulated size change."""
+        """Messages/Plot, Trace/Signals, ISO-TP, Trace/Blocks, Messages/Range,
+        repeated -- no accumulated size change."""
         self._maximize_at(1366, 768)
         before = self.window.geometry()
-        sequence = [(0, PLOT), (1, SIGNALS), (0, ISOTP), (1, BLOCKS), (0, RANGE)]
+        sequence = [(0, PLOT), (1, SIGNALS), "isotp", (1, BLOCKS), (0, RANGE)]
         for _ in range(3):
-            for nav_index, mode in sequence:
-                self._select(nav_index, mode)
+            for entry in sequence:
+                self._visit(entry)
                 self.assertEqual(self.window.geometry(), before)
                 self.assertTrue(self.window.isMaximized())
 
@@ -190,15 +215,21 @@ class MinimumSizeStabilityTests(WindowCase):
     """The mechanism behind the geometry tests above: none of this must
     depend on any particular screen size or window manager to verify."""
 
-    def test_minimum_size_hint_is_identical_across_every_contextual_tool(self):
-        """The width must never move at all: that dimension is exactly what
-        Plot's control row (1193px on its own) and ISO-TP's tables (1290px)
-        used to leak straight through. Height is allowed a small, bounded
-        wobble -- Blocks alone shows an extra controls row (~35-40px,
-        deliberate chrome, not leaked content) and the scroll-wrapped Plot/
-        ISO-TP pages report a couple of pixels less than a bare QTableWidget
-        page's own minimum -- but nothing resembling the hundreds of pixels
-        the original bug added.
+    def test_minimum_size_hint_is_identical_across_the_identity_card_modes(self):
+        """Blocks/Signals/Range/Plot all show the shared payload/identity
+        card, so their own minimum must move exactly as little as it did
+        before this file's original bug fix: the width must never move at
+        all -- that dimension is exactly what Plot's control row (1193px on
+        its own) used to leak straight through -- and height is allowed
+        only the small, bounded wobble Blocks' own extra controls row
+        (block size / byte range, ~35-40px, deliberate chrome, not leaked
+        content) has always added.
+
+        ISO-TP has no equivalent here any more: it is not one of
+        InterpretView's own modes at all now, and does not hide or show
+        this card -- see MinimumSizeStabilityTests.
+        test_isotp_page_minimum_never_exceeds_the_browser_workspace_baseline
+        for its own analogous check, one level up at MainWindow.
         """
         self._select(0, RANGE)
         baseline = self.window.interpret_view.minimumSizeHint()
@@ -210,16 +241,40 @@ class MinimumSizeStabilityTests(WindowCase):
             self.assertLessEqual(abs(hint.height() - baseline.height()), 40,
                                  "minimum height drifted after selecting mode {}".format(mode))
 
-    def test_plot_and_isotp_pages_do_not_report_their_raw_content_minimum(self):
-        """Plot's control row and ISO-TP's three tables are each hundreds of
-        pixels wide/tall on their own -- but wrapped in a scroll area (see
-        _scrollable_page), so the *page* the stack sees back is small."""
-        for mode in (PLOT, ISOTP):
-            self._select(0, mode)
-            page = self.window.interpret_view.workspace.currentWidget()
-            self.assertIsInstance(page, QScrollArea)
-            self.assertLess(page.minimumSizeHint().width(), 200)
-            self.assertLess(page.minimumSizeHint().height(), 200)
+    def test_isotp_page_minimum_never_exceeds_the_browser_workspace_baseline(self):
+        """ISO-TP is now MainWindow's own top-level page (self.top_stack),
+        not a mode InterpretView hides its identity card for -- the
+        equivalent guarantee one level up is that switching to it never
+        makes *that* stack's own reported minimum larger than the
+        Messages/Trace page's, which is what would force a maximized window
+        to grow the way the original bug did.
+        """
+        self.window._activate_browser(self.window._NAV_MESSAGES)
+        baseline = self.window.top_stack.minimumSizeHint()
+        self.window._activate_isotp()
+        hint = self.window.top_stack.minimumSizeHint()
+        self.assertLessEqual(hint.width(), baseline.width())
+        self.assertLessEqual(hint.height(), baseline.height())
+
+    def test_plot_page_does_not_report_its_raw_content_minimum(self):
+        """Plot's control row is hundreds of pixels wide on its own -- but
+        wrapped in a scroll area (see widgets.scrollable), so the *page*
+        the stack sees back is small."""
+        self._select(0, PLOT)
+        page = self.window.interpret_view.workspace.currentWidget()
+        self.assertIsInstance(page, QScrollArea)
+        self.assertLess(page.minimumSizeHint().width(), 200)
+        self.assertLess(page.minimumSizeHint().height(), 200)
+
+    def test_isotp_page_does_not_report_its_raw_content_minimum(self):
+        """Same guarantee as Plot's, one level up: ISO-TP's three stacked
+        tables are each hundreds of pixels tall on their own, but the page
+        self.top_stack sees back is wrapped in a scroll area too."""
+        self.window._activate_isotp()
+        page = self.window.top_stack.currentWidget()
+        self.assertIsInstance(page, QScrollArea)
+        self.assertLess(page.minimumSizeHint().width(), 200)
+        self.assertLess(page.minimumSizeHint().height(), 200)
 
     def test_a_long_workspace_note_does_not_widen_the_minimum(self):
         view = self.window.interpret_view
@@ -246,47 +301,82 @@ class MinimumSizeStabilityTests(WindowCase):
 
 
 class ContextualScrollAreaTests(WindowCase):
-    def test_only_plot_and_isotp_are_wrapped_in_a_scroll_area(self):
-        wrapped = {PLOT, ISOTP}
+    def test_only_plot_is_wrapped_in_a_scroll_area_among_contextual_modes(self):
         for nav_index, mode in _ALL_MODES:
             self._select(nav_index, mode)
             page = self.window.interpret_view.workspace.currentWidget()
             self.assertEqual(
-                isinstance(page, QScrollArea), mode in wrapped,
+                isinstance(page, QScrollArea), mode == PLOT,
                 "mode {} wrapping does not match expectation".format(mode))
 
-    def test_squeezed_viewport_makes_plot_and_isotp_scrollable_to_the_end(self):
+    def test_isotp_page_is_wrapped_in_a_scroll_area(self):
+        self.window._activate_isotp()
+        page = self.window.top_stack.currentWidget()
+        self.assertIsInstance(page, QScrollArea)
+
+    def test_squeezed_viewport_makes_plot_scrollable_to_the_end(self):
         view = self.window.interpret_view
         view.resize(500, 250)
         self.app.processEvents()
-        for mode in (PLOT, ISOTP):
-            with self.subTest(mode=mode):
-                view._on_workspace_changed(mode)
-                self.app.processEvents()
-                page = view.workspace.currentWidget()
-                self.assertIsInstance(page, QScrollArea)
-                vbar = page.verticalScrollBar()
-                content_height = page.widget().minimumSizeHint().height()
-                if content_height > page.viewport().height():
-                    self.assertGreater(
-                        vbar.maximum(), 0,
-                        "{}: content taller than the viewport but nothing to "
-                        "scroll -- content would be unreachable".format(mode))
-                    vbar.setValue(vbar.maximum())
-                    self.app.processEvents()
-                    self.assertEqual(vbar.value(), vbar.maximum(),
-                                     "{}: bottom of the content is not reachable"
-                                     .format(mode))
+        view._on_workspace_changed(PLOT)
+        self.app.processEvents()
+        page = view.workspace.currentWidget()
+        self.assertIsInstance(page, QScrollArea)
+        vbar = page.verticalScrollBar()
+        content_height = page.widget().minimumSizeHint().height()
+        if content_height > page.viewport().height():
+            self.assertGreater(
+                vbar.maximum(), 0,
+                "content taller than the viewport but nothing to scroll -- "
+                "content would be unreachable")
+            vbar.setValue(vbar.maximum())
+            self.app.processEvents()
+            self.assertEqual(vbar.value(), vbar.maximum(),
+                             "bottom of the content is not reachable")
+
+    def test_squeezed_window_makes_isotp_scrollable_to_the_end(self):
+        # Unlike Plot, ISO-TP's own scroll wrapper lives at the MainWindow
+        # level (self.top_stack), not inside InterpretView -- squeezing has
+        # to shrink the whole window, not just interpret_view.
+        self.window.resize(700, 400)
+        self.app.processEvents()
+        self.window._activate_isotp()
+        # Two pumps, not one: ISO-TP's own first-ever show sizes its
+        # internal splitter via a follow-up layout request rather than
+        # resizing everything inline, so the scroll area's viewport/content
+        # geometry is not fully settled after only a single processEvents().
+        self.app.processEvents()
+        self.app.processEvents()
+        page = self.window.top_stack.currentWidget()
+        self.assertIsInstance(page, QScrollArea)
+        vbar = page.verticalScrollBar()
+        content_height = page.widget().minimumSizeHint().height()
+        if content_height > page.viewport().height():
+            self.assertGreater(
+                vbar.maximum(), 0,
+                "content taller than the viewport but nothing to scroll -- "
+                "content would be unreachable")
+            vbar.setValue(vbar.maximum())
+            self.app.processEvents()
+            self.assertEqual(vbar.value(), vbar.maximum(),
+                             "bottom of the content is not reachable")
 
     def test_generous_viewport_needs_no_scrolling(self):
         view = self.window.interpret_view
         view.resize(1600, 1000)
         self.app.processEvents()
-        for mode in (PLOT, ISOTP):
-            view._on_workspace_changed(mode)
-            self.app.processEvents()
-            page = view.workspace.currentWidget()
-            self.assertEqual(page.verticalScrollBar().maximum(), 0)
+        view._on_workspace_changed(PLOT)
+        self.app.processEvents()
+        page = view.workspace.currentWidget()
+        self.assertEqual(page.verticalScrollBar().maximum(), 0)
+
+        self.window.resize(1600, 1000)
+        self.app.processEvents()
+        self.window._activate_isotp()
+        self.app.processEvents()
+        self.app.processEvents()
+        page = self.window.top_stack.currentWidget()
+        self.assertEqual(page.verticalScrollBar().maximum(), 0)
 
     def test_blocks_signals_range_still_scroll_through_their_own_table(self):
         """These pages must not gain a redundant outer scroll area -- their
@@ -310,6 +400,22 @@ class SelectAllModesSmokeTests(WindowCase):
             for to_nav, to_mode in _ALL_MODES:
                 self._select(to_nav, to_mode)
                 self.assertEqual(self.window.interpret_view.current_mode(), to_mode)
+
+    def test_every_top_level_destination_is_reachable_from_every_other(self):
+        """Messages, Trace and ISO-TP, visited in every order, without error
+        or ending up on the wrong page."""
+        for from_entry in _TOP_LEVEL_SEQUENCE:
+            for to_entry in _TOP_LEVEL_SEQUENCE:
+                self._visit(from_entry)
+                self._visit(to_entry)
+                if to_entry == "isotp":
+                    self.assertEqual(self.window.top_stack.currentIndex(),
+                                     self.window._STACK_ISOTP)
+                else:
+                    nav_index, mode = to_entry
+                    self.assertEqual(self.window.top_stack.currentIndex(),
+                                     self.window._STACK_BROWSER)
+                    self.assertEqual(self.window.interpret_view.current_mode(), mode)
 
 
 if __name__ == "__main__":

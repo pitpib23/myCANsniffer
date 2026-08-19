@@ -219,7 +219,7 @@ class PauseResumeGeometryTests(WindowStateTestCase):
 
         self._maximize_at(1366, 768)
         real_build = module.build_source
-        module.build_source = lambda _config: _EndlessSource()
+        module.build_source = lambda _config, resume_from=None: _EndlessSource()
         try:
             self.window.start_capture()
         finally:
@@ -244,7 +244,7 @@ class PauseResumeGeometryTests(WindowStateTestCase):
         before = self._snapshot()
 
         real_build = module.build_source
-        module.build_source = lambda _config: _EndlessSource()
+        module.build_source = lambda _config, resume_from=None: _EndlessSource()
         try:
             for _ in range(3):
                 self.window.start_capture()
@@ -276,7 +276,7 @@ class SplitterStabilityTests(WindowStateTestCase):
         from cansniff.ui import main_window as module
 
         real_build = module.build_source
-        module.build_source = lambda _config: _EndlessSource()
+        module.build_source = lambda _config, resume_from=None: _EndlessSource()
         try:
             self.window.start_capture()
             self.app.processEvents()
@@ -363,8 +363,10 @@ class SplitterStabilityTests(WindowStateTestCase):
         # Now sized against the window's own (already-correct-by-then)
         # width — their sum should be within a small margin of it, not
         # clamped to whatever the splitter's pre-show default happened to
-        # report.
-        self.assertGreaterEqual(sum(sizes), fresh.width() - 40)
+        # report. The icon rail sits beside the splitter, not inside it
+        # (see MainWindow._current_content_width), so its fixed width is
+        # subtracted from the window's own before comparing.
+        self.assertGreaterEqual(sum(sizes), fresh.width() - fresh.nav.WIDTH - 40)
 
     def test_sidebar_restore_after_maximizing_clamps_to_the_current_width(self):
         """Regression: restoring the sidebar after a resize must clamp to
@@ -383,7 +385,9 @@ class SplitterStabilityTests(WindowStateTestCase):
         self.window.set_sidebar_collapsed(False)
         self.app.processEvents()
         total = sum(self.window.splitter.sizes())
-        self.assertGreaterEqual(total, current_width - 40)
+        # See the analogous comment above: the icon rail is outside the
+        # splitter now, so its width is subtracted before comparing.
+        self.assertGreaterEqual(total, current_width - self.window.nav.WIDTH - 40)
 
 
 if __name__ == "__main__":

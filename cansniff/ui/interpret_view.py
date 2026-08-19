@@ -10,7 +10,6 @@ decoding of them are what that call needs.
 
 from __future__ import annotations
 
-import time
 from typing import List, Optional, Tuple
 
 from PySide6.QtCore import Qt
@@ -23,7 +22,6 @@ from PySide6.QtWidgets import (
 )
 
 from ..analysis import dbc as dbc_status
-from ..analysis.isotp_survey import IsoTpSurveyCache
 from ..analysis.series import SeriesCache, block_series, dbc_series
 from ..analysis.stats import RangeStateCache
 from ..config import Config
@@ -32,7 +30,6 @@ from ..interpret import (
     numeric_decoder_keys,
 )
 from ..model import CanFrame, FrameStats
-from .isotp_view import IsoTpView
 from .plot_view import SignalPlot
 from .columns_popup import ColumnsPopup
 from .theme import (
@@ -41,7 +38,7 @@ from .theme import (
 from .widgets import (
     CELL_PADDING, MONO_ROLE, TONE_ROLE, ActivityLegend, BitMatrix, Chip,
     CurrentPageStack, EmptyState, InterpretCellDelegate, PayloadStrip,
-    SectionLabel, Segmented,
+    SectionLabel, Segmented, scrollable,
 )
 
 _BLOCK_SIZES = [1, 2, 4, 8]
@@ -57,36 +54,35 @@ _DEFAULT_PLOT_WINDOW = 2
 #: one that happens to be registered.
 _DEFAULT_PLOT_DECODERS = {1: "u8", 2: "u16_be", 4: "u32_be", 8: "u64_be"}
 
-#: Shortest gap between two ISO-TP surveys of a growing capture. A live bus
-#: bumps the store revision several times a second; re-surveying that often
-#: costs far more than the operator can read.
-_ISOTP_MIN_INTERVAL = 1.5
-
 #: Disclosure caption; {} carries the chevron for the open/closed state.
 _BITS_LABEL = "{}  Bit activity"
 
 #: Analysis modes. Stable identifiers -- MainWindow, tests and the
 #: `self.workspace` QStackedWidget all address a page by one of these,
 #: never by a position in whichever sub-navigation control happens to be
-#: showing it.
-BLOCKS, SIGNALS, RANGE, PLOT, ISOTP = range(5)
+#: showing it. ISO-TP is deliberately not one of these any more: it is
+#: capture-wide, not tied to any one selected message the way these four
+#: are, and lives as its own top-level workspace owned directly by
+#: MainWindow -- see main_window.py's own top-level mode constants.
+BLOCKS, SIGNALS, RANGE, PLOT = range(4)
 
 #: The two primary sections a message/frame is examined under -- exactly
-#: MainWindow's own Messages/Trace nav rail destinations, never a second,
+#: two of MainWindow's own top-level nav rail destinations (the third,
+#: ISO-TP, has no contextual children of its own here), never a second,
 #: independent navigation concept. Every mode belongs to exactly one.
 MESSAGES, TRACE = "messages", "trace"
 
 #: Children offered under each section, in the order their own
 #: sub-navigation control shows them.
 _SECTION_MODES = {
-    MESSAGES: (RANGE, PLOT, ISOTP),
+    MESSAGES: (RANGE, PLOT),
     TRACE: (BLOCKS, SIGNALS),
 }
 _MODE_SECTION = {
     mode: section for section, modes in _SECTION_MODES.items() for mode in modes
 }
 _MODE_LABELS = {
-    RANGE: "Range", PLOT: "Plot", ISOTP: "ISO-TP",
+    RANGE: "Range", PLOT: "Plot",
     BLOCKS: "Blocks", SIGNALS: "Signals",
 }
 _SECTION_TITLES = {MESSAGES: "Messages", TRACE: "Trace"}
@@ -105,9 +101,9 @@ class _ModeSelector:
 
     A caller that only cares which analysis child is active -- tests,
     chiefly -- still addresses it with one flat mode constant (BLOCKS ..
-    ISOTP), the same as when a single five-way Segmented held all of them.
-    Which of the two section-specific controls is actually showing that mode
-    is InterpretView's own business.
+    PLOT), the same as when a single flat Segmented held all of them. Which
+    of the two section-specific controls is actually showing that mode is
+    InterpretView's own business.
     """
 
     def __init__(self, view: "InterpretView") -> None:
@@ -161,12 +157,6 @@ class InterpretView(QWidget):
         self._plot_source: Optional[tuple] = None
         self._range_cache = RangeStateCache()
         self._series_cache = SeriesCache()
-        self._isotp_cache = IsoTpSurveyCache()
-        self._isotp_rows = None
-        self._isotp_window_key = None
-        self._isotp_built_at = None
-        self._isotp_note = ""
-        self._sized_isotp = False
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -190,6 +180,12 @@ class InterpretView(QWidget):
         # scroll ranges differ and the bit columns drift off their bytes.
         summary_layout.addWidget(self.payload_detail, 2, 1)
         root.addWidget(summary)
+        #: Every remaining mode here (Blocks/Signals/Range/Plot) reads one
+        #: selected message's own payload, so this card -- its identity and
+        #: raw bytes -- stays visible throughout. ISO-TP, the one mode that
+        #: had no single message to show identity for, is no longer one of
+        #: these at all; it is MainWindow's own top-level workspace now.
+        self.identity_card = summary
 
         # Card 2: the analysis workspace. Which children are even on offer
         # depends on the section MainWindow's own Messages/Trace nav is
@@ -227,8 +223,7 @@ class InterpretView(QWidget):
         self.view_tabs_messages.setToolTip(
             "Range: what value each byte actually took across every frame "
             "observed for this message.\n"
-            "Plot: how a value moves over time.\n"
-            "ISO-TP: which CAN IDs in the whole capture look like ISO-TP."
+            "Plot: how a value moves over time."
         )
         self.view_tabs_trace = Segmented(
             [_MODE_LABELS[m] for m in _SECTION_MODES[TRACE]], 0)
@@ -252,7 +247,7 @@ class InterpretView(QWidget):
         self.view_tabs_stack.addWidget(self.view_tabs_trace)
         tab_row.addWidget(self.view_tabs_stack)
 
-        # The one flat mode constant (BLOCKS .. ISOTP) is the stable thing
+        # The one flat mode constant (BLOCKS .. PLOT) is the stable thing
         # callers address; which of the two Segmented controls above is
         # actually showing it is this facade's own business -- see
         # _ModeSelector.
@@ -262,13 +257,12 @@ class InterpretView(QWidget):
         self.workspace_note = QLabel("")
         self.workspace_note.setObjectName("Muted")
         # Ignored, not the default Preferred: its text is a per-mode status
-        # line (frame counts, ISO-TP survey summaries, ...) with no natural
-        # upper bound, and a plain QLabel's minimumSizeHint is its full,
-        # unwrapped text -- left at the default, a long note silently made
-        # the whole tab row (and everything containing it, up to the
-        # top-level window) demand however much width THAT particular
-        # mode's text happened to need. Same idiom as isotp_view's own
-        # evidence_reason label.
+        # line (frame counts, decode status, ...) with no natural upper
+        # bound, and a plain QLabel's minimumSizeHint is its full, unwrapped
+        # text -- left at the default, a long note silently made the whole
+        # tab row (and everything containing it, up to the top-level window)
+        # demand however much width THAT particular mode's text happened to
+        # need. Same idiom as isotp_view's own evidence_reason label.
         self.workspace_note.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         tab_row.addWidget(self.workspace_note)
         table_layout.addLayout(tab_row)
@@ -277,9 +271,9 @@ class InterpretView(QWidget):
         table_layout.addWidget(self.controls)
 
         # CurrentPageStack, not a plain QStackedWidget: this switcher's pages
-        # (Blocks/Signals/Range/Plot/ISO-TP) differ substantially in their
-        # own minimum footprint, and a plain QStackedWidget reserves room
-        # for the *largest* page even while a smaller one is showing — see
+        # (Blocks/Signals/Range/Plot) differ substantially in their own
+        # minimum footprint, and a plain QStackedWidget reserves room for
+        # the *largest* page even while a smaller one is showing — see
         # widgets.CurrentPageStack for why that matters for the top-level
         # window's own minimum size.
         self.workspace = CurrentPageStack()
@@ -287,7 +281,6 @@ class InterpretView(QWidget):
         self.workspace.addWidget(self._build_signals())      # 1 Signals
         self.workspace.addWidget(self._build_range())        # 2 Range
         self.workspace.addWidget(self._build_plot())         # 3 Plot
-        self.workspace.addWidget(self._build_isotp())        # 4 ISO-TP
         table_layout.addWidget(self.workspace, 1)
         root.addWidget(interpretation, 1)
 
@@ -383,7 +376,7 @@ class InterpretView(QWidget):
         self.selection_label.setStyleSheet("color: {};".format(self.theme.hex("accent")))
         # Ignored: whether this shows text at all -- and how much -- depends
         # on the active analysis mode (Blocks/Plot bracket a byte range here;
-        # Range/Signals/ISO-TP leave it empty). Left at the default Preferred
+        # Range/Signals leave it empty). Left at the default Preferred
         # policy, that made this whole card's minimum width -- and so the
         # top-level window's -- shift by however wide the current bracket
         # label happens to be, purely from switching modes. Same idiom as
@@ -672,65 +665,12 @@ class InterpretView(QWidget):
 
         self.plot = SignalPlot(self.theme)
         layout.addWidget(self.plot, 1)
-        return self._scrollable_page(container)
-
-    def _build_isotp(self) -> QWidget:
-        # Capture-wide, unlike the other workspaces: the question this page
-        # answers is "which IDs use ISO-TP", which cannot be answered from one
-        # message. The row for the currently selected message is preselected,
-        # so arriving here from a selection still lands where expected.
-        self.isotp = IsoTpView(self.theme)
-        self.isotp.frameActivated.connect(self._on_isotp_frame_activated)
-        return self._scrollable_page(self.isotp)
-
-    def _scrollable_page(self, content: QWidget) -> QScrollArea:
-        """Wrap a workspace page that can genuinely need more room than the
-        viewport gives it, so the overflow scrolls instead of either
-        clipping below the window's bottom edge or dragging the top-level
-        window's minimum size up to fit it.
-
-        The second half matters as much as the first: ``self.workspace``
-        (a CurrentPageStack, see widgets.py) reports whichever page is
-        current's own minimumSizeHint() as its own -- by design, so the
-        stack is never held hostage to the *largest* page while showing a
-        small one. Plot's chooser row and ISO-TP's three stacked tables each
-        have a real, largely fixed minimum footprint of their own (block/
-        window controls; a splitter whose panes each refuse to show fewer
-        than a handful of rows) that is fine in itself but, reported
-        directly as "the current page's minimum", would still propagate
-        through that stack, through every ancestor layout, up to the
-        QMainWindow -- which, being top-level, has Qt apply its own layout's
-        computed minimum size to the *native window* (WM_GETMINMAXINFO and
-        friends). A maximized or fullscreen window whose current geometry no
-        longer satisfies that freshly-grown minimum gets resized by the
-        window manager to fit it -- exactly the "selecting a tool
-        un-maximizes or resizes the window" bug this wrapper exists to
-        prevent. A QScrollArea's own minimumSizeHint is small and constant
-        regardless of its contents, so wrapping the page here is what keeps
-        "the current page's own minimum" -- the thing CurrentPageStack
-        (deliberately) still reports upward -- always small too.
-
-        Only Plot and ISO-TP use this. Blocks, Signals and Range are a
-        QTableWidget behind an empty-state page, and a QTableWidget already
-        is a scroll area for its own rows -- wrapping it in a second one
-        would just nest two scrollbars over the same content for no benefit.
-        Plot's chooser row and ISO-TP's stacked evidence/transfers/frames
-        tables are different: their own natural size can exceed the viewport
-        as a *whole page*, not row-by-row, which is exactly what an outer
-        scroll area is for.
-        """
-        scroll = QScrollArea()
-        scroll.setObjectName("WorkspaceScroll")
-        scroll.setFrameShape(QFrame.NoFrame)
-        # Resizable: the content widget is resized to the viewport rather
-        # than kept at its own sizeHint, so it expands to fill genuinely
-        # available room and only overflows -- triggering a scrollbar --
-        # when the viewport is smaller than the content's own minimum.
-        scroll.setWidgetResizable(True)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        scroll.setWidget(content)
-        return scroll
+        # scrollable(), not a bare container: Plot's chooser row has a real,
+        # largely fixed minimum width of its own that must never propagate
+        # through self.workspace (a CurrentPageStack -- see widgets.py) up to
+        # the top-level window's own minimum size. See scrollable()'s own
+        # docstring for the maximized/fullscreen bug this prevents.
+        return scrollable(container)
 
     # ------------------------------------------------------------------
     # analysis wiring
@@ -825,8 +765,6 @@ class InterpretView(QWidget):
             self._refresh_range()
         elif index == PLOT:
             self._reload_plot_choices()
-        elif index == ISOTP:
-            self._refresh_isotp()
 
     # -- signals ---------------------------------------------------------
 
@@ -952,62 +890,6 @@ class InterpretView(QWidget):
                 ", ".join("{}B x{}".format(k, v)
                           for k, v in sorted(state.lengths.items())))
         self.workspace_note.setText(note)
-
-    # -- iso-tp ----------------------------------------------------------
-
-    def _refresh_isotp(self) -> None:
-        """Survey the whole capture, not just the selected message.
-
-        Recomputed at most once per store revision and throttled while frames
-        are still arriving: a live capture bumps the revision several times a
-        second, and re-surveying a large capture that often would make the
-        window stutter for a result nobody can read that fast.
-        """
-        if self._store is None:
-            self.isotp.set_survey([], None, 0.0)
-            self.workspace_note.setText("")
-            return
-
-        window = self._store.all_frames()
-        fresh = window.cache_key != self._isotp_window_key
-        if fresh:
-            now = time.monotonic()
-            if (self._isotp_built_at is not None
-                    and now - self._isotp_built_at < _ISOTP_MIN_INTERVAL
-                    and self._isotp_rows is not None):
-                # Keep showing the previous survey rather than rebuild; the
-                # note says what it was built from so it is never mistaken for
-                # the live figure.
-                self.workspace_note.setText(self._isotp_note + "  ·  updating…")
-                return
-            self._isotp_rows = self._isotp_cache.rows(window)
-            self._isotp_window_key = window.cache_key
-            self._isotp_built_at = now
-
-        rows = self._isotp_rows or []
-        cached_window = window
-
-        def transfers_for_key(key):
-            return self._isotp_cache.transfers(cached_window, key)
-
-        prefer = self._frame.key if self._frame is not None else None
-        self.isotp.set_survey(rows, transfers_for_key,
-                              self._time_base or 0.0, prefer_key=prefer)
-        if not self._sized_isotp and rows:
-            self.isotp.size_columns()
-            self._sized_isotp = True
-
-        candidates = sum(1 for r in rows if r.candidates)
-        self._isotp_note = (
-            "{:,} frames · {} ID{} with ISO-TP-shaped frames · normal "
-            "addressing".format(len(window), candidates,
-                                "" if candidates == 1 else "s"))
-        self.workspace_note.setText(self._isotp_note)
-
-    def _on_isotp_frame_activated(self, frame) -> None:
-        """Double-clicking a raw frame in the ISO-TP page selects it here."""
-        if frame is not None:
-            self.show_frame(frame, self._stats, self._time_base)
 
     # -- plot ------------------------------------------------------------
 

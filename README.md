@@ -46,14 +46,14 @@ On first run `sniffer_config.json` is created next to `main.py`.
 │ ⎍  │ Filters  [Search: 101 ×]  [Clear all]                                                       │
 │Trce│─────────────────────────────── drag to resize ──────────────────────────────────────────────│
 │    │           0    1    2    3    4    5    6    7                                              │
-│    │ 0x101    81   00   03  [40] [4C] [CC] [CD]  00     Last seen  [ ] Hold      Copy table      │
-│    │                        └──── 3-6 ────┘                                                      │
-│    │ [Ch 1][11-bit][8 bytes][3.0 Hz][1,332 frames]                            bytes 3-6         │
+│ ⛓  │ 0x101    81   00   03  [40] [4C] [CC] [CD]  00     Last seen  [ ] Hold      Copy table      │
+│ISO-│                        └──── 3-6 ────┘                                                      │
+│ TP │ [Ch 1][11-bit][8 bytes][3.0 Hz][1,332 frames]                            bytes 3-6         │
 │    │ ▾ Bit activity   last 512 frames   rarely ▁▂▃▅▇ every frame                                  │
 │    │     bit 7  ░    ·    ░    ▓    ▓    █    █    ·   ← flips per bit, recent frames            │
 │    │       ...  ░    ·    ░    ▓    ▓    █    █    ·                                             │
 │    │     bit 0  █    ·    ░    ▓    ▓    █    █    ·                                             │
-│    │ Messages  [Range│Plot│ISO-TP]              ← analysis children of the section on the left   │
+│    │ Messages  [Range│Plot]                     ← analysis children of the section on the left   │
 │    │ BLOCK SIZE [1│2│4│8]  BYTES 0 to 63                                          Columns         │
 │    │ Bytes   Raw   <one column per decoder>                                                      │
 ├────┴─────────────────────────────────────────────────────────────────────────────────────────────┤
@@ -61,15 +61,21 @@ On first run `sniffer_config.json` is created next to `main.py`.
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-A narrow navigation rail on the left switches between **Messages** (one row per
-CAN ID) and **Trace** (every frame in arrival order); the active section is
-marked with an accent bar and highlighted label. Picking a row in either one
-decodes that packet in the panel on the right, and the divider between them
+A narrow navigation rail on the left switches between three top-level
+sections: **Messages** (one row per CAN ID), **Trace** (every frame in
+arrival order) and **ISO-TP** (reassembled multi-frame transfers across the
+*whole* capture — see below); the active section is marked with an accent bar
+and highlighted label. Picking a row in Messages or Trace decodes that packet
+in the panel on the right, and the divider between the packet list and it
 drags to trade space.
 
-The rail icons also open and close the packet list:
+The Messages and Trace icons also open and close the packet list beside them;
+ISO-TP does not, since it has no packet list of its own — it replaces the
+whole content area instead, giving its own three-table investigation
+(evidence, transfers, frames) the full width of the window rather than
+squeezing it into the same panel a single message's decode uses.
 
-| Sidebar state | Clicking an icon |
+| Sidebar state | Clicking Messages/Trace icon |
 | --- | --- |
 | closed | opens the list on that section |
 | open, different section | switches to it, stays open |
@@ -78,35 +84,40 @@ The rail icons also open and close the packet list:
 While the list is closed neither icon is marked active — with nothing on
 screen there is no current section to advertise, though the section a click
 will reopen is still remembered. The width you dragged to is restored on
-reopening, and the open/closed state persists to the config file.
+reopening, and the open/closed state persists to the config file. Switching
+to ISO-TP and back never disturbs any of this — it is left exactly as found.
 
 ### Analysis children follow the section
 
 The rail is the only primary navigation in the window. The analysis panel on
 the right never offers a second, competing choice of its own — instead, which
-of its tabs are even on offer follows whichever section the rail is showing:
+of its tabs are even on offer follows whichever of Messages/Trace the rail is
+showing. ISO-TP has no children of its own; it is a single, full-width
+workspace:
 
 ```text
-Messages                    Trace
-├─ Range   (default)        ├─ Blocks   (default)
-├─ Plot                     └─ Signals
-└─ ISO-TP
+Messages                    Trace                       ISO-TP
+├─ Range   (default)        ├─ Blocks   (default)       (no children —
+└─ Plot                     └─ Signals                   one full-width page)
 ```
 
 **Messages** is the aggregate view — one row per CAN ID — so its children
 analyse a message across everything observed for it: **Range** (what each
-byte's value has been), **Plot** (a value over time) and **ISO-TP** (which
-CAN IDs across the *whole* capture look like ISO-TP — see below). **Trace** is
+byte's value has been) and **Plot** (a value over time). **Trace** is
 individual received frames in arrival order, so its children decode one exact
 frame's payload: **Blocks** (every decoding of every block) and **Signals**
-(named, scaled values, when a database is loaded).
+(named, scaled values, when a database is loaded). **ISO-TP** answers neither
+kind of question — see the section below for why it stands on its own instead
+of living under either one.
 
 Switching sections restores whichever child you last had open there — Range
 the first time you visit Messages, Blocks the first time you visit Trace,
 and after that whatever you chose, so `Messages → Plot → Trace → Signals →
 Messages` lands back on Plot. The message or frame you had selected is never
 disturbed by switching sections or children — only picking a different row
-in Messages or Trace changes what is on screen.
+in Messages or Trace changes what is on screen, and visiting ISO-TP disturbs
+none of it either: Messages/Trace's own state is simply not on screen while
+ISO-TP is, not reset.
 
 ### The payload strip
 
@@ -433,42 +444,72 @@ window over a 4-second capture says so rather than claiming a minute.
 
 ---
 
-## ISO-TP (Messages ▸ ISO-TP)
+## ISO-TP
 
-The **ISO-TP** workspace answers a different question than the other tabs: not
-"what does this message mean" but *"which CAN IDs on this bus actually use
+The **ISO-TP** workspace answers a different question than Messages or Trace:
+not "what does this message mean" but *"which CAN IDs on this bus actually use
 ISO-TP, and what evidence says so"*. It looks at the whole capture, not just
-the selected message — a single periodic sensor frame parses as a perfectly
-valid ISO-TP Single Frame, and the only way to tell it apart from a real
-diagnostic channel is to see it next to everything else on the bus.
+one message or one CAN ID — a single periodic sensor frame parses as a
+perfectly valid ISO-TP Single Frame, and the only way to tell it apart from a
+real diagnostic channel is to see it next to everything else on the bus.
 
-It lives under **Messages** because it is still traffic analysed by CAN
-ID, not because it is scoped to whichever one message happens to be
-selected — the survey and the tables below stay capture-wide regardless of
-what is selected in Messages or Trace.
+It is its own top-level section on the navigation rail — a peer of Messages
+and Trace, not a child of either — because it is neither an aggregate view of
+one CAN ID (Messages) nor one exact frame's payload (Trace): it can involve
+several CAN IDs in the same reassembled exchange (a request ID and a response
+ID, for instance) at once, so a "select one message first" model does not fit
+it. Arriving at ISO-TP never requires anything to be selected in Messages or
+Trace first, and it is never scoped down to just whatever happens to be
+selected there — the survey and the tables below stay capture-wide
+regardless.
 
 ```
 ISO-TP EVIDENCE BY CAN ID
 
-CAN ID   Peer   Frames   SF   FF   CF   FC   Other  Transfers  Complete  Evidence
-0x7E8    0x7E0     48    12   12   24    —      —        24        24    Strong
-0x100      —    1,332  1332    —    —    —      —     1,332     1,332    Weak
+CAN ID   Peer   Evidence  Transfers  Complete  Errors  Frames   SF   FF   FC   CF   Other
+0x7E8    0x7E0  Strong           24        24       —      48   12   12   24    —      —
+0x100      —    Weak          1,332     1,332       —   1,332 1332    —    —    —      —
 
-TRANSFERS ON 0x7E8
+▾  Transfers on 0x7E8                                    Problems only
 
-Start     Duration  Bytes  Frames  Status     Diagnostic              Payload
-5.014s    0.010s    20     3       Complete   ReadDataByIdentifier…   62 F1 90 …
+Start     Status     Bytes  Frames  Duration
+5.014s    Complete   20     3       0.010s
 
-FRAMES IN THIS TRANSFER
+TRANSFER DETAILS (0x7E8)  [Complete]                            ‹  1 / 24  ›
 
-Time     CAN ID  DLC  Type  PCI     Seq/Flow  Declared  Data          Extra  Raw frame
-5.014s   0x7E8   8    FF    10 14   —         20        62 F1 90 57   —      10 14 62 F1 …
+ CAN ID       0x7E8         Start      5.0140s        DIAGNOSTIC
+ Status       Complete      Duration   0.0100s         [No issues detected]
+ Addressing   normal        Frames     3
+                             Bytes     20
+
+ PAYLOAD  20 bytes
+ 62 F1 90 57 ...
+
+ [ Frames ] Reassembled  Raw  Protocol         3 frames
+
+ Time     CAN ID  DLC  Type  PCI     Seq/Flow  Declared  Data          Extra  Raw frame
+ 5.014s   0x7E8   8    FF    10 14   —         20        62 F1 90 57   —      10 14 62 F1 …
 ```
 
-Three levels, top to bottom: pick a CAN ID in the evidence summary, its
-transfers appear below; pick a transfer, its raw frames appear below that.
-Selection survives sorting and filtering — the transfer table never silently
-shows a different ID's data than the one highlighted above it.
+Three levels: pick a CAN ID in the evidence summary, its transfers appear in
+the list to the lower left; pick a transfer, its detail appears in the panel
+to the lower right — CAN ID/status/addressing, timing/size, a diagnostic
+card, the reassembled payload, and Frames/Reassembled/Raw/Protocol tabs for
+the frames behind it. Selection survives sorting and filtering — neither the
+transfer list nor the detail panel ever silently shows a different ID's or a
+different transfer's data than the one highlighted above it.
+
+**The transfer list collapses.** Its own disclosure (`▾`/`▸`, the same
+chevron InterpretView's bit-activity panel uses) folds it down to just its
+header, handing its width to the detail panel — useful once a transfer worth
+digging into is found and the list itself is no longer needed on screen. A
+`‹  n / total  ›` navigator in the detail header keeps browsing possible
+while it is collapsed: Previous/Next move to the adjacent transfer, and
+reopening the list highlights and scrolls to whichever one the navigator is
+currently showing. There is exactly one selected-transfer index behind all
+of this — a row click, Previous, Next, and switching CAN ID all just ask the
+transfer table to select a row, and everything else (the navigator, the
+detail panel) follows from that single selection.
 
 **Evidence is a label, never a percentage.** A capture can only show that
 multi-frame machinery was or wasn't exercised; a number would dress that up as

@@ -17,11 +17,12 @@ from PySide6.QtCore import QThread, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QFileDialog, QFrame, QHBoxLayout,
-    QHeaderView, QLabel, QMainWindow, QMessageBox, QPushButton,
+    QHeaderView, QLabel, QMainWindow, QMessageBox, QPushButton, QSizePolicy,
     QSplitter, QStackedWidget, QTableView, QVBoxLayout, QWidget,
 )
 
 from ..analysis.dbc import DbcDatabase
+from ..analysis.isotp_survey import IsoTpSurveyCache
 from ..analysis.signals import ProfileStore, build_dbc_database
 from ..analysis.store import FrameStore
 from ..capture import CaptureWorker, FrameLogger
@@ -37,12 +38,20 @@ from .database_window import DatabaseWindow
 from .filter_bar import FilterBar
 from .filter_dialog import FilterDialog
 from .interpret_view import MESSAGES, TRACE, InterpretView
+from .isotp_view import IsoTpView
 from .tables import (
     ByteHighlightDelegate, IdFilterProxy, IdTableModel, KEY_ROLE, TraceTableModel,
     exemplar_widths,
 )
 from .theme import ROW_HEIGHT_COMPACT, SPACE_LG, SPACE_MD, SPACE_SM, Theme
-from .widgets import Chip, MetricChip, NavRail, SectionLabel
+from .widgets import Chip, CurrentPageStack, MetricChip, NavRail, SectionLabel, scrollable
+
+#: Minimum spacing between ISO-TP survey rebuilds while frames are still
+#: arriving -- see MainWindow._refresh_isotp. A live capture can bump the
+#: frame store's revision several times a second; re-surveying a large
+#: capture that often would make the window stutter for a result nobody can
+#: read that fast.
+_ISOTP_MIN_INTERVAL = 1.5
 
 
 class MainWindow(QMainWindow):
@@ -56,6 +65,20 @@ class MainWindow(QMainWindow):
     _RUNNING = "running"
     _PAUSED = "paused"
     _STOPPING = "stopping"
+
+    #: Primary navigation destinations -- see _build_ui's NavRail and
+    #: _on_nav_clicked. Messages and Trace double as a collapsible-panel
+    #: toggle for the packet list beside them; ISO-TP does not -- it
+    #: replaces the whole content area instead (see _STACK_ISOTP). Named
+    #: rather than left as bare literals so every call site reads as what
+    #: it means, not as a magic index into NavRail's button list.
+    _NAV_MESSAGES = 0
+    _NAV_TRACE = 1
+    _NAV_ISOTP = 2
+
+    #: self.top_stack's two pages -- see _build_ui.
+    _STACK_BROWSER = 0
+    _STACK_ISOTP = 1
 
     #: Shared floor for every top-bar button's *minimum* width (not its
     #: preferred/shown width, which stays whatever its label needs — see
@@ -102,6 +125,20 @@ class MainWindow(QMainWindow):
         self._interaction_lock_timer.timeout.connect(self._on_interaction_unlocked)
         self._selected_key: Optional[str] = None
         self._follow_trace = True
+        #: Highest playback timestamp currently retained anywhere in history
+        #: (Messages/Trace/frame_store) -- i.e. the same continuous timeline
+        #: FileSource itself hands out (see sources/file_source.py), never
+        #: wall-clock time. None exactly when no history survives. Read by
+        #: start_capture() to ask a new FileSource to continue this timeline
+        #: (Stop -> Start with retained history) rather than restart at the
+        #: capture's own recorded t=0 -- the same bug end-of-file looping
+        #: already had to solve, just one layer up: a FileSource instance
+        #: cannot see a *previous instance's* offset on its own, since
+        #: start_capture() constructs a brand new one every Start. Reset
+        #: alongside history itself in clear_views(), so the two can never
+        #: drift apart -- retaining samples but forgetting how far along
+        #: they reached, or vice versa.
+        self._playback_high_water: Optional[float] = None
         #: Tracked rather than read back from widget visibility: isVisible() is
         #: False for every child until the window itself is shown, so asking Qt
         #: reports "collapsed" for a sidebar that is merely not on screen yet.
@@ -124,6 +161,18 @@ class MainWindow(QMainWindow):
         #: active. Replaces the old separate dbc.path / signals config keys;
         #: see analysis/signals.py.
         self.profile_store: ProfileStore = ProfileStore()
+
+        #: ISO-TP surveys the whole capture, not one selected message (see
+        #: _refresh_isotp) -- it is a top-level workspace in its own right,
+        #: not one of InterpretView's contextual modes, so this state lives
+        #: here rather than there. Rebuilt at most once per
+        #: _ISOTP_MIN_INTERVAL while the frame store keeps changing.
+        self._isotp_cache = IsoTpSurveyCache()
+        self._isotp_rows = None
+        self._isotp_window_key = None
+        self._isotp_built_at: Optional[float] = None
+        self._isotp_note = ""
+        self._sized_isotp = False
 
         self._build_ui()
         self._apply_capture_state(self._IDLE)
@@ -161,30 +210,40 @@ class MainWindow(QMainWindow):
         banner_wrap.setVisible(False)
         outer.addWidget(banner_wrap)
 
-        # Sidebar: the icon rail is always present; the Messages panel beside
-        # it is what collapses away.
-        self.sidebar = QWidget()
-        sidebar_layout = QHBoxLayout(self.sidebar)
-        sidebar_layout.setContentsMargins(0, 0, 0, 0)
-        sidebar_layout.setSpacing(0)
-
+        # Primary navigation: Messages / Trace / ISO-TP. The icon rail is a
+        # permanent fixture beside whichever top-level section is active —
+        # not just inside the Messages/Trace packet-list sidebar — so ISO-TP
+        # is always one click away and never a detour through Messages. See
+        # self.top_stack below for the two sections it switches between.
         self.nav = NavRail(
             [
                 ("list", "Messages", "One row per CAN ID, with rate and the latest payload"),
                 ("stream", "Trace", "Every received frame in arrival order"),
+                ("chain", "ISO-TP", "Reassembled multi-frame transfers across "
+                                    "the whole capture — every CAN ID, not "
+                                    "just the one selected in Messages or "
+                                    "Trace"),
             ],
             self.theme,
+            # Messages/Trace double as a collapse toggle for the packet list
+            # beside them (see _on_nav_clicked); ISO-TP has no such panel to
+            # toggle, so it keeps its own static tooltip instead of one that
+            # talks about expanding/collapsing something it does not have.
+            toggleable=(self._NAV_MESSAGES, self._NAV_TRACE),
         )
         self.nav.changed.connect(self._on_nav_clicked)
-        sidebar_layout.addWidget(self.nav)
+
+        content_row = QHBoxLayout()
+        content_row.setContentsMargins(0, 0, 0, 0)
+        content_row.setSpacing(0)
+        content_row.addWidget(self.nav)
 
         self.browser_panel = self._build_browser()
         self.browser_panel.setMinimumWidth(330)
-        sidebar_layout.addWidget(self.browser_panel, 1)
 
         self.splitter = QSplitter(Qt.Horizontal)
         self.splitter.setChildrenCollapsible(False)
-        self.splitter.addWidget(self.sidebar)
+        self.splitter.addWidget(self.browser_panel)
 
         workspace = QWidget()
         workspace_layout = QVBoxLayout(workspace)
@@ -198,7 +257,26 @@ class MainWindow(QMainWindow):
         self.splitter.setStretchFactor(0, 0)
         self.splitter.setStretchFactor(1, 1)
         self.splitter.splitterMoved.connect(self._on_splitter_moved)
-        outer.addWidget(self.splitter, 1)
+
+        browser_workspace = QWidget()
+        browser_workspace_layout = QVBoxLayout(browser_workspace)
+        browser_workspace_layout.setContentsMargins(0, 0, 0, 0)
+        browser_workspace_layout.setSpacing(0)
+        browser_workspace_layout.addWidget(self.splitter)
+
+        isotp_page = self._build_isotp_workspace()
+
+        # CurrentPageStack, not a plain QStackedWidget: ISO-TP's own stacked
+        # evidence/transfers/frames tables have a real, largely fixed
+        # minimum footprint that must never propagate through this stack to
+        # the top-level window's own minimum size while Messages/Trace is
+        # the page actually showing — see widgets.CurrentPageStack.
+        self.top_stack = CurrentPageStack()
+        self.top_stack.addWidget(browser_workspace)             # 0 Messages/Trace
+        self.top_stack.addWidget(scrollable(isotp_page))        # 1 ISO-TP
+        content_row.addWidget(self.top_stack, 1)
+
+        outer.addLayout(content_row, 1)
 
         self.setCentralWidget(central)
         self._build_status_bar()
@@ -206,7 +284,7 @@ class MainWindow(QMainWindow):
         size = self.config.get("ui.window", {}) or {}
         self.resize(int(size.get("width", 1640)), int(size.get("height", 940)))
 
-        self._min_sidebar = self.browser_panel.minimumWidth() + self.nav.WIDTH
+        self._min_sidebar = self.browser_panel.minimumWidth()
         self._sidebar_width = max(
             self._min_sidebar, int(self.config.get("ui.sidebar_width", 470))
         )
@@ -221,12 +299,48 @@ class MainWindow(QMainWindow):
         self._pending_sidebar_collapsed = bool(
             self.config.get("ui.sidebar_collapsed", False))
 
+    def _build_isotp_workspace(self) -> QWidget:
+        """ISO-TP's own top-level page: capture-wide, so it has no message
+        to show identity for and no Blocks/Signals/Range/Plot sub-nav of its
+        own — just the evidence/transfers/frames investigation itself, given
+        the full content area rather than squeezed beside a packet list.
+        """
+        page = QFrame()
+        page.setObjectName("Panel")
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(SPACE_MD, SPACE_MD, SPACE_MD, SPACE_MD)
+        layout.setSpacing(SPACE_SM)
+
+        header = QHBoxLayout()
+        header.setSpacing(SPACE_SM)
+        header.addWidget(SectionLabel("ISO-TP", self.theme))
+        header.addStretch(1)
+        self.isotp_note = QLabel("")
+        self.isotp_note.setObjectName("Muted")
+        # Ignored, not the default Preferred — same reasoning as
+        # InterpretView.workspace_note: this text is a frame-count status
+        # line with no natural upper bound, and left at the default it would
+        # demand however much width its longest possible value happens to
+        # need, all the way up to the top-level window's own minimum size.
+        self.isotp_note.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        header.addWidget(self.isotp_note)
+        layout.addLayout(header)
+
+        self.isotp_view = IsoTpView(self.config, self.theme)
+        self.isotp_view.frameActivated.connect(self._on_isotp_frame_activated)
+        layout.addWidget(self.isotp_view, 1)
+        return page
+
     # ------------------------------------------------------------------
     # sidebar
     # ------------------------------------------------------------------
 
     def set_sidebar_collapsed(self, collapsed: bool, remember: bool = True) -> None:
-        """Collapse to the icon rail, or restore the remembered width."""
+        """Collapse the packet list beside Messages/Trace, or restore the
+        remembered width. The icon rail itself is never affected by this —
+        it lives outside the splitter now (see _build_ui) and stays on
+        screen regardless.
+        """
         collapsed = bool(collapsed)
         if not collapsed and not self._sidebar_collapsed:
             # Keep the width the user dragged to before collapsing.
@@ -239,14 +353,14 @@ class MainWindow(QMainWindow):
 
         total_width = self._current_content_width()
         if collapsed:
-            self.sidebar.setFixedWidth(self.nav.WIDTH)
-            # Hand the reclaimed width to the workspace explicitly; the
-            # splitter keeps its stored sizes otherwise.
-            total = max(total_width, self.nav.WIDTH + 520)
-            self.splitter.setSizes([self.nav.WIDTH, total - self.nav.WIDTH])
+            # A hidden QSplitter child drops out of its size negotiation
+            # entirely, so 0 here (rather than some small floor) is enough —
+            # unlike the old icon-rail-inside-the-splitter arrangement, there
+            # is nothing left in this pane that still needs room.
+            self.splitter.setSizes([0, max(520, total_width)])
         else:
-            self.sidebar.setMinimumWidth(self._min_sidebar)
-            self.sidebar.setMaximumWidth(16777215)
+            self.browser_panel.setMinimumWidth(self._min_sidebar)
+            self.browser_panel.setMaximumWidth(16777215)
             total = max(total_width, self._sidebar_width + 520)
             self.splitter.setSizes(
                 [self._sidebar_width, max(520, total - self._sidebar_width)]
@@ -268,10 +382,13 @@ class MainWindow(QMainWindow):
         window's own, which resize()/setGeometry() update immediately,
         with no dependency on a layout pass ever having run — is reliable
         at every point this is called, before or after the window is shown,
-        maximized, or resized, since the splitter spans the window's full
-        client width with no margin either side of it.
+        maximized, or resized. The one adjustment needed is the icon rail's
+        own fixed width: unlike the splitter itself, which spans the rest of
+        the window's client width with no margin either side of it, the rail
+        sits beside the splitter (see content_row in _build_ui), not inside
+        it.
         """
-        return self.width()
+        return self.width() - self.nav.WIDTH
 
     def _remember_width(self) -> None:
         sizes = self.splitter.sizes()
@@ -598,7 +715,14 @@ class MainWindow(QMainWindow):
         if self._capture_state != self._IDLE or self._interaction_locked:
             return
         try:
-            source = build_source(self.config)
+            # Retained history (Plot/Trace/Range) survives Stop -- only
+            # Clear or opening a new capture drops it (see clear_views) --
+            # so a plain Stop -> Start must continue this session's
+            # continuous timeline rather than restart the source's own
+            # capture-relative t=0 underneath still-visible samples. When
+            # nothing survives, _playback_high_water is None and this is a
+            # fresh timeline, exactly like a capture's very first Start.
+            source = build_source(self.config, resume_from=self._playback_high_water)
         except SourceError as exc:
             QMessageBox.critical(self, "Cannot start capture", str(exc))
             return
@@ -878,6 +1002,11 @@ class MainWindow(QMainWindow):
             # its retention limit is kept in step with the trace view's.
             self.frame_store.add(frames)
 
+            if frames:
+                newest = max(f.timestamp for f in frames)
+                if self._playback_high_water is None or newest > self._playback_high_water:
+                    self._playback_high_water = newest
+
             channels = {f.channel for f in frames if f.channel}
             if channels - self._seen_channels:
                 self._seen_channels |= channels
@@ -893,6 +1022,13 @@ class MainWindow(QMainWindow):
                         break
             elif self.id_model.id_count and not self.id_view.currentIndex().isValid():
                 self.id_view.selectRow(0)
+
+            # ISO-TP surveys the whole frame store, not whatever happens to
+            # be selected in Messages/Trace — see _refresh_isotp — so it is
+            # kept live here, independently of the selection handling above,
+            # but only while it is actually the page on screen.
+            if self.top_stack.currentIndex() == self._STACK_ISOTP:
+                self._refresh_isotp()
         finally:
             self.batchConsumed.emit()
 
@@ -907,13 +1043,27 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _on_nav_clicked(self, index: int) -> None:
-        """The nav icons also open and close the packet list beside them.
+        """The Messages/Trace nav icons also open and close the packet list
+        beside them; ISO-TP instead swaps the whole content area to its own
+        full-width page (see self.top_stack) — it has no packet list of its
+        own to open or close.
 
-        Without this they look dead whenever the sidebar is collapsed: they
-        switch a stack that nobody can see. Clicking a section that is already
-        on screen closes the sidebar; clicking any section while it is closed
-        opens it on that section.
+        Without the Messages/Trace behaviour they would look dead whenever
+        the sidebar is collapsed: they would switch a stack that nobody can
+        see. Clicking a section that is already on screen closes the
+        sidebar; clicking any section while it is closed opens it on that
+        section.
         """
+        if index == self._NAV_ISOTP:
+            self._activate_isotp()
+            return
+        if self.top_stack.currentIndex() != self._STACK_BROWSER:
+            # Coming back from ISO-TP: land directly on the requested
+            # section with the sidebar open, rather than trying to read
+            # "already showing" off a browser_stack that was not even on
+            # screen a moment ago.
+            self._activate_browser(index)
+            return
         if self._sidebar_collapsed:
             self._on_view_changed(index)
             self.set_sidebar_collapsed(False)
@@ -921,6 +1071,31 @@ class MainWindow(QMainWindow):
             self.set_sidebar_collapsed(True)
         else:
             self._on_view_changed(index)
+
+    def _activate_isotp(self) -> None:
+        """Switch the content area to the ISO-TP page.
+
+        Nothing about Messages/Trace's own state (selected CAN ID, selected
+        exact Trace frame, collapsed/expanded sidebar, remembered width)
+        is touched — self.top_stack simply stops showing browser_workspace,
+        it does not tear it down, so all of that is exactly as found on the
+        way back in.
+        """
+        self.top_stack.setCurrentIndex(self._STACK_ISOTP)
+        self.nav.update_hints(self._sidebar_collapsed)
+        self._refresh_isotp()
+
+    def _activate_browser(self, index: int) -> None:
+        """Return from ISO-TP to the Messages/Trace content area, landing on
+        ``index`` (0 Messages, 1 Trace).
+
+        The sidebar's own collapsed/expanded state is untouched either way —
+        ISO-TP never reached into it in the first place (see _activate_isotp),
+        so there is nothing here to restore.
+        """
+        self.top_stack.setCurrentIndex(self._STACK_BROWSER)
+        self._on_view_changed(index)
+        self.nav.update_hints(self._sidebar_collapsed)
 
     def _on_view_changed(self, index: int) -> None:
         self.browser_stack.setCurrentIndex(index)
@@ -981,6 +1156,71 @@ class MainWindow(QMainWindow):
         bar = self.trace_view.verticalScrollBar()
         self._follow_trace = value >= bar.maximum() - 2
 
+    def _on_isotp_frame_activated(self, frame) -> None:
+        """Double-clicking a raw frame in ISO-TP shows it in Trace — the
+        same "pin this exact frame" behaviour a real Trace row click gets
+        (see _on_trace_selection), plus switching there since ISO-TP is now
+        a separate top-level page rather than a mode InterpretView was
+        already showing underneath.
+        """
+        if frame is None:
+            return
+        self._selected_key = None
+        self.interpret_view.show_frame(
+            frame, self.id_model.stats_for_key(frame.key), self.id_model.time_base
+        )
+        self._activate_browser(self._NAV_TRACE)
+
+    def _refresh_isotp(self) -> None:
+        """Survey the whole capture, not just one selected message — ISO-TP
+        is capture-wide and can involve multiple CAN IDs at once, so it must
+        not depend on anything selected in Messages or Trace to be useful
+        (it merely prefers, but never requires, whichever message happens
+        to be on screen there — see the ``prefer`` line below).
+
+        Recomputed at most once per frame-store revision and throttled
+        while frames are still arriving: a live capture bumps the revision
+        several times a second, and re-surveying a large capture that often
+        would make the window stutter for a result nobody can read that
+        fast.
+        """
+        window = self.frame_store.all_frames()
+        fresh = window.cache_key != self._isotp_window_key
+        if fresh:
+            now = time.monotonic()
+            if (self._isotp_built_at is not None
+                    and now - self._isotp_built_at < _ISOTP_MIN_INTERVAL
+                    and self._isotp_rows is not None):
+                # Keep showing the previous survey rather than rebuild; the
+                # note says what it was built from so it is never mistaken
+                # for the live figure.
+                self.isotp_note.setText(self._isotp_note + "  ·  updating…")
+                return
+            self._isotp_rows = self._isotp_cache.rows(window)
+            self._isotp_window_key = window.cache_key
+            self._isotp_built_at = now
+
+        rows = self._isotp_rows or []
+        cached_window = window
+
+        def transfers_for_key(key):
+            return self._isotp_cache.transfers(cached_window, key)
+
+        frame = self.interpret_view.current_frame()
+        prefer = frame.key if frame is not None else None
+        self.isotp_view.set_survey(rows, transfers_for_key,
+                                   self.id_model.time_base, prefer_key=prefer)
+        if not self._sized_isotp and rows:
+            self.isotp_view.size_columns()
+            self._sized_isotp = True
+
+        candidates = sum(1 for r in rows if r.candidates)
+        self._isotp_note = (
+            "{:,} frames · {} ID{} with ISO-TP-shaped frames · normal "
+            "addressing".format(len(window), candidates,
+                                "" if candidates == 1 else "s"))
+        self.isotp_note.setText(self._isotp_note)
+
     # ------------------------------------------------------------------
     # actions
     # ------------------------------------------------------------------
@@ -997,14 +1237,30 @@ class MainWindow(QMainWindow):
         loaded signal database, the capture filters, the display filter, and
         the running capture itself — Clear resets the view of the bus, not the
         observation of it.
+
+        Also resets the playback timeline's own high-water mark alongside the
+        history it describes — see _playback_high_water — so a Start after
+        Clear (or the clear_views() that opening a new capture always does
+        first) begins that capture's continuous timeline at its own recorded
+        t=0 rather than continuing a timeline whose samples are gone.
         """
         self.id_model.clear()
         self.trace_model.clear()
         self.frame_store.clear()
         self._seen_channels.clear()
         self._selected_key = None
+        self._playback_high_water = None
         self.interpret_view.reset_content()
         self._dropped_seen = 0
+
+        # Force ISO-TP's next survey to rebuild from the now-empty store
+        # rather than show stale rows a moment longer than the other views
+        # do — the throttle in _refresh_isotp exists for a busy capture, not
+        # for a deliberate Clear.
+        self._isotp_window_key = None
+        self._isotp_built_at = None
+        if self.top_stack.currentIndex() == self._STACK_ISOTP:
+            self._refresh_isotp()
 
         # The counters describe frames that no longer exist anywhere in the UI,
         # so leaving them running would make them unreadable. Reception is not

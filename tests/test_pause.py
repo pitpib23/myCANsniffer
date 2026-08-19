@@ -326,7 +326,7 @@ class PauseButtonTests(unittest.TestCase):
         """
         from cansniff.ui import main_window as module
         real_build = module.build_source
-        module.build_source = lambda _config: _EndlessSource()
+        module.build_source = lambda _config, resume_from=None: _EndlessSource()
         try:
             self.window.start_capture()
         finally:
@@ -482,7 +482,7 @@ class InteractionLockTests(PauseButtonTests):
         self.window._teardown_thread()   # nothing running; make sure of it
         from cansniff.ui import main_window as module
         real_build = module.build_source
-        module.build_source = lambda _config: _EndlessSource()
+        module.build_source = lambda _config, resume_from=None: _EndlessSource()
         try:
             self.window.start_capture()
             first_worker = self.window._worker
@@ -571,7 +571,7 @@ class InteractionLockTests(PauseButtonTests):
         self.window._teardown_thread()
         from cansniff.ui import main_window as module
         real_build = module.build_source
-        module.build_source = lambda _config: _EndlessSource()
+        module.build_source = lambda _config, resume_from=None: _EndlessSource()
         try:
             self.window.start_capture()
             first_worker = self.window._worker
