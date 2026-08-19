@@ -512,22 +512,35 @@ class NavToggleTests(QtCase):
         self.assertFalse(hasattr(self.window.nav, "collapse_button"))
         self.assertFalse(hasattr(self.window.nav, "collapseToggled"))
 
-    def test_no_icon_is_marked_active_while_the_list_is_hidden(self):
+    def test_current_page_stays_highlighted_regardless_of_selector_state(self):
+        """Regression: the page highlight and the selector-open indicator
+        used to be the same underlying flag, so collapsing the selector
+        made the current page look unselected too. They are two
+        independent states now -- see MainWindow._selector_on -- and only
+        the indicator (the vertical bar) may ever depend on the selector.
+        """
         self.window.set_sidebar_collapsed(False)
         self.window._on_view_changed(0)
         self.app.processEvents()
         buttons = [self.window.nav.group.button(i) for i in (0, 1)]
-        self.assertFalse(buttons[0]._muted, "open list should mark its section")
+        self.assertTrue(buttons[0].isChecked(), "Messages is the open page")
+        self.assertTrue(buttons[0]._show_indicator,
+                        "selector is open, so the indicator should show")
 
         self.window.set_sidebar_collapsed(True)
         self.app.processEvents()
-        self.assertTrue(all(b._muted for b in buttons),
-                        "nothing is showing, so nothing should read as active")
+        self.assertTrue(buttons[0].isChecked(),
+                        "current-page highlight must survive closing the selector")
+        self.assertFalse(buttons[0]._show_indicator,
+                         "no selector on screen, so no indicator")
+        self.assertFalse(buttons[1]._show_indicator,
+                         "an inactive page never shows the indicator")
         # Still checked underneath: that is the section a click reopens.
         self.assertEqual(self.window.nav.current(), 0)
 
         self._click(0)
-        self.assertFalse(buttons[0]._muted)
+        self.assertTrue(buttons[0].isChecked())
+        self.assertTrue(buttons[0]._show_indicator)
 
     def test_tooltips_say_what_a_click_will_do(self):
         buttons = [self.window.nav.group.button(i) for i in (0, 1)]
@@ -540,6 +553,157 @@ class NavToggleTests(QtCase):
         self._click(0)
         self.assertIn("Hide", buttons[0].toolTip())
         self.assertNotIn("Hide", buttons[1].toolTip())
+
+
+class IndependentSelectorMemoryTests(QtCase):
+    """Messages and Trace each remember their own selector-toggle state
+    independently, and that state is never the same thing as which page is
+    currently open -- see MainWindow._selector_on and _on_nav_clicked's own
+    docstring for the two-state model this exercises end to end.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.window = MainWindow(self.config, Theme())
+        self.window.resize(1400, 900)
+        self.window.show()
+        self.app.processEvents()
+
+    def tearDown(self):
+        self.window.close()
+        self.window.deleteLater()
+        self.app.processEvents()
+
+    def _click(self, index):
+        self.window.nav.group.button(index).click()
+        self.app.processEvents()
+
+    def _button(self, index):
+        return self.window.nav.group.button(index)
+
+    def test_only_one_page_is_open_at_a_time(self):
+        w = self.window
+        self._click(0)
+        self.assertTrue(self._button(0).isChecked())
+        self._click(1)
+        self.assertTrue(self._button(1).isChecked())
+        self.assertFalse(self._button(0).isChecked())
+        self._click(2)
+        self.assertTrue(self._button(2).isChecked())
+        self.assertFalse(self._button(0).isChecked())
+        self.assertFalse(self._button(1).isChecked())
+
+    def test_messages_open_toggle_off_shows_highlight_but_no_selector_or_line(self):
+        w = self.window
+        w.set_sidebar_collapsed(True)
+        self.app.processEvents()
+        self.assertTrue(self._button(0).isChecked())
+        self.assertFalse(w.browser_panel.isVisibleTo(w))
+        self.assertFalse(self._button(0)._show_indicator)
+
+    def test_messages_open_toggle_on_shows_highlight_selector_and_line(self):
+        w = self.window
+        w.set_sidebar_collapsed(False)
+        self.app.processEvents()
+        self.assertTrue(self._button(0).isChecked())
+        self.assertTrue(w.browser_panel.isVisibleTo(w))
+        self.assertTrue(self._button(0)._show_indicator)
+
+    def test_trace_has_the_same_toggle_behaviour_as_messages(self):
+        w = self.window
+        self._click(1)
+        w.set_sidebar_collapsed(True)
+        self.app.processEvents()
+        self.assertTrue(self._button(1).isChecked())
+        self.assertFalse(w.browser_panel.isVisibleTo(w))
+        self.assertFalse(self._button(1)._show_indicator)
+
+        w.set_sidebar_collapsed(False)
+        self.app.processEvents()
+        self.assertTrue(w.browser_panel.isVisibleTo(w))
+        self.assertTrue(self._button(1)._show_indicator)
+
+    def test_isotp_never_shows_the_toggle_line(self):
+        self._click(2)
+        self.assertFalse(self._button(2)._show_indicator)
+        self._click(2)      # already open -- must still never show it
+        self.assertFalse(self._button(2)._show_indicator)
+        self.assertFalse(any(self._button(i)._show_indicator for i in (0, 1)))
+
+    def test_navigating_to_a_different_page_does_not_mutate_its_toggle_state(self):
+        w = self.window
+        w.set_sidebar_collapsed(True)          # Messages OFF
+        self.app.processEvents()
+        before = dict(w._selector_on)
+        self._click(1)                          # navigate to Trace
+        self.assertEqual(w._selector_on[w._NAV_MESSAGES], before[w._NAV_MESSAGES],
+                         "opening Trace must not change Messages' own memory")
+
+    def test_clicking_currently_open_messages_toggles_only_messages(self):
+        w = self.window
+        self._click(1)                          # Trace is open, remembered ON
+        trace_state_before = w._selector_on[w._NAV_TRACE]
+        self._click(0)                          # Messages: opens, restores its memory
+        messages_before = w._selector_on[w._NAV_MESSAGES]
+        self._click(0)                          # Messages already open -- toggles it
+        self.assertEqual(w._selector_on[w._NAV_MESSAGES], not messages_before)
+        self.assertEqual(w._selector_on[w._NAV_TRACE], trace_state_before)
+
+    def test_clicking_currently_open_trace_toggles_only_trace(self):
+        w = self.window
+        self._click(1)
+        messages_before = w._selector_on[w._NAV_MESSAGES]
+        trace_before = w._selector_on[w._NAV_TRACE]
+        self._click(1)                          # Trace already open -- toggles it
+        self.assertEqual(w._selector_on[w._NAV_TRACE], not trace_before)
+        self.assertEqual(w._selector_on[w._NAV_MESSAGES], messages_before)
+
+    def test_clicking_isotp_while_open_affects_no_toggle_state(self):
+        w = self.window
+        self._click(2)
+        before = dict(w._selector_on)
+        self._click(2)
+        self.assertEqual(w._selector_on, before)
+
+    def test_toggle_state_survives_round_trips_through_both_other_pages(self):
+        """The full scenario from the brief: Messages OFF, Trace ON to
+        start; toggle Messages ON; visit Trace, then ISO-TP; return to
+        Messages -- it must still be ON."""
+        w = self.window
+        w.set_sidebar_collapsed(True)           # Messages OFF (default ON)
+        self.app.processEvents()
+        self.assertFalse(w.browser_panel.isVisible())
+
+        self._click(0)                           # already open -- toggle ON
+        self.app.processEvents()
+        self.assertTrue(w.browser_panel.isVisible())
+        self.assertEqual(w._selector_on[w._NAV_MESSAGES], True)
+
+        self._click(1)                           # Trace
+        self._click(2)                           # ISO-TP
+        self._click(0)                           # back to Messages
+
+        self.assertTrue(w.browser_panel.isVisible(),
+                        "Messages' own ON state must survive visiting Trace and ISO-TP")
+        self.assertTrue(self._button(0)._show_indicator)
+
+    def test_trace_toggle_state_survives_round_trip_through_messages(self):
+        w = self.window
+        self._click(1)
+        w.set_sidebar_collapsed(True)            # Trace OFF
+        self.app.processEvents()
+        self._click(0)                            # Messages
+        self._click(1)                            # back to Trace
+        self.assertFalse(w.browser_panel.isVisible(),
+                         "Trace's own OFF state must survive visiting Messages")
+
+    def test_no_vertical_line_on_an_inactive_page(self):
+        w = self.window
+        w.set_sidebar_collapsed(False)            # Messages ON
+        self.app.processEvents()
+        self._click(1)                             # switch to Trace
+        self.assertFalse(self._button(0)._show_indicator,
+                         "Messages is no longer the open page")
 
 
 class NavWorkspaceLinkTests(QtCase):

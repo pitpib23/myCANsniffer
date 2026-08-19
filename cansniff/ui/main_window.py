@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import os
 import time
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from PySide6.QtCore import QThread, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QKeySequence
@@ -142,7 +142,17 @@ class MainWindow(QMainWindow):
         #: Tracked rather than read back from widget visibility: isVisible() is
         #: False for every child until the window itself is shown, so asking Qt
         #: reports "collapsed" for a sidebar that is merely not on screen yet.
+        #: Reflects whichever of Messages/Trace is *currently open* -- see
+        #: _selector_on for the two independent, per-page memories this is
+        #: applied from/written back to.
         self._sidebar_collapsed = False
+        #: Two independent states, never one (see set_sidebar_collapsed's
+        #: own docstring and _on_nav_clicked): which top-level page is open
+        #: (self.top_stack / self.browser_stack decide that, on their own)
+        #: versus whether *that* page's own selector/packet list is
+        #: currently shown. ISO-TP intentionally has no entry here -- it
+        #: has no selector of its own to remember a state for.
+        self._selector_on: Dict[int, bool] = {}
         self._seen_channels: set = set()
         self._last_received = 0
         self._last_rate_at = time.monotonic()
@@ -296,8 +306,18 @@ class MainWindow(QMainWindow):
         # width()'s docstring describes for splitter.width(), one layer
         # deeper (the splitter's own internal layout, not just its reported
         # width).
-        self._pending_sidebar_collapsed = bool(
-            self.config.get("ui.sidebar_collapsed", False))
+        #
+        # Each page's own dedicated key, falling back to the single legacy
+        # one so an existing install's one remembered value seeds both
+        # identically the first time this per-page memory exists -- from
+        # here on the two evolve independently, which is the entire point.
+        legacy_collapsed = bool(self.config.get("ui.sidebar_collapsed", False))
+        self._selector_on = {
+            self._NAV_MESSAGES: not bool(self.config.get(
+                "ui.messages_sidebar_collapsed", legacy_collapsed)),
+            self._NAV_TRACE: not bool(self.config.get(
+                "ui.trace_sidebar_collapsed", legacy_collapsed)),
+        }
 
     def _build_isotp_workspace(self) -> QWidget:
         """ISO-TP's own top-level page: capture-wide, so it has no message
@@ -336,10 +356,20 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def set_sidebar_collapsed(self, collapsed: bool, remember: bool = True) -> None:
-        """Collapse the packet list beside Messages/Trace, or restore the
-        remembered width. The icon rail itself is never affected by this —
-        it lives outside the splitter now (see _build_ui) and stays on
-        screen regardless.
+        """Show or hide the packet list beside Messages/Trace, for whichever
+        of them is the *currently open* page. The icon rail itself is never
+        affected by this — it lives outside the splitter now (see
+        _build_ui) and stays on screen regardless.
+
+        This is the one place that applies a selector on/off state to the
+        actual widgets (visibility, splitter geometry, the nav rail's
+        highlight/indicator) — it never itself decides *which* page that
+        state belongs to beyond "whichever is open right now" (browser_
+        stack's own current index), and, when ``remember`` is true, it is
+        also the one place Messages/Trace's own independent memory
+        (self._selector_on) gets written. Calling this while ISO-TP is the
+        open page would be a bug: ISO-TP has no selector of its own (see
+        _NAV_ISOTP) — nothing in this class ever does that.
         """
         collapsed = bool(collapsed)
         if not collapsed and not self._sidebar_collapsed:
@@ -348,7 +378,13 @@ class MainWindow(QMainWindow):
 
         self._sidebar_collapsed = collapsed
         self.browser_panel.setVisible(not collapsed)
-        self.nav.set_collapsed(collapsed)
+        current_page = (self._NAV_MESSAGES if self.browser_stack.currentIndex() == 0
+                        else self._NAV_TRACE)
+        # The current-page highlight itself is untouched by any of this —
+        # see _NavButton.paintEvent: it is driven by isChecked() alone,
+        # never by collapsed/expanded. Only the indicator (the vertical
+        # bar) depends on it, and only for the page it actually belongs to.
+        self.nav.set_indicator(None if collapsed else current_page)
         self.nav.update_hints(collapsed)
 
         total_width = self._current_content_width()
@@ -366,6 +402,7 @@ class MainWindow(QMainWindow):
                 [self._sidebar_width, max(520, total - self._sidebar_width)]
             )
         if remember:
+            self._selector_on[current_page] = not collapsed
             self.config.set("ui.sidebar_collapsed", collapsed)
 
     def _current_content_width(self) -> int:
@@ -1043,59 +1080,68 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _on_nav_clicked(self, index: int) -> None:
-        """The Messages/Trace nav icons also open and close the packet list
-        beside them; ISO-TP instead swaps the whole content area to its own
-        full-width page (see self.top_stack) — it has no packet list of its
-        own to open or close.
+        """Two independent states, never conflated (see _selector_on and
+        set_sidebar_collapsed's own docstrings): which top-level page is
+        open, and — for Messages/Trace only — whether *that* page's own
+        selector/packet list is currently shown.
 
-        Without the Messages/Trace behaviour they would look dead whenever
-        the sidebar is collapsed: they would switch a stack that nobody can
-        see. Clicking a section that is already on screen closes the
-        sidebar; clicking any section while it is closed opens it on that
-        section.
+        Clicking the page that is *already* open toggles only its own
+        remembered selector state; the page itself never closes. Clicking
+        a *different* page only ever opens it, restoring that page's own
+        last-remembered selector state — it must never invent, reset, or
+        borrow another page's state just because the operator navigated
+        there. ISO-TP has no selector at all: clicking it only ever swaps
+        the whole content area to its own full-width page (self.top_stack)
+        and never touches _selector_on.
         """
         if index == self._NAV_ISOTP:
             self._activate_isotp()
             return
-        if self.top_stack.currentIndex() != self._STACK_BROWSER:
-            # Coming back from ISO-TP: land directly on the requested
-            # section with the sidebar open, rather than trying to read
-            # "already showing" off a browser_stack that was not even on
-            # screen a moment ago.
-            self._activate_browser(index)
-            return
-        if self._sidebar_collapsed:
-            self._on_view_changed(index)
-            self.set_sidebar_collapsed(False)
-        elif index == self.browser_stack.currentIndex():
-            self.set_sidebar_collapsed(True)
+        already_open = (self.top_stack.currentIndex() == self._STACK_BROWSER
+                        and index == self.browser_stack.currentIndex())
+        if already_open:
+            # Flip *only* this page's own remembered state — collapsed
+            # becomes its current on-state, since set_sidebar_collapsed's
+            # own "collapsed" argument is what set_sidebar_collapsed(...,
+            # remember=True) will write back as the new (inverted) state.
+            self.set_sidebar_collapsed(self._selector_on[index], remember=True)
         else:
-            self._on_view_changed(index)
+            # A different page (including arriving from ISO-TP): open it
+            # and restore *its* remembered selector state — never mutate
+            # it just because it is now the one on screen.
+            self._activate_browser(index)
 
     def _activate_isotp(self) -> None:
         """Switch the content area to the ISO-TP page.
 
         Nothing about Messages/Trace's own state (selected CAN ID, selected
-        exact Trace frame, collapsed/expanded sidebar, remembered width)
-        is touched — self.top_stack simply stops showing browser_workspace,
-        it does not tear it down, so all of that is exactly as found on the
-        way back in.
+        exact Trace frame, collapsed/expanded sidebar, remembered per-page
+        selector state) is touched — self.top_stack simply stops showing
+        browser_workspace, it does not tear it down, so all of that is
+        exactly as found on the way back in. ISO-TP has no selector of its
+        own, so the nav rail's indicator is always off while it is open —
+        never a leftover Messages/Trace one, never a new one invented for
+        ISO-TP itself.
         """
         self.top_stack.setCurrentIndex(self._STACK_ISOTP)
-        self.nav.update_hints(self._sidebar_collapsed)
+        self.nav.set_indicator(None)
+        self.nav.update_hints(True)
         self._refresh_isotp()
 
     def _activate_browser(self, index: int) -> None:
-        """Return from ISO-TP to the Messages/Trace content area, landing on
-        ``index`` (0 Messages, 1 Trace).
+        """Open Messages or Trace (``index`` 0 or 1) — whether arriving from
+        ISO-TP or from the other one of the two — restoring *that* page's
+        own remembered selector state.
 
-        The sidebar's own collapsed/expanded state is untouched either way —
-        ISO-TP never reached into it in the first place (see _activate_isotp),
-        so there is nothing here to restore.
+        Never the other page's, never a freshly invented one: this is the
+        one place "switch pages" and "restore that page's own memory"
+        happen together, so every way of landing on a not-already-open
+        Messages/Trace page — a nav click, ISO-TP's own frame-activation
+        hand-off — goes through the exact same restore, not a copy of it.
         """
         self.top_stack.setCurrentIndex(self._STACK_BROWSER)
         self._on_view_changed(index)
-        self.nav.update_hints(self._sidebar_collapsed)
+        self.set_sidebar_collapsed(not self._selector_on[index], remember=False)
 
     def _on_view_changed(self, index: int) -> None:
         self.browser_stack.setCurrentIndex(index)
@@ -1574,8 +1620,11 @@ class MainWindow(QMainWindow):
         self._sized = True
         # The one-time initial sidebar split — see _build_ui's comment on
         # why this is deferred here rather than applied directly during
-        # construction.
-        self.set_sidebar_collapsed(self._pending_sidebar_collapsed, remember=False)
+        # construction. Messages is always the page open at construction
+        # (browser_stack's own default), so its own remembered selector
+        # state -- not Trace's -- is the one that applies here.
+        self.set_sidebar_collapsed(
+            not self._selector_on[self._NAV_MESSAGES], remember=False)
 
     def closeEvent(self, event) -> None:
         self.config.set("ui.window", {"width": self.width(), "height": self.height()})
@@ -1583,6 +1632,16 @@ class MainWindow(QMainWindow):
             self._remember_width()
         self.config.set("ui.sidebar_width", int(self._sidebar_width))
         self.config.set("ui.sidebar_collapsed", not self.browser_panel.isVisible())
+        # The two independent, per-page memories -- see _selector_on. Read
+        # directly from that dict, not from browser_panel's own visibility:
+        # unlike the legacy key above, these must stay correct regardless
+        # of which page -- including ISO-TP, which hides browser_panel too
+        # without it meaning either selector is "collapsed" -- happens to
+        # be open at the moment the window closes.
+        self.config.set("ui.messages_sidebar_collapsed",
+                        not self._selector_on[self._NAV_MESSAGES])
+        self.config.set("ui.trace_sidebar_collapsed",
+                        not self._selector_on[self._NAV_TRACE])
         try:
             self.config.save()
         except Exception:

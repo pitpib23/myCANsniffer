@@ -21,7 +21,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from cansniff.model import CanFrame  # noqa: E402
 
 try:
-    from PySide6.QtWidgets import QApplication
+    from PySide6.QtWidgets import QApplication, QWidget
     HAVE_QT = True
 except ImportError:  # pragma: no cover - depends on environment
     HAVE_QT = False
@@ -87,18 +87,33 @@ class TopLevelIsoTpLayoutTests(QtCase):
 
     def test_activating_isotp_does_not_touch_the_messages_trace_sidebar(self):
         """ISO-TP is not a mode InterpretView shows anymore -- it has no
-        reason to reach into Messages/Trace's own sidebar state at all."""
-        self.window.set_sidebar_collapsed(False, remember=False)
-        self.window._activate_isotp()
-        self.assertFalse(self.window._sidebar_collapsed)
-        self.window._activate_browser(self.window._NAV_MESSAGES)
-        self.assertFalse(self.window._sidebar_collapsed)
+        reason to reach into Messages/Trace's own selector state at all, and
+        it must never leave one page's remembered state applied to the
+        other -- each of Messages/Trace has its own independent memory (see
+        MainWindow._selector_on)."""
+        win = self.window
+        win.set_sidebar_collapsed(False, remember=True)          # Messages ON
+        win._activate_isotp()
+        self.assertEqual(win._selector_on, {win._NAV_MESSAGES: True,
+                                            win._NAV_TRACE: True})
+        win._activate_browser(win._NAV_MESSAGES)
+        self.assertTrue(win.browser_panel.isVisible())
+        self.assertEqual(win._selector_on, {win._NAV_MESSAGES: True,
+                                            win._NAV_TRACE: True})
 
-        self.window.set_sidebar_collapsed(True, remember=False)
-        self.window._activate_isotp()
-        self.assertTrue(self.window._sidebar_collapsed)
-        self.window._activate_browser(self.window._NAV_TRACE)
-        self.assertTrue(self.window._sidebar_collapsed)
+        win.set_sidebar_collapsed(True, remember=True)           # Messages OFF
+        win._activate_isotp()
+        self.assertEqual(win._selector_on, {win._NAV_MESSAGES: False,
+                                            win._NAV_TRACE: True})
+        # Landing on Trace (a different page) from ISO-TP must restore
+        # Trace's own remembered state (still ON, untouched) -- not
+        # Messages' OFF state, which the old single shared flag used to
+        # leak across pages entirely.
+        win._activate_browser(win._NAV_TRACE)
+        self.assertTrue(win.browser_panel.isVisible(),
+                        "Trace's own ON memory must apply, not Messages' OFF one")
+        self.assertEqual(win._selector_on, {win._NAV_MESSAGES: False,
+                                            win._NAV_TRACE: True})
 
     def test_isotp_view_instance_is_stable_across_navigation(self):
         """State (filters, splitter, selection) lives on the widget itself
@@ -147,6 +162,38 @@ class IsoTpSplitterPersistenceTests(QtCase):
         self.assertEqual(len(sizes), 2)
         self.assertTrue(all(s > 0 for s in sizes), "no pane should start collapsed")
         self.assertGreater(sizes[1], sizes[0])
+
+    def test_evidence_table_gets_noticeably_more_height_than_before(self):
+        """The upper evidence table used to default to ~28% of the page --
+        raised so more CAN IDs are visible without scrolling, still
+        responsive (a proportion, not a fixed pixel height)."""
+        view = IsoTpView(self.config, Theme())
+        self.addCleanup(view.deleteLater)
+        view.resize(900, 700)
+        view.show()
+        self.app.processEvents()
+        sizes = view.splitter.sizes()
+        ratio = sizes[0] / sum(sizes)
+        self.assertGreaterEqual(ratio, 0.33,
+                                "evidence table should get noticeably more "
+                                "than a bare quarter of the page by default")
+
+    def test_evidence_table_height_scales_with_the_window_not_a_fixed_pixel(self):
+        small = IsoTpView(self.config, Theme())
+        self.addCleanup(small.deleteLater)
+        small.resize(900, 500)
+        small.show()
+        self.app.processEvents()
+
+        large = IsoTpView(self.config, Theme())
+        self.addCleanup(large.deleteLater)
+        large.resize(900, 1000)
+        large.show()
+        self.app.processEvents()
+
+        self.assertGreater(large.splitter.sizes()[0], small.splitter.sizes()[0],
+                           "a taller window should give the evidence table "
+                           "more absolute height too, not a hard-coded one")
 
     def test_dragging_the_splitter_persists_to_config(self):
         view = IsoTpView(self.config, Theme())
@@ -265,6 +312,32 @@ class WorkspaceSplitPersistenceTests(QtCase):
         view.transfers_toggle.setChecked(False)
         self.app.processEvents()
         self.assertEqual(self.config.get("ui.isotp_workspace_split"), before)
+
+    def test_a_degenerate_persisted_ratio_falls_back_to_the_default(self):
+        """A saved split whose ratio is nowhere near a real, deliberately
+        dragged one -- e.g. saved from a very differently sized window, or
+        corrupted config -- must not be trusted verbatim: that could leave
+        one side of the workspace effectively unusable forever."""
+        self.config.set("ui.isotp_workspace_split", [5000, 10])
+        view = IsoTpView(self.config, Theme())
+        self.addCleanup(view.deleteLater)
+        view.resize(900, 700)
+        view.show()
+        self.app.processEvents()
+        sizes = view.workspace_splitter.sizes()
+        self.assertTrue(all(s > 100 for s in sizes),
+                        "a degenerate saved split must fall back, not leave "
+                        "a pane effectively invisible")
+
+    def test_a_degenerate_persisted_outer_ratio_falls_back_to_the_default(self):
+        self.config.set("ui.isotp_splitter_sizes", [1, 5000])
+        view = IsoTpView(self.config, Theme())
+        self.addCleanup(view.deleteLater)
+        view.resize(900, 700)
+        view.show()
+        self.app.processEvents()
+        sizes = view.splitter.sizes()
+        self.assertTrue(all(s > 50 for s in sizes))
 
 
 # ---------------------------------------------------------------------------
@@ -413,13 +486,19 @@ class TransferNavigatorTests(QtCase):
         self._load(prefer="1:7E8:S")
         before = self.view.workspace_splitter.sizes()
         self.view.transfers_toggle.setChecked(False)
+        # Two pumps, not one: QSplitter.setSizes() posts a follow-up layout
+        # request rather than resizing everything inline, so .sizes() is not
+        # guaranteed to reflect it after only a single processEvents() call
+        # -- the same settling behaviour test_workspace_layout.py's own
+        # scroll-area tests already have to account for.
+        self.app.processEvents()
         self.app.processEvents()
         after = self.view.workspace_splitter.sizes()
         # transfers_panel itself stays on screen -- its header (the
-        # disclosure toggle, "Problems only", the evidence reason) is
-        # exactly what must keep working while collapsed -- so its pane
-        # shrinks to that header's own minimum rather than literally 0;
-        # what matters is that it shrank and the detail panel grew.
+        # disclosure toggle, and the transfer count) is exactly what must
+        # keep working while collapsed -- so its pane shrinks to that
+        # header's own minimum rather than literally 0; what matters is
+        # that it shrank and the detail panel grew.
         self.assertLess(after[0], before[0])
         self.assertGreater(after[1], before[1])
 
@@ -431,6 +510,50 @@ class TransferNavigatorTests(QtCase):
         self.view.transfers_toggle.setChecked(True)
         self.app.processEvents()
         self.assertGreater(self.view.workspace_splitter.sizes()[0], 100)
+
+    def test_collapsed_header_shows_only_the_toggle(self):
+        """Regression: the collapsed header used to still reserve room for
+        the Problems only checkbox and the transfer count even though
+        neither says anything about a table that is not on screen -- the
+        collapsed pane's own minimum width barely shrank at all as a
+        result. The toggle -- "<chevron>  Transfers on 0x..." -- is the
+        header's only genuinely irreducible content while collapsed; see
+        the task's own reference: "``▸ Transfers on 0x130`` and its reopen
+        interaction" -- nothing else.
+        """
+        self._load(prefer="1:7E8:S")
+        self.assertTrue(self.view.problems_only.isVisible())
+        self.assertTrue(self.view.transfer_count_label.isVisible())
+        self.view.transfers_toggle.setChecked(False)
+        self.app.processEvents()
+        self.assertFalse(self.view.problems_only.isVisible())
+        self.assertFalse(self.view.transfer_count_label.isVisible())
+        self.assertTrue(self.view.transfers_toggle.isVisible())
+        self.assertIn("Transfers on", self.view.transfers_toggle.text())
+
+        self.view.transfers_toggle.setChecked(True)
+        self.app.processEvents()
+        self.assertTrue(self.view.problems_only.isVisible())
+        self.assertTrue(self.view.transfer_count_label.isVisible())
+
+    def test_collapsing_meaningfully_shrinks_the_transfer_list(self):
+        """Not just 'shrinks by a pixel' -- the collapsed pane must actually
+        read as folded away, not as a still-fairly-wide sidebar. The
+        collapsed width is a roughly fixed floor (the header's own content),
+        not a proportion of the expanded width, so this checks an absolute
+        drop and a sane ceiling rather than a percentage of a window-size-
+        dependent starting width.
+        """
+        self._load(prefer="1:7E8:S")
+        expanded_width = self.view.workspace_splitter.sizes()[0]
+        self.view.transfers_toggle.setChecked(False)
+        self.app.processEvents()
+        self.app.processEvents()
+        collapsed_width = self.view.workspace_splitter.sizes()[0]
+        self.assertLess(collapsed_width, expanded_width - 80)
+        self.assertLess(collapsed_width, 400,
+                        "collapsed transfer list should read as folded away, "
+                        "not as a still-fairly-wide sidebar")
 
     def test_switching_can_id_resets_the_navigator_to_a_valid_transfer(self):
         self._load(prefer="1:7E8:S")
@@ -487,18 +610,53 @@ class TransferNavigatorTests(QtCase):
         self.assertIn("0x7E8", self.view.detail_title.text())
         self.assertTrue(self.view.detail_status_chip.isVisible())
         self.assertEqual(self.view._identity_fields["CAN ID"].text(), "0x7E8")
-        self.assertTrue(self.view.payload_text.toPlainText())
+        self.assertEqual(self.view._timing_fields["Bytes"].text(), "10")
+        self.assertTrue(self.view.diagnostic_line.text())
+        self.assertGreater(self.view.frame_model.rowCount(), 0)
 
-    def test_raw_tab_shares_frame_model_with_frames_tab(self):
+    def test_payload_reassembled_raw_protocol_ui_is_gone(self):
+        """The presentation cleanup this page's redesign asked for: Payload
+        and the Reassembled/Raw/Protocol tabs are removed from the detail
+        UI. The underlying data they showed (transfer.data, the raw frames,
+        analysis.uds.interpret) is untouched -- only these widgets are."""
         self._load(prefer="1:7E8:S")
         self.view.transfer_view.selectRow(0)
         self.app.processEvents()
-        self.assertIs(self.view.raw_view.model(), self.view.frame_view.model())
-        header = self.view.raw_view.horizontalHeader()
-        from cansniff.ui.isotp_view import FrameModel
-        for column, name in enumerate(FrameModel.COLUMNS):
-            expected_hidden = name not in ("Time", "CAN ID", "DLC", "Raw frame")
-            self.assertEqual(header.isSectionHidden(column), expected_hidden)
+        for removed in ("payload_text", "payload_size_chip", "reassembled_text",
+                        "raw_view", "protocol_label", "investigation_tabs",
+                        "investigation_stack"):
+            self.assertFalse(hasattr(self.view, removed),
+                             "{} should have been removed".format(removed))
+        # Frames remains, and is reachable directly -- no tab bar around it:
+        # a Segmented control (the widget the old 4-way tab bar used) would
+        # have the objectName "Segmented"; none should exist on this page
+        # now that Frames is its only remaining investigation view.
+        self.assertTrue(hasattr(self.view, "frame_view"))
+        self.assertIsNone(self.view.findChild(QWidget, "Segmented"))
+
+    def test_status_and_bytes_columns_are_compact(self):
+        """Status/Bytes must not reserve a large share of the transfer list
+        -- but Status, being a badge, still has to fit the common status
+        vocabulary (see isotp_view._TRANSFER_WIDTHS' own measured comment)
+        without clipping it."""
+        from cansniff.ui.isotp_view import TransferModel
+        self._load(prefer="1:7E8:S")
+        self.view.size_columns()
+        header = self.view.transfer_view.horizontalHeader()
+        status_width = header.sectionSize(TransferModel.COLUMNS.index("Status"))
+        bytes_width = header.sectionSize(TransferModel.COLUMNS.index("Bytes"))
+        # Comfortably fits "Complete" as a badge (measured ~134px) without
+        # reserving room for the whole vocabulary including the two rarest,
+        # longest statuses.
+        self.assertGreaterEqual(status_width, 130)
+        self.assertLess(status_width, 200)
+        self.assertLess(bytes_width, 66, "Bytes should be more compact than "
+                        "the pre-redesign width")
+
+    def test_transfer_list_is_narrower_than_the_detail_panel_by_default(self):
+        self._load(prefer="1:7E8:S")
+        sizes = self.view.workspace_splitter.sizes()
+        self.assertLess(sizes[0], sizes[1])
 
 
 if __name__ == "__main__":

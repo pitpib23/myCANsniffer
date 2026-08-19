@@ -36,18 +36,17 @@ from typing import Any, Callable, Dict, List, Optional, Sequence
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QFontMetrics, QPainter, QPen
 from PySide6.QtWidgets import (
-    QAbstractItemView, QCheckBox, QComboBox, QFrame, QHBoxLayout, QHeaderView,
-    QLabel, QLineEdit, QPlainTextEdit, QPushButton, QSizePolicy, QSplitter,
-    QStyle, QStyledItemDelegate, QTableView, QVBoxLayout, QWidget,
+    QAbstractItemView, QCheckBox, QComboBox, QFrame, QGridLayout, QHBoxLayout,
+    QHeaderView, QLabel, QLineEdit, QPushButton, QSizePolicy,
+    QSplitter, QStyle, QStyledItemDelegate, QTableView, QVBoxLayout, QWidget,
 )
 
 from ..analysis.isotp import ADDRESSING, COMPLETE, ERROR_STATUSES, IsoTpTransfer, frame_facts
 from ..analysis.isotp_survey import (
     EVIDENCE_ORDER, NONE, POSSIBLE, STRONG, WEAK, IsoTpEvidence,
 )
-from ..analysis.uds import interpret as uds_interpret
-from .theme import RADIUS_SM, ROW_HEIGHT_COMPACT, SPACE_MD, SPACE_SM, SPACE_XS, Theme
-from .widgets import Chip, CurrentPageStack, EmptyState, SectionLabel, Segmented
+from .theme import RADIUS_SM, ROW_HEIGHT_COMPACT, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XS, Theme
+from .widgets import Chip, Divider, EmptyState, SectionLabel
 
 #: Shown where a value genuinely does not apply, rather than left blank so it
 #: reads as "not looked at".
@@ -117,22 +116,6 @@ def _status_tone(status: str) -> str:
     return "warning"    # Incomplete / Timeout -- started but did not finish.
 
 
-def _hex_dump(data: bytes) -> str:
-    """Offset / hex / ASCII dump, eight bytes per line -- the standard
-    layout for reading a byte string that may be far longer than fits on
-    one line, without inventing a new presentation for it.
-    """
-    if not data:
-        return ""
-    lines = []
-    for offset in range(0, len(data), 8):
-        chunk = data[offset:offset + 8]
-        hex_part = " ".join("{:02X}".format(b) for b in chunk)
-        ascii_part = "".join(chr(b) if 32 <= b < 127 else "." for b in chunk)
-        lines.append("{:04X}  {:<23}  {}".format(offset, hex_part, ascii_part))
-    return "\n".join(lines)
-
-
 class BadgeDelegate(QStyledItemDelegate):
     """Paints a cell's text as a small rounded pill instead of plain text.
 
@@ -160,13 +143,22 @@ class BadgeDelegate(QStyledItemDelegate):
 
         painter.save()
         painter.setRenderHint(QPainter.Antialiasing)
+        # A cell whose column has been dragged (or, rarely, a status longer
+        # than the column was sized for -- see _TRANSFER_WIDTHS' own
+        # comment) must never paint outside its own cell: the default
+        # QStyledItemDelegate::paint() this replaces already confines
+        # itself that way, and a pill/text pair drawn without this could
+        # bleed into the neighbouring column instead of just looking snug.
+        painter.setClipRect(option.rect)
         bg, fg, border = _BADGE_TOKENS.get(
             self._tone_for(text), _BADGE_TOKENS["neutral"])
 
         font = option.font
         metrics = QFontMetrics(font)
         text_width = metrics.horizontalAdvance(text)
-        pill_width = min(option.rect.width() - 6, text_width + 20)
+        # +12 (6px each side): tight but legible -- see _TRANSFER_WIDTHS'
+        # own comment for the column widths this was measured against.
+        pill_width = min(option.rect.width() - 6, text_width + 12)
         pill_height = min(option.rect.height() - 6, metrics.height() + 8)
         rect = QRectF(
             option.rect.left() + (option.rect.width() - pill_width) / 2.0,
@@ -292,11 +284,11 @@ class EvidenceModel(QAbstractTableModel):
 class TransferModel(QAbstractTableModel):
     """Transfers for the selected CAN ID.
 
-    Deliberately lean: Addressing, Diagnostic and Payload -- useful for one
-    transfer at a time, not for scanning a list of them -- moved to the
-    detail panel's cards/tabs (see IsoTpView._update_detail_panel) instead of
-    being columns here. A list an operator is scanning to pick a transfer to
-    investigate should show only what helps pick one.
+    Deliberately lean: Addressing and Diagnostic -- useful for one transfer
+    at a time, not for scanning a list of them -- live in the detail panel
+    (see IsoTpView._update_detail_panel) instead of being columns here. A
+    list an operator is scanning to pick a transfer to investigate should
+    show only what helps pick one.
     """
 
     COLUMNS = ("Start", "Status", "Bytes", "Frames", "Duration")
@@ -373,12 +365,6 @@ class FrameModel(QAbstractTableModel):
     in the frame. Nothing is hidden: a frame reading ``01 00 03`` shows data
     ``00`` and extra ``03`` rather than quietly dropping the byte the protocol
     reading has no use for.
-
-    Shared by two views (see IsoTpView._build_raw_tab): the Frames tab shows
-    every column, the Raw tab hides everything but Time / CAN ID / DLC / Raw
-    frame -- the frame exactly as captured, with no ISO-TP reading overlaid.
-    One model, one set of facts; the two tabs just show different columns
-    of the same rows.
     """
 
     COLUMNS = ("Time", "CAN ID", "DLC", "Type", "PCI", "Seq / Flow",
@@ -556,13 +542,17 @@ class IsoTpView(QWidget):
         self.workspace_splitter.setChildrenCollapsible(False)
         self.workspace_splitter.addWidget(self._build_transfers())
         self.workspace_splitter.addWidget(self._build_detail_panel())
-        self.workspace_splitter.setStretchFactor(0, 2)
-        self.workspace_splitter.setStretchFactor(1, 3)
+        # ~30/70 -- Transfers is a picker, Details is where time is actually
+        # spent (see the class docstring); a 40/60 split undersold that.
+        self.workspace_splitter.setStretchFactor(0, 3)
+        self.workspace_splitter.setStretchFactor(1, 7)
         self.workspace_splitter.splitterMoved.connect(self._remember_workspace_split)
         self.splitter.addWidget(self.workspace_splitter)
 
-        self.splitter.setStretchFactor(0, 2)
-        self.splitter.setStretchFactor(1, 5)
+        # ~28/72 -- the CAN-ID overview is a quarter-to-a-third of the page,
+        # never more: it is a navigation aid, not the investigation itself.
+        self.splitter.setStretchFactor(0, 7)
+        self.splitter.setStretchFactor(1, 18)
         # In-memory only (see _SPLITTER_CONFIG_KEY) -- an operator dragging a
         # handle must never trigger a disk write per pixel of motion.
         self.splitter.splitterMoved.connect(self._remember_splitter_sizes)
@@ -674,9 +664,13 @@ class IsoTpView(QWidget):
     # -- construction: transfer list (collapsible) -----------------------
 
     def _build_transfers(self) -> QWidget:
-        panel = QWidget()
+        # Panel, matching the detail workspace beside it -- master and
+        # detail read as one consistent pair of cards, not one bordered
+        # investigation area next to an unstyled list.
+        panel = QFrame()
+        panel.setObjectName("Panel")
         column = QVBoxLayout(panel)
-        column.setContentsMargins(0, 0, 0, 0)
+        column.setContentsMargins(SPACE_MD, SPACE_MD, SPACE_MD, SPACE_MD)
         column.setSpacing(SPACE_SM)
 
         row = QHBoxLayout()
@@ -705,15 +699,18 @@ class IsoTpView(QWidget):
         self.problems_only.toggled.connect(self._reload_transfers)
         row.addWidget(self.problems_only)
         row.addStretch(1)
-        # One line, elided, full text on hover. Wrapped, this grew to four
-        # lines and took the room the transfer table needed.
-        self.evidence_reason = QLabel("")
-        self.evidence_reason.setObjectName("Muted")
-        self.evidence_reason.setWordWrap(False)
-        self.evidence_reason.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self.evidence_reason.setSizePolicy(QSizePolicy.Ignored,
-                                           QSizePolicy.Preferred)
-        row.addWidget(self.evidence_reason, 1)
+        # A count, not the evidence reason: that text already lives on
+        # every cell of the ID's own row in the summary table above (see
+        # EvidenceModel's ToolTipRole) -- repeating it here just crowded
+        # this header without saying anything the hover didn't already.
+        # Ignored, not Preferred: this is the one piece of the header that
+        # stays visible while collapsed (see _on_transfers_toggled), and it
+        # must never be the reason the collapsed pane's own minimum width
+        # grows -- same idiom as workspace_note elsewhere in the app.
+        self.transfer_count_label = QLabel("")
+        self.transfer_count_label.setObjectName("Muted")
+        self.transfer_count_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        row.addWidget(self.transfer_count_label)
         column.addLayout(row)
 
         self.transfer_model = TransferModel(self._theme, self)
@@ -736,6 +733,13 @@ class IsoTpView(QWidget):
         shown = bool(shown)
         self._refresh_transfers_toggle_text()
         self.transfer_view.setVisible(shown)
+        # Neither means anything about a table that is not on screen -- and,
+        # not incidentally, both were contributors to what "collapsed" used
+        # to still need a few hundred pixels for. The toggle itself --
+        # "<chevron>  Transfers on 0x...", the header's own irreducible
+        # context -- is the only thing left once these are gone too.
+        self.problems_only.setVisible(shown)
+        self.transfer_count_label.setVisible(shown)
         self.config.set(_TRANSFERS_COLLAPSED_KEY, not shown)
 
         total = sum(self.workspace_splitter.sizes()) or self.workspace_splitter.width() or 800
@@ -746,7 +750,7 @@ class IsoTpView(QWidget):
                     and sum(saved) > 0):
                 width = int(saved[0])
             else:
-                width = int(total * 0.4)
+                width = int(total * self._WORKSPACE_DEFAULT_RATIO)
             width = max(200, min(width, max(200, total - 200)))
             self.workspace_splitter.setSizes([width, max(200, total - width)])
             # Reopening highlights whatever is currently in the detail panel
@@ -773,6 +777,17 @@ class IsoTpView(QWidget):
     # -- construction: transfer detail workspace --------------------------
 
     def _build_detail_panel(self) -> QWidget:
+        """The dominant investigation surface: one bordered card, not a
+        card full of smaller cards.
+
+        Identity/timing used to be three separate boxed panels beside a
+        fourth boxed payload area -- four nested cards inside this one,
+        fighting each other for attention instead of the frame table below
+        them (the actual point of the page) getting the room. Everything
+        here now shares this single surface: a plain aligned grid for the
+        summary fields, a plain diagnostic line, a lightly-tinted (not
+        boxed) payload area, separated by thin Dividers rather than borders.
+        """
         panel = QFrame()
         panel.setObjectName("Panel")
         outer = QVBoxLayout(panel)
@@ -790,20 +805,12 @@ class IsoTpView(QWidget):
         header.addWidget(self._build_navigator())
         outer.addLayout(header)
 
-        cards = QHBoxLayout()
-        cards.setSpacing(SPACE_SM)
-        self.identity_card, self._identity_fields = self._build_card(
-            ("CAN ID", "Status", "Addressing"))
-        cards.addWidget(self.identity_card, 1)
-        self.timing_card, self._timing_fields = self._build_card(
-            ("Start", "Duration", "Frames", "Bytes"))
-        cards.addWidget(self.timing_card, 1)
-        self.diagnostic_card = self._build_diagnostic_card()
-        cards.addWidget(self.diagnostic_card, 1)
-        outer.addLayout(cards)
+        outer.addWidget(Divider())
+        outer.addLayout(self._build_summary_grid())
+        outer.addLayout(self._build_diagnostic_row())
+        outer.addWidget(Divider())
 
-        outer.addWidget(self._build_payload_section())
-        outer.addWidget(self._build_investigation_tabs(), 1)
+        outer.addWidget(self._build_frames_section(), 1)
 
         self._update_navigator()
         self._update_detail_panel(None)
@@ -843,47 +850,59 @@ class IsoTpView(QWidget):
         row.addWidget(self.next_button)
         return nav
 
-    def _build_card(self, field_labels: Sequence[str]):
-        card = QFrame()
-        card.setObjectName("Panel")
-        layout = QVBoxLayout(card)
-        layout.setContentsMargins(SPACE_SM, SPACE_SM, SPACE_SM, SPACE_SM)
-        layout.setSpacing(SPACE_XS)
-        values: Dict[str, QLabel] = {}
-        for label_text in field_labels:
-            field_row = QHBoxLayout()
-            field_row.setContentsMargins(0, 0, 0, 0)
-            field_row.setSpacing(SPACE_SM)
-            label = QLabel(label_text)
-            label.setObjectName("Muted")
-            label.setFixedWidth(76)
-            field_row.addWidget(label)
-            value = QLabel(DASH)
-            value.setFont(self._theme.mono_font(-0.5))
-            value.setTextInteractionFlags(Qt.TextSelectableByMouse)
-            field_row.addWidget(value, 1)
-            layout.addLayout(field_row)
-            values[label_text] = value
-        layout.addStretch(1)
-        return card, values
+    #: Left column: what the transfer *is*. Right column: how big/long it
+    #: was. Two label:value columns in one QGridLayout, not two separate
+    #: boxed cards -- the grid's own column alignment already reads as
+    #: organised without a border around each half saying so again.
+    _IDENTITY_FIELDS = ("CAN ID", "Status", "Addressing")
+    _TIMING_FIELDS = ("Start", "Duration", "Frames", "Bytes")
 
-    def _build_diagnostic_card(self) -> QWidget:
-        card = QFrame()
-        card.setObjectName("Panel")
-        layout = QVBoxLayout(card)
-        layout.setContentsMargins(SPACE_SM, SPACE_SM, SPACE_SM, SPACE_SM)
-        layout.setSpacing(SPACE_XS)
-        layout.addWidget(SectionLabel("Diagnostic", self._theme))
-        self.diagnostic_chip = Chip("", "muted", self._theme)
-        layout.addWidget(self.diagnostic_chip)
-        self.diagnostic_detail = QLabel("")
-        self.diagnostic_detail.setObjectName("Muted")
-        self.diagnostic_detail.setWordWrap(True)
-        layout.addWidget(self.diagnostic_detail)
-        layout.addStretch(1)
-        return card
+    def _build_summary_grid(self) -> QGridLayout:
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(SPACE_LG)
+        grid.setVerticalSpacing(SPACE_XS)
+        self._identity_fields: Dict[str, QLabel] = {}
+        self._timing_fields: Dict[str, QLabel] = {}
+        for column, (labels, store) in enumerate((
+            (self._IDENTITY_FIELDS, self._identity_fields),
+            (self._TIMING_FIELDS, self._timing_fields),
+        )):
+            for row, label_text in enumerate(labels):
+                label = QLabel(label_text)
+                label.setObjectName("Muted")
+                grid.addWidget(label, row, column * 2)
+                value = QLabel(DASH)
+                value.setFont(self._theme.mono_font(-0.5))
+                value.setTextInteractionFlags(Qt.TextSelectableByMouse)
+                grid.addWidget(value, row, column * 2 + 1)
+                store[label_text] = value
+        # A trailing stretch column keeps both label:value pairs pinned to
+        # the left, snug, rather than spread across the panel's full width.
+        grid.setColumnStretch(4, 1)
+        return grid
 
-    def _build_payload_section(self) -> QWidget:
+    def _build_diagnostic_row(self) -> QVBoxLayout:
+        column = QVBoxLayout()
+        column.setSpacing(2)
+        column.addWidget(SectionLabel("Diagnostic", self._theme))
+        # Plain text, not a card: a clean transfer's diagnostic is a single
+        # quiet line ("no issues detected") and does not need a border to
+        # say so -- see _update_detail_panel, which gives a genuine problem
+        # a bolder colour here instead of a bigger box.
+        self.diagnostic_line = QLabel(DASH)
+        self.diagnostic_line.setWordWrap(True)
+        self.diagnostic_line.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        column.addWidget(self.diagnostic_line)
+        return column
+
+    def _build_frames_section(self) -> QWidget:
+        """The raw frames behind the selected transfer -- the primary
+        investigation surface, given the space Payload/Reassembled/Raw/
+        Protocol used to divide it with. A direct section, not a one-tab
+        tab bar: with those three removed, Frames was the only tab left,
+        and a tab control that only ever shows one thing is not a control
+        worth keeping.
+        """
         container = QWidget()
         layout = QVBoxLayout(container)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -891,109 +910,19 @@ class IsoTpView(QWidget):
 
         header = QHBoxLayout()
         header.setSpacing(SPACE_SM)
-        header.addWidget(SectionLabel("Payload", self._theme))
-        self.payload_size_chip = Chip("", "muted", self._theme)
-        header.addWidget(self.payload_size_chip)
-        header.addStretch(1)
-        layout.addLayout(header)
-
-        # QPlainTextEdit, not a QLabel: its own scrollbar is how a payload
-        # far longer than the visible area stays reachable without growing
-        # this panel (and so the top-level window) to fit it -- the same
-        # reasoning the frame/transfer tables' own scrollbars already rely
-        # on for "many rows", one layer down for "long payload".
-        self.payload_text = QPlainTextEdit()
-        self.payload_text.setObjectName("Panel")
-        self.payload_text.setReadOnly(True)
-        self.payload_text.setFont(self._theme.mono_font(0.0))
-        self.payload_text.setLineWrapMode(QPlainTextEdit.WidgetWidth)
-        self.payload_text.setMinimumHeight(48)
-        self.payload_text.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        layout.addWidget(self.payload_text)
-        return container
-
-    def _build_investigation_tabs(self) -> QWidget:
-        container = QWidget()
-        layout = QVBoxLayout(container)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(SPACE_XS)
-
-        header = QHBoxLayout()
-        header.setSpacing(SPACE_SM)
-        self.investigation_tabs = Segmented(["Frames", "Reassembled", "Raw", "Protocol"], 0)
-        header.addWidget(self.investigation_tabs)
+        header.addWidget(SectionLabel("Frames", self._theme))
         self.frames_note = QLabel("")
         self.frames_note.setObjectName("Muted")
         header.addWidget(self.frames_note)
         header.addStretch(1)
         layout.addLayout(header)
 
-        # CurrentPageStack, not a plain QStackedWidget: Frames' table and
-        # Protocol's few lines of text have very different natural minimums,
-        # and only the active tab's should ever count -- see
-        # widgets.CurrentPageStack.
-        self.investigation_stack = CurrentPageStack()
-        self.investigation_stack.addWidget(self._build_frames_tab())        # 0 Frames
-        self.investigation_stack.addWidget(self._build_reassembled_tab())   # 1 Reassembled
-        self.investigation_stack.addWidget(self._build_raw_tab())           # 2 Raw
-        self.investigation_stack.addWidget(self._build_protocol_tab())      # 3 Protocol
-        self.investigation_tabs.changed.connect(self.investigation_stack.setCurrentIndex)
-        layout.addWidget(self.investigation_stack, 1)
-        return container
-
-    def _build_frames_tab(self) -> QWidget:
-        panel = QWidget()
-        layout = QVBoxLayout(panel)
-        layout.setContentsMargins(0, 0, 0, 0)
         self.frame_model = FrameModel(self._theme, self)
         self.frame_view = self._table()
         self.frame_view.setModel(self.frame_model)
         self.frame_view.doubleClicked.connect(self._on_frame_activated)
         layout.addWidget(self.frame_view, 1)
-        return panel
-
-    def _build_reassembled_tab(self) -> QWidget:
-        panel = QWidget()
-        layout = QVBoxLayout(panel)
-        layout.setContentsMargins(0, 0, 0, 0)
-        self.reassembled_text = QPlainTextEdit()
-        self.reassembled_text.setReadOnly(True)
-        self.reassembled_text.setFont(self._theme.mono_font(-0.5))
-        self.reassembled_text.setLineWrapMode(QPlainTextEdit.NoWrap)
-        layout.addWidget(self.reassembled_text, 1)
-        return panel
-
-    def _build_raw_tab(self) -> QWidget:
-        """The frame exactly as captured -- no ISO-TP reading overlaid.
-
-        Shares frame_model with the Frames tab (see FrameModel's own
-        docstring) rather than a second copy of the same facts; only the
-        columns shown differ.
-        """
-        panel = QWidget()
-        layout = QVBoxLayout(panel)
-        layout.setContentsMargins(0, 0, 0, 0)
-        self.raw_view = self._table()
-        self.raw_view.setModel(self.frame_model)
-        raw_columns = frozenset(("Time", "CAN ID", "DLC", "Raw frame"))
-        header = self.raw_view.horizontalHeader()
-        for column, name in enumerate(FrameModel.COLUMNS):
-            header.setSectionHidden(column, name not in raw_columns)
-        layout.addWidget(self.raw_view, 1)
-        return panel
-
-    def _build_protocol_tab(self) -> QWidget:
-        panel = QWidget()
-        layout = QVBoxLayout(panel)
-        layout.setContentsMargins(SPACE_SM, SPACE_SM, SPACE_SM, SPACE_SM)
-        self.protocol_label = QLabel("")
-        self.protocol_label.setWordWrap(True)
-        self.protocol_label.setAlignment(Qt.AlignTop | Qt.AlignLeft)
-        self.protocol_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self.protocol_label.setFont(self._theme.mono_font(0.0))
-        layout.addWidget(self.protocol_label)
-        layout.addStretch(1)
-        return panel
+        return container
 
     # -- content -----------------------------------------------------------
 
@@ -1063,7 +992,7 @@ class IsoTpView(QWidget):
             self.frame_model.set_transfer(None)
             self._update_navigator()
             self._update_detail_panel(None)
-            self.evidence_reason.setText("")
+            self._update_transfer_count_label()
 
     def _reselect_after_sort(self, *_args) -> None:
         # Deferred one event-loop turn: QTableView does further selection
@@ -1093,9 +1022,6 @@ class IsoTpView(QWidget):
         self._selected_id_label = row.id_label
         self._transfers_caption = "Transfers on {}".format(row.id_label)
         self._refresh_transfers_toggle_text()
-        reason = "{} — {}".format(row.evidence, row.why())
-        self.evidence_reason.setText(_elide(reason, 96))
-        self.evidence_reason.setToolTip(row.why())
         self._reload_transfers()
 
     def _reload_transfers(self, *_args) -> None:
@@ -1113,12 +1039,14 @@ class IsoTpView(QWidget):
             self.frame_model.set_transfer(None)
             self._update_navigator()
             self._update_detail_panel(None)
+            self._update_transfer_count_label()
             self.frames_note.setText("")
             return
         transfers = list(self._transfer_source(self._selected_key))
         if self.problems_only.isChecked():
             transfers = [t for t in transfers if not t.complete]
         self.transfer_model.set_rows(transfers, self._time_base)
+        self._update_transfer_count_label()
         if transfers:
             self.transfer_view.selectRow(0)
         else:
@@ -1127,6 +1055,12 @@ class IsoTpView(QWidget):
             self._update_navigator()
             self._update_detail_panel(None)
             self.frames_note.setText("")
+
+    def _update_transfer_count_label(self) -> None:
+        total = self.transfer_model.rowCount()
+        self.transfer_count_label.setText(
+            "{:,} transfer{}".format(total, "" if total == 1 else "s")
+            if total else "No transfers")
 
     # -- transfer selection: the single authoritative path -----------------
 
@@ -1196,12 +1130,8 @@ class IsoTpView(QWidget):
             self.detail_status_chip.setVisible(False)
             for value in list(self._identity_fields.values()) + list(self._timing_fields.values()):
                 value.setText(DASH)
-            self.diagnostic_chip.set_text_and_tone("—", "muted")
-            self.diagnostic_detail.setText("")
-            self.payload_size_chip.set_text_and_tone("", "muted")
-            self.payload_text.setPlainText("")
-            self.reassembled_text.setPlainText("")
-            self.protocol_label.setText("")
+            self.diagnostic_line.setText(DASH)
+            self.diagnostic_line.setStyleSheet("")
             return
 
         self.detail_status_chip.setVisible(True)
@@ -1217,46 +1147,19 @@ class IsoTpView(QWidget):
         self._timing_fields["Bytes"].setText(transfer.bytes_label)
 
         if transfer.complete:
-            self.diagnostic_chip.set_text_and_tone("No issues detected", "success")
-            self.diagnostic_detail.setText("")
+            # Clean is the common case and stays quiet -- a small checkmark
+            # line, not a badge -- so a genuine problem (below) is the one
+            # that visually stands out, not every transfer equally.
+            self.diagnostic_line.setText("✓  No issues detected")
+            self.diagnostic_line.setStyleSheet(
+                "color: {};".format(self._theme.hex("success")))
         else:
-            self.diagnostic_chip.set_text_and_tone(
-                transfer.status, "danger" if transfer.failed else "warning")
-            self.diagnostic_detail.setText(transfer.detail or transfer.describe())
-
-        size = len(transfer.data)
-        self.payload_size_chip.set_text_and_tone(
-            "{} byte{}".format(size, "" if size == 1 else "s"), "muted")
-        self.payload_text.setPlainText(transfer.data_hex)
-
-        self.reassembled_text.setPlainText(_hex_dump(transfer.data))
-        self._refresh_protocol_tab(transfer)
-
-    def _refresh_protocol_tab(self, transfer: IsoTpTransfer) -> None:
-        # Only a payload that actually reassembled is worth interpreting;
-        # feeding fragments to a diagnostic decoder invents meaning (same
-        # gate the old Diagnostic column used).
-        if not transfer.complete or not transfer.data:
-            self.protocol_label.setText(
-                "No protocol interpretation — the transfer has not completed.")
-            return
-        message = uds_interpret(transfer.data)
-        if not message.recognised:
-            self.protocol_label.setText(message.describe())
-            return
-        lines = [message.describe()]
-        if message.service is not None:
-            lines.append("Service: {} (0x{:02X})".format(
-                message.service_name or "—", message.service))
-        if message.sub_function is not None:
-            lines.append("Sub-function: 0x{:02X}".format(message.sub_function))
-        if message.identifier is not None:
-            lines.append("Identifier: 0x{:04X}".format(message.identifier))
-        if message.nrc is not None:
-            lines.append("NRC: 0x{:02X} {}".format(message.nrc, message.nrc_text or ""))
-        if message.detail:
-            lines.append(message.detail)
-        self.protocol_label.setText("\n".join(lines))
+            glyph = "✕" if transfer.failed else "!"
+            tone = "danger" if transfer.failed else "warning"
+            self.diagnostic_line.setText(
+                "{}  {}".format(glyph, transfer.detail or transfer.describe()))
+            self.diagnostic_line.setStyleSheet(
+                "color: {}; font-weight: 600;".format(self._theme.hex(tone)))
 
     def _on_frame_activated(self, index: QModelIndex) -> None:
         if not index.isValid():
@@ -1290,7 +1193,24 @@ class IsoTpView(QWidget):
     #: clipped exactly that, forcing a manual drag-to-widen on every one of
     #: them just to read the table this page exists to show.
     _SUMMARY_WIDTHS = (78, 74, 92, 108, 108, 108, 108, 108, 108, 108, 108, 108)
-    _TRANSFER_WIDTHS = (86, 92, 66, 62, 78)
+    #: Start / Status / Bytes / Frames / Duration (Duration stretches
+    #: regardless -- see _table()'s own setStretchLastSection). Status and
+    #: Bytes were measured with QFontMetrics against the actual content
+    #: rather than guessed:
+    #:   Status is a BadgeDelegate pill, so it needs the full status
+    #:   vocabulary's text width (analysis/isotp.py's COMPLETE .. INVALID_
+    #:   PCI) plus this table's own 20px QTableView::item padding plus the
+    #:   pill's own 12px padding. "Complete" (the common case) alone needs
+    #:   ~134px to render unclipped; 140px covers every status except the
+    #:   two longest, rarest ones (Sequence Error, Length Mismatch), which
+    #:   the delegate clips its *pill* to rather than reserving ~220px of
+    #:   this already-dense table for a case that is rare by definition --
+    #:   the full text always remains in the cell's own tooltip regardless.
+    #:   Bytes is plain text (str(int) or "N of M"), not a badge: 52px
+    #:   comfortably fits the overwhelmingly common short values without
+    #:   reserving room for "N of M" on an incomplete transfer, which is
+    #:   both rare and, again, still in the tooltip.
+    _TRANSFER_WIDTHS = (90, 140, 52, 40, 78)
     _FRAME_WIDTHS = (74, 70, 42, 46, 58, 84, 74, 152, 70)
 
     def size_columns(self) -> None:
@@ -1299,12 +1219,57 @@ class IsoTpView(QWidget):
             (self.summary_view, self._SUMMARY_WIDTHS),
             (self.transfer_view, self._TRANSFER_WIDTHS),
             (self.frame_view, self._FRAME_WIDTHS),
-            (self.raw_view, self._FRAME_WIDTHS),
         ):
             header = view.horizontalHeader()
             for column, width in enumerate(widths):
                 if column < header.count():
                     header.resizeSection(column, width)
+
+    #: Default/fallback proportions -- also the sane band a *persisted*
+    #: split's own ratio is checked against before being trusted (see
+    #: _restore_split). Region 1 (the CAN-ID overview) gets more of the
+    #: page by default than a bare "quarter" would give it, so noticeably
+    #: more CAN IDs are visible without scrolling; Transfers stays roughly
+    #: 30-35% of the workspace, Details getting the rest -- both match this
+    #: file's own module docstring on which side of each split is the
+    #: investigation.
+    _OUTER_DEFAULT_RATIO = 0.38
+    _WORKSPACE_DEFAULT_RATIO = 0.32
+    #: A persisted ratio outside this band is not a real, deliberately
+    #: dragged split -- most likely a stale value saved from a very
+    #: differently sized window, or corrupted config -- so it is not
+    #: trusted; see _restore_split.
+    _SANE_RATIO = (0.12, 0.7)
+
+    def _restore_split(self, splitter: QSplitter, config_key: str,
+                       default_ratio: float, minimum_total: int) -> None:
+        """Shared restore logic for both of this page's splitters: trust a
+        persisted [a, b] pair exactly when its own ratio is plausible (the
+        common case -- an operator dragged the handle), otherwise fall back
+        to the proportional default rather than risk restoring a split from
+        a stale or corrupted value that would leave one side of the page
+        effectively unusable.
+        """
+        saved = self.config.get(config_key, None)
+        if (isinstance(saved, (list, tuple)) and len(saved) == 2
+                and all(isinstance(v, (int, float)) and v >= 0 for v in saved)
+                and sum(saved) > 0):
+            ratio = saved[0] / sum(saved)
+            if self._SANE_RATIO[0] <= ratio <= self._SANE_RATIO[1]:
+                # Trusted exactly, not reclamped against the current
+                # widget's own width: Qt's setSizes() already respects each
+                # pane's minimum on its own, and reclamping against a width
+                # that can differ by a couple of pixels between two
+                # otherwise-identical instances (splitter handle/scrollbar
+                # rounding) made a faithfully persisted split come back
+                # very slightly different from what was saved.
+                splitter.setSizes([int(v) for v in saved])
+                return
+        extent = (splitter.width() if splitter.orientation() == Qt.Horizontal
+                 else splitter.height())
+        total = max(extent, minimum_total)
+        first = int(total * default_ratio)
+        splitter.setSizes([first, total - first])
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
@@ -1314,36 +1279,10 @@ class IsoTpView(QWidget):
         # An operator who has already dragged these handles gets that back,
         # exactly like MainWindow restores ui.sidebar_width -- never a fresh
         # split overriding a size they chose on a previous run.
-        saved = self.config.get(_SPLITTER_CONFIG_KEY, None)
-        if (isinstance(saved, (list, tuple)) and len(saved) == 2
-                and all(isinstance(v, (int, float)) and v >= 0 for v in saved)
-                and sum(saved) > 0):
-            self.splitter.setSizes([int(v) for v in saved])
-        else:
-            # Split the height deliberately, favouring the workspace (the
-            # transfer list + detail panel) over the summary -- the summary
-            # is a picker, the workspace is where the actual investigation
-            # happens.
-            height = max(self.height(), 420)
-            self.splitter.setSizes([int(height * 0.32), int(height * 0.68)])
-
-        saved_split = self.config.get(_WORKSPACE_SPLIT_KEY, None)
-        if (isinstance(saved_split, (list, tuple)) and len(saved_split) == 2
-                and all(isinstance(v, (int, float)) and v >= 0 for v in saved_split)
-                and sum(saved_split) > 0):
-            # Trusted directly, the same way the outer splitter's own
-            # restore above is -- no reclamping against the current width
-            # here, since Qt's own setSizes() already respects each pane's
-            # minimum, and reclamping against a width that can differ by a
-            # couple of pixels between two otherwise-identical instances
-            # (splitter handle/scrollbar rounding) made a faithfully
-            # persisted split come back very slightly different from what
-            # was saved.
-            self.workspace_splitter.setSizes([int(v) for v in saved_split])
-        else:
-            total = max(self.workspace_splitter.width(), 800)
-            width = int(total * 0.4)
-            self.workspace_splitter.setSizes([width, total - width])
+        self._restore_split(self.splitter, _SPLITTER_CONFIG_KEY,
+                            self._OUTER_DEFAULT_RATIO, 420)
+        self._restore_split(self.workspace_splitter, _WORKSPACE_SPLIT_KEY,
+                            self._WORKSPACE_DEFAULT_RATIO, 800)
 
         if bool(self.config.get(_TRANSFERS_COLLAPSED_KEY, False)):
             # Triggers _on_transfers_toggled(False), the same path a real

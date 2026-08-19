@@ -282,7 +282,6 @@ class NavRail(QFrame):
         self.setObjectName("NavRail")
         self.setFixedWidth(self.WIDTH)
         self._theme = theme
-        self._collapsed = False
         self._destinations = list(destinations)
         self._toggleable = (set(range(len(self._destinations)))
                             if toggleable is None else set(toggleable))
@@ -302,16 +301,24 @@ class NavRail(QFrame):
         column.addStretch(1)
         self.group.idClicked.connect(self.changed.emit)
 
-    def set_collapsed(self, collapsed: bool) -> None:
-        """Mute the active marker while the panel it points at is hidden.
+    def set_indicator(self, index: Optional[int]) -> None:
+        """Show the leading-edge bar on exactly ``index`` (or none of them,
+        when ``index`` is None).
 
-        The checked button is still the section that will reopen, but with
-        nothing on screen there is no "current section" to advertise, and an
-        accent bar beside a closed panel claims otherwise.
+        This is deliberately a *separate* concept from which button is
+        checked (see _NavButton.set_indicator's own docstring): the current
+        page's own highlight (the accent wash, driven by isChecked() alone)
+        must stay on regardless of this call, so a caller collapsing the
+        current page's selector clears the indicator without the page
+        itself ever looking unselected. The caller decides what ``index``
+        means -- typically "the current page, but only while its own
+        selector is on" -- this method only ever paints exactly one
+        button's bar, or none.
         """
-        self._collapsed = bool(collapsed)
-        for button in self.group.buttons():
-            button.set_muted(self._collapsed)
+        for position in range(len(self._destinations)):
+            button = self.group.button(position)
+            if button is not None:
+                button.set_indicator(position == index)
 
     def set_current(self, index: int) -> None:
         button = self.group.button(index)
@@ -362,8 +369,9 @@ class _NavButton(QPushButton):
         self._theme = theme
         self._glyph = glyph
         self._label = label
-        #: Checked, but with its panel hidden — so it paints as inactive.
-        self._muted = False
+        #: The leading-edge bar -- independent of isChecked() (which page is
+        #: current). See set_indicator.
+        self._show_indicator = False
         self.setCheckable(True)
         self.setCursor(Qt.PointingHandCursor)
         self.setFlat(True)
@@ -380,10 +388,17 @@ class _NavButton(QPushButton):
     def minimumSizeHint(self) -> QSize:
         return self.sizeHint()
 
-    def set_muted(self, muted: bool) -> None:
-        muted = bool(muted)
-        if muted != self._muted:
-            self._muted = muted
+    def set_indicator(self, shown: bool) -> None:
+        """The leading-edge bar -- a *second*, independent thing from
+        ``isChecked()`` (which page is current). See NavRail.set_indicator
+        for what this represents: "the current page's own selector is on",
+        never "this is the current page" by itself -- that is checked()
+        alone, unconditionally, so the accent-wash highlight below never
+        needs this to be true.
+        """
+        shown = bool(shown)
+        if shown != self._show_indicator:
+            self._show_indicator = shown
             self.update()
 
     def restyle(self) -> None:
@@ -394,28 +409,37 @@ class _NavButton(QPushButton):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing, True)
         rect = QRectF(self.rect())
-        active = self.isChecked() and not self._muted
+        # The highlight means "this is the currently open page" and nothing
+        # else -- it must stay on regardless of whether that page's own
+        # selector happens to be shown or hidden (see MainWindow's own
+        # _selector_on / current-page split). Only the leading bar below
+        # additionally depends on _show_indicator.
+        current = self.isChecked()
 
-        if active:
+        if current:
             path = QPainterPath()
             path.addRoundedRect(rect.adjusted(2, 1, -2, -1), RADIUS_MD, RADIUS_MD)
             painter.fillPath(path, theme.color("accent_wash"))
-            # A solid bar on the leading edge makes the active section obvious
-            # even at a glance, without relying on the wash alone.
-            marker = QRectF(rect.left(), rect.top() + 10, 3, rect.height() - 20)
-            bar = QPainterPath()
-            bar.addRoundedRect(marker, 1.5, 1.5)
-            painter.fillPath(bar, theme.color("accent"))
         elif self.underMouse():
             path = QPainterPath()
             path.addRoundedRect(rect.adjusted(2, 1, -2, -1), RADIUS_MD, RADIUS_MD)
             painter.fillPath(path, theme.color("hover"))
 
-        pen = theme.color("accent") if active else theme.color("text_secondary")
+        if current and self._show_indicator:
+            # A solid bar on the leading edge makes "this page's selector is
+            # open" obvious even at a glance, without relying on the wash
+            # alone -- but only when the selector genuinely is open; the
+            # wash above already says "current page" on its own.
+            marker = QRectF(rect.left(), rect.top() + 10, 3, rect.height() - 20)
+            bar = QPainterPath()
+            bar.addRoundedRect(marker, 1.5, 1.5)
+            painter.fillPath(bar, theme.color("accent"))
+
+        pen = theme.color("accent") if current else theme.color("text_secondary")
         painter.setPen(QPen(pen, 1.6))
         self._paint_glyph(painter, QRectF(rect.center().x() - 9, rect.top() + 11, 18, 18))
 
-        painter.setFont(theme.ui_font(-1.5, bold=active))
+        painter.setFont(theme.ui_font(-1.5, bold=current))
         painter.setPen(pen)
         painter.drawText(
             QRectF(rect.left(), rect.top() + 33, rect.width(), 18),

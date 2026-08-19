@@ -470,22 +470,22 @@ CAN ID   Peer   Evidence  Transfers  Complete  Errors  Frames   SF   FF   FC   C
 0x7E8    0x7E0  Strong           24        24       —      48   12   12   24    —      —
 0x100      —    Weak          1,332     1,332       —   1,332 1332    —    —    —      —
 
-▾  Transfers on 0x7E8                                    Problems only
+▾  Transfers on 0x7E8          Problems only         24 transfers
 
 Start     Status     Bytes  Frames  Duration
 5.014s    Complete   20     3       0.010s
 
 TRANSFER DETAILS (0x7E8)  [Complete]                            ‹  1 / 24  ›
 
- CAN ID       0x7E8         Start      5.0140s        DIAGNOSTIC
- Status       Complete      Duration   0.0100s         [No issues detected]
+ CAN ID       0x7E8         Start      5.0140s
+ Status       Complete      Duration   0.0100s
  Addressing   normal        Frames     3
                              Bytes     20
 
- PAYLOAD  20 bytes
- 62 F1 90 57 ...
+ DIAGNOSTIC
+ ✓  No issues detected
 
- [ Frames ] Reassembled  Raw  Protocol         3 frames
+ FRAMES                                          3 frames
 
  Time     CAN ID  DLC  Type  PCI     Seq/Flow  Declared  Data          Extra  Raw frame
  5.014s   0x7E8   8    FF    10 14   —         20        62 F1 90 57   —      10 14 62 F1 …
@@ -494,15 +494,31 @@ TRANSFER DETAILS (0x7E8)  [Complete]                            ‹  1 / 24  ›
 Three levels: pick a CAN ID in the evidence summary, its transfers appear in
 the list to the lower left; pick a transfer, its detail appears in the panel
 to the lower right — CAN ID/status/addressing, timing/size, a diagnostic
-card, the reassembled payload, and Frames/Reassembled/Raw/Protocol tabs for
-the frames behind it. Selection survives sorting and filtering — neither the
-transfer list nor the detail panel ever silently shows a different ID's or a
-different transfer's data than the one highlighted above it.
+line, and the raw frames behind the transfer, which gets the space a
+Payload box and Reassembled/Raw/Protocol tabs used to divide with it: with
+those removed, Frames is the page's only investigation view, so it is a
+direct section rather than a tab bar with one tab left in it. Selection
+survives sorting and filtering — neither the transfer list nor the detail
+panel ever silently shows a different ID's or a different transfer's data
+than the one highlighted above it.
+
+The detail panel is deliberately one surface, not several: the summary
+fields sit in a plain aligned two-column layout rather than three separate
+boxed cards, and the diagnostic reads as a single quiet line — a checkmark
+for a clean transfer — rather than its own panel, so a genuine problem (which
+does get a bolder colour there) is the thing that visually stands out, not
+every transfer's metadata competing for the same weight. The transfer list
+gets the same card treatment as the detail panel beside it, sized to about
+30% of the workspace by default — a picker, not the investigation itself.
 
 **The transfer list collapses.** Its own disclosure (`▾`/`▸`, the same
 chevron InterpretView's bit-activity panel uses) folds it down to just its
-header, handing its width to the detail panel — useful once a transfer worth
-digging into is found and the list itself is no longer needed on screen. A
+header — `▸  Transfers on 0x7E8`, nothing else; Problems only and the
+transfer count both hide alongside the table itself, since neither says
+anything about one that is not on screen — handing its reclaimed width to
+the detail panel, which takes nearly all of it. Useful once a transfer
+worth digging into is found and the list itself is no longer needed on
+screen. A
 `‹  n / total  ›` navigator in the detail header keeps browsing possible
 while it is collapsed: Previous/Next move to the adjacent transfer, and
 reopening the list highlights and scrolls to whichever one the navigator is
