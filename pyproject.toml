@@ -24,6 +24,7 @@ dependencies = [
     "PySide6>=6.6,<6.9",      # Qt UI; PySide6-Addons supplies QtCharts
     "python-can>=4.2,<5",     # receive layer + ASC/candump readers and writers
     "cantools>=39,<41",       # read-only DBC parsing and decoding
+    "pyserial>=3.5,<4",       # transport for python-can's slcan backend (recv only)
 ]
 
 [project.optional-dependencies]

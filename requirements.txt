@@ -7,3 +7,6 @@ python-can>=4.2,<5     # CAN receive layer (listen-only usage only).
                        # Also supplies the ASC and candump readers/writers.
 cantools>=39,<41       # Read-only DBC parsing/decoding. Only decode is wrapped;
                        # its frame-encoding API is never surfaced.
+pyserial>=3.5,<4       # Transport for python-can's slcan backend (cansniff/sources/live.py
+                       # only calls Bus.recv(); see sniffer_config.json "slcan" source).
+                       # Without it, SlcanBus raises CanInterfaceNotImplementedError.
