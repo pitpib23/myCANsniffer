@@ -363,6 +363,10 @@ class ContextualScrollAreaTests(WindowCase):
 
     def test_generous_viewport_needs_no_scrolling(self):
         view = self.window.interpret_view
+        # The main window now clamps its initial normal geometry to the
+        # available screen.  Resize the owning window, as a user would,
+        # before asking its layout-managed child for a generous viewport.
+        self.window.resize(1600, 1000)
         view.resize(1600, 1000)
         self.app.processEvents()
         view._on_workspace_changed(PLOT)

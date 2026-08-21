@@ -22,8 +22,8 @@ from typing import Optional
 from PySide6.QtCore import QLocale, Qt
 from PySide6.QtGui import QDoubleValidator
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout,
-    QLabel, QLineEdit, QSpinBox, QVBoxLayout,
+    QCheckBox, QComboBox, QDialogButtonBox, QFormLayout, QGridLayout, QHBoxLayout,
+    QLabel, QLineEdit, QSizePolicy, QSpinBox, QVBoxLayout,
 )
 
 from ..analysis.signals import (
@@ -31,7 +31,7 @@ from ..analysis.signals import (
 )
 from ..model import CanFrame
 from .theme import SPACE_MD, SPACE_SM, Theme
-from .widgets import Divider
+from .widgets import Divider, ResponsiveDialog
 
 
 def _trim(value) -> str:
@@ -52,7 +52,7 @@ def _trim(value) -> str:
     return repr(number)
 
 
-class SignalEditDialog(QDialog):
+class SignalEditDialog(ResponsiveDialog):
     """Modal Add/Edit Signal form. ``signal=None`` means Add."""
 
     def __init__(self, theme: Theme, can_id: Optional[int], is_extended: bool,
@@ -96,22 +96,28 @@ class SignalEditDialog(QDialog):
         where.addStretch(1)
         form.addRow("Bits", where)
 
-        layout_row = QHBoxLayout()
+        layout_row = QGridLayout()
         layout_row.setSpacing(SPACE_SM)
         self.order_combo = QComboBox()
         self.order_combo.addItem("Intel (little endian)", LITTLE_ENDIAN)
         self.order_combo.addItem("Motorola (big endian)", BIG_ENDIAN)
-        layout_row.addWidget(self.order_combo)
+        self.order_combo.setSizeAdjustPolicy(
+            QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.order_combo.setMinimumContentsLength(12)
+        layout_row.addWidget(self.order_combo, 0, 0, 1, 2)
         self.signed_check = QCheckBox("signed")
-        layout_row.addWidget(self.signed_check)
-        layout_row.addWidget(QLabel("read as"))
+        layout_row.addWidget(self.signed_check, 0, 2)
+        layout_row.addWidget(QLabel("read as"), 1, 0)
         self.encoding_combo = QComboBox()
         self.encoding_combo.addItem("Integer", INT)
         self.encoding_combo.addItem("Float32", FLOAT32)
         self.encoding_combo.addItem("Float64", FLOAT64)
         self.encoding_combo.addItem("BCD (legacy, not exportable)", BCD)
-        layout_row.addWidget(self.encoding_combo)
-        layout_row.addStretch(1)
+        self.encoding_combo.setSizeAdjustPolicy(
+            QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.encoding_combo.setMinimumContentsLength(12)
+        layout_row.addWidget(self.encoding_combo, 1, 1, 1, 2)
+        layout_row.setColumnStretch(1, 1)
         form.addRow("Byte order", layout_row)
 
         maths = QHBoxLayout()
@@ -129,7 +135,8 @@ class SignalEditDialog(QDialog):
         shown.setSpacing(SPACE_SM)
         self.unit_edit = QLineEdit()
         self.unit_edit.setPlaceholderText("none")
-        self.unit_edit.setFixedWidth(90)
+        self.unit_edit.setMinimumWidth(70)
+        self.unit_edit.setMaximumWidth(140)
         shown.addWidget(self.unit_edit)
         shown.addWidget(QLabel("decimals"))
         self.decimals_spin = QSpinBox()
@@ -151,7 +158,8 @@ class SignalEditDialog(QDialog):
 
         self.channel_edit = QLineEdit()
         self.channel_edit.setPlaceholderText("any")
-        self.channel_edit.setFixedWidth(90)
+        self.channel_edit.setMinimumWidth(70)
+        self.channel_edit.setMaximumWidth(140)
         self.channel_edit.setToolTip(
             "An application-only receive filter — .dbc has no concept of a "
             "channel, so this narrows matching here but is dropped on "
@@ -162,6 +170,7 @@ class SignalEditDialog(QDialog):
 
         self.choices_label = QLabel("")
         self.choices_label.setWordWrap(True)
+        self.choices_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self.choices_label.setObjectName("Muted")
         outer.addWidget(self.choices_label)
 
@@ -174,11 +183,13 @@ class SignalEditDialog(QDialog):
 
         self.preview_label = QLabel("")
         self.preview_label.setWordWrap(True)
+        self.preview_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self.preview_label.setFont(self._theme.mono_font())
         outer.addWidget(self.preview_label)
 
         self.warning_label = QLabel("")
         self.warning_label.setWordWrap(True)
+        self.warning_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self.warning_label.setStyleSheet(
             "color: {};".format(self._theme.hex("warning")))
         outer.addWidget(self.warning_label)
@@ -204,7 +215,9 @@ class SignalEditDialog(QDialog):
     def _number_edit(self, placeholder: str) -> QLineEdit:
         edit = QLineEdit()
         edit.setPlaceholderText(placeholder)
-        edit.setFixedWidth(100)
+        edit.setMinimumWidth(70)
+        edit.setMaximumWidth(140)
+        edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         validator = QDoubleValidator(-1e12, 1e12, 12, self)
         validator.setNotation(QDoubleValidator.StandardNotation)
         validator.setLocale(QLocale.c())          # "0.1" regardless of locale

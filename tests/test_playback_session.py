@@ -166,16 +166,35 @@ class PlaybackSessionTimelineTests(unittest.TestCase):
     def test_sequence_b_repeated_stop_start_stays_monotonic(self):
         """Multiple Stop -> Start cycles, per the task's own Sequence."""
         self._set_loop(False)
-        for _ in range(4):
+        cycles = 10
+        for index in range(cycles):
             self._start()
-            self._wait_for_at_least(len(STAMPS))
+            # Wait for this run, not merely for the first run's retained
+            # frames. The old predicate made later starts immediately stop
+            # and turned this into a scheduler-dependent race.
+            self._wait_for_at_least(len(STAMPS) * (index + 1))
             self._stop()
             self._wait_for_at_least(0)  # let queued events settle
 
         history = self._history()
-        self.assertEqual(len(history), len(STAMPS) * 4)
+        self.assertEqual(len(history), len(STAMPS) * cycles)
         for earlier, later in zip(history, history[1:]):
             self.assertLessEqual(earlier, later)
+
+    def test_close_during_active_capture_joins_before_releasing_worker(self):
+        self._set_loop(True)
+        self._start()
+        self._wait_for_at_least(len(STAMPS))
+        thread = self.window._thread
+        self.assertTrue(thread.isRunning())
+
+        self.window.close()
+        self.app.processEvents()
+
+        self.assertFalse(thread.isRunning())
+        self.assertIsNone(self.window._thread)
+        self.assertIsNone(self.window._worker)
+        self.assertEqual(self.window._capture_state, self.window._IDLE)
 
     # -- Sequence C: Pause/Resume must not create a new segment ------------
 

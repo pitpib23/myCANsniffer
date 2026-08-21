@@ -4,4 +4,4 @@ This package never transmits CAN traffic. See CLAUDE.md for the full
 safety contract that governs this repository.
 """
 
-__version__ = "0.1.0"
+__version__ = "1.3.0"

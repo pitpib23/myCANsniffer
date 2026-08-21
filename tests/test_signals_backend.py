@@ -647,6 +647,18 @@ class ProfileStoreTests(unittest.TestCase):
         self.assertEqual(again.active, "a.dbc")
         self.assertEqual(len(again.profiles), 1)
         self.assertEqual(again.profiles[0].signals[0].name, "X")
+        self.assertEqual(again.profiles[0].profile_id, profile.profile_id)
+
+    def test_legacy_profile_gets_deterministic_compatibility_identity(self):
+        raw = {"name": "legacy.dbc", "signals": []}
+        first, second = S.Profile.from_dict(raw), S.Profile.from_dict(raw)
+        self.assertEqual(first.profile_id, second.profile_id)
+        self.assertTrue(first.profile_id)
+
+    def test_find_by_stable_identity(self):
+        profile = S.Profile(name="identity.dbc")
+        store = S.ProfileStore([profile])
+        self.assertIs(store.find_by_id(profile.profile_id), profile)
 
     def test_a_stale_active_name_is_dropped_on_load(self):
         store = S.ProfileStore.from_config(

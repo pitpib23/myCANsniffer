@@ -26,9 +26,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from cansniff.capture import CaptureWorker  # noqa: E402
+from cansniff.analysis.profile import SourceState  # noqa: E402
 from cansniff.filters import FilterSet  # noqa: E402
 from cansniff.model import CanFrame  # noqa: E402
-from cansniff.sources import CanFrameSource  # noqa: E402
+from cansniff.sources import CanFrameSource, SourceError  # noqa: E402
 
 try:
     from PySide6.QtCore import QObject, Qt, QThread, Signal
@@ -64,6 +65,53 @@ class _EndlessSource(CanFrameSource):
     @property
     def exhausted(self):
         return False
+
+
+class _OpenErrorSource(CanFrameSource):
+    name = "open-error"
+
+    def open(self):
+        raise SourceError("scripted open failure")
+
+    def receive(self, timeout=0.1):
+        return None
+
+    def close(self):
+        pass
+
+
+class _OneFrameSource(CanFrameSource):
+    name = "one-frame"
+
+    def __init__(self, receive_error=False):
+        self.sent = False
+        self.receive_error = receive_error
+
+    def open(self):
+        pass
+
+    def receive(self, timeout=0.1):
+        if self.receive_error:
+            raise RuntimeError("scripted receive failure")
+        if not self.sent:
+            self.sent = True
+            return CanFrame(0.0, 0x100, b"\x01", 1)
+        return None
+
+    def close(self):
+        pass
+
+    @property
+    def exhausted(self):
+        return self.sent
+
+
+class _FailingLogger(object):
+    def write(self, _frames):
+        raise OSError("disk full")
+
+    def close(self):
+        pass
 
 
 if HAVE_QT:
@@ -139,6 +187,21 @@ class PipelineRecoveryTests(unittest.TestCase):
         worker, _consumer = self._start(_EndlessSource(interval=0.0005))
         self._spin(1.2)
         self.assertEqual(worker.dropped, 0)
+
+    def test_full_pipeline_drops_incoming_batch_without_evicting_queued_work(self):
+        worker = CaptureWorker(
+            source=_EndlessSource(), filter_set=FilterSet.from_config([]),
+            batch_limit=10, max_pending_batches=1,
+        )
+        delivered = []
+        worker.framesReady.connect(delivered.append)
+        worker._pending = 1
+        incoming = [CanFrame(timestamp=0.0, arb_id=0x123,
+                             data=b"\x01\x02", dlc=2)]
+        worker._emit(incoming)
+        self.assertEqual(delivered, [])
+        self.assertEqual(worker.pending, 1)
+        self.assertEqual(worker.dropped, len(incoming))
 
     def test_resume_restores_delivery(self):
         """Regression: Resume did nothing, because the pipeline was wedged."""
@@ -267,6 +330,24 @@ class WindowKeepsUpdatingTests(unittest.TestCase):
         self.assertEqual(self.window._worker.dropped, 0)
         self.assertNotIn("not shown", self.window.status_message.text())
 
+    def test_stop_commits_integrity_without_resetting_the_session_profile(self):
+        self.window.start_capture()
+        self._spin(0.7)
+        worker = self.window._worker
+        self.assertIsNotNone(worker)
+        received = worker.received
+        processed = self.window.traffic_profile.processed_frames
+        self.assertGreater(processed, 0)
+
+        self._stop()
+        snapshot = self.window._profile_snapshot()
+        # The worker flushes its final partial batch during Stop, so a few
+        # additional already-received frames may legitimately be processed.
+        self.assertGreaterEqual(snapshot.processed_frames, processed)
+        self.assertGreaterEqual(snapshot.integrity.received, received)
+        self.assertEqual(snapshot.integrity.processed, snapshot.processed_frames)
+        self.assertEqual(snapshot.integrity.source_state, SourceState.STOPPED)
+
 
 @unittest.skipUnless(HAVE_QT, "PySide6 not available")
 class CounterTests(unittest.TestCase):
@@ -277,10 +358,13 @@ class CounterTests(unittest.TestCase):
         worker.accepted = 90
         worker.dropped = 30
         worker.display_skipped = 5
+        worker.source_errors = 2
+        worker.logger_failures = 1
         worker.reset_counters()
         self.assertEqual(
             (worker.received, worker.accepted, worker.dropped,
-             worker.display_skipped), (0, 0, 0, 0))
+             worker.display_skipped, worker.source_errors,
+             worker.logger_failures), (0, 0, 0, 0, 0, 0))
 
     def test_reset_counters_leaves_the_pipeline_depth_alone(self):
         """Zeroing it would let more batches through than were acknowledged."""
@@ -289,6 +373,29 @@ class CounterTests(unittest.TestCase):
         worker._pending = 3
         worker.reset_counters()
         self.assertEqual(worker.pending, 3)
+
+    def test_source_open_failure_is_counted_and_completion_is_error(self):
+        worker = CaptureWorker(source=_OpenErrorSource(),
+                               filter_set=FilterSet.from_config([]))
+        worker.run()
+        self.assertEqual(worker.source_errors, 1)
+        self.assertEqual(worker.completion_reason, "error")
+
+    def test_receive_failure_is_counted_and_completion_is_error(self):
+        worker = CaptureWorker(source=_OneFrameSource(receive_error=True),
+                               filter_set=FilterSet.from_config([]))
+        worker.run()
+        self.assertEqual(worker.source_errors, 1)
+        self.assertEqual(worker.completion_reason, "error")
+
+    def test_logger_failure_is_separate_from_normal_source_completion(self):
+        worker = CaptureWorker(source=_OneFrameSource(),
+                               filter_set=FilterSet.from_config([]),
+                               logger=_FailingLogger())
+        worker.run()
+        self.assertEqual(worker.logger_failures, 1)
+        self.assertEqual(worker.source_errors, 0)
+        self.assertEqual(worker.completion_reason, "end-of-source")
 
 
 if __name__ == "__main__":

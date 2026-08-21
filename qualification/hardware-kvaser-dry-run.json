@@ -1,0 +1,41 @@
+{
+  "adapter": "",
+  "backend": "kvaser",
+  "bitrate": 500000,
+  "capability": "live.backend.kvaser",
+  "channel": "0",
+  "driver_version": "",
+  "duration_seconds": 10.0,
+  "environment": {
+    "application_commit": "ee561ee7eba8b0cd286e8369ca023a757cbb6c77",
+    "application_version": "1.3.0",
+    "cantools": "40.7.1",
+    "cpu_count": 4,
+    "os": "Windows-10-10.0.19045-SP0",
+    "pyside6": "6.8.3",
+    "python": "3.9.5",
+    "python_can": "4.6.1"
+  },
+  "evidence": [
+    {
+      "kind": "passive-plan",
+      "notes": "Configuration is rechecked by LiveSource.open",
+      "reference": "{\"bus_kwargs\": {\"bitrate\": 500000, \"channel\": \"0\", \"driver_mode\": false, \"interface\": \"kvaser\", \"receive_own_messages\": false}, \"opens_hardware\": false, \"passive_policy\": \"passive: driver silent mode requested at initialisation\", \"rechecked_on_open\": true, \"source\": \"live:kvaser:0\"}",
+      "sha256": ""
+    }
+  ],
+  "fd": false,
+  "firmware_version": "",
+  "frame_count": 0,
+  "hardware_revision": "",
+  "level": "UNTESTED",
+  "limitations": [
+    "Dry run only: no CAN interface was opened."
+  ],
+  "provenance": {},
+  "record_id": "hardware-kvaser-1787283218",
+  "schema_version": 1,
+  "status": "SKIPPED",
+  "test_id": "passive-receive-harness",
+  "timestamp": "2026-08-21T03:33:38.400733+00:00"
+}

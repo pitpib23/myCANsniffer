@@ -38,7 +38,7 @@ narrow, correct fix; nothing here needed an event filter.
 from __future__ import annotations
 
 import os
-from typing import List, Optional, Tuple
+from typing import Iterable, List, Optional, Tuple
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtCore import Signal as QtSignal
@@ -46,7 +46,7 @@ from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QDialog, QDialogButtonBox, QFileDialog,
     QFormLayout, QGroupBox, QHBoxLayout, QHeaderView, QLabel,
     QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPushButton,
-    QSpinBox, QSplitter, QStackedWidget, QTableWidget, QTableWidgetItem,
+    QSizePolicy, QSpinBox, QSplitter, QStackedWidget, QTableWidget, QTableWidgetItem,
     QVBoxLayout, QWidget,
 )
 
@@ -54,10 +54,18 @@ from ..analysis.signals import (
     LITTLE_ENDIAN, Profile, ProfileStore, Signal, SignalError, export_dbc,
     import_dbc,
 )
+from ..analysis.canopen_definitions import (
+    DEFAULT_DEFINITION_CACHE, DefinitionParseError,
+)
+from ..analysis.j1939_definitions import (
+    DEFAULT_J1939_DEFINITION_CACHE, J1939DefinitionError,
+)
+from ..analysis.definitions import DefinitionSourceKind
 from ..model import CanFrame
+from .object_dictionary_window import ObjectDictionaryDialog
 from .signal_edit_dialog import SignalEditDialog
 from .theme import ROW_HEIGHT, SPACE_MD, SPACE_SM, Theme
-from .widgets import Chip, Divider, EmptyState, SectionLabel
+from .widgets import Chip, Divider, EmptyState, ResponsiveDialog, SectionLabel
 
 #: Marks the active profile in the list without a custom delegate.
 _ACTIVE_MARK = "●  "
@@ -124,7 +132,7 @@ def _action_button(text: str, slot, tip: str = "", object_name: str = "") -> QPu
 # ---------------------------------------------------------------------------
 
 
-class AddMessageDialog(QDialog):
+class AddMessageDialog(ResponsiveDialog):
     def __init__(self, profile: Profile, parent=None):
         super().__init__(parent)
         self._profile = profile
@@ -192,7 +200,7 @@ class AddMessageDialog(QDialog):
 # ---------------------------------------------------------------------------
 
 
-class DatabaseWindow(QDialog):
+class DatabaseWindow(ResponsiveDialog):
     """Profiles on the left; that profile's CAN messages in the middle;
     the selected message's details and signals on the right.
 
@@ -214,12 +222,14 @@ class DatabaseWindow(QDialog):
 
     def __init__(self, store: ProfileStore, parent=None,
                  theme: Optional[Theme] = None,
-                 sample: Optional[CanFrame] = None):
+                 sample: Optional[CanFrame] = None,
+                 frames: Iterable[CanFrame] = ()):
         super().__init__(parent)
         self.setWindowTitle("Signal Database")
         self.resize(1280, 800)
         self._theme = theme or Theme()
         self._sample = sample
+        self._frames = frames
         self.store = store
         self._current_profile: Optional[str] = store.active or (
             store.profiles[0].name if store.profiles else None)
@@ -261,9 +271,13 @@ class DatabaseWindow(QDialog):
 
     def _build_top_bar(self) -> QWidget:
         bar = QWidget()
-        row = QHBoxLayout(bar)
-        row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(SPACE_SM)
+        rows = QVBoxLayout(bar)
+        rows.setContentsMargins(0, 0, 0, 0)
+        rows.setSpacing(SPACE_SM)
+        actions = QHBoxLayout()
+        status = QHBoxLayout()
+        rows.addLayout(actions)
+        rows.addLayout(status)
 
         for text, slot, tip in (
             ("New DBC", self._new_profile, "Create an empty profile"),
@@ -274,22 +288,23 @@ class DatabaseWindow(QDialog):
              "Remove the selected profile from this application — the "
              "original file, if any, is never deleted"),
         ):
-            row.addWidget(_action_button(text, slot, tip))
+            actions.addWidget(_action_button(text, slot, tip))
 
-        row.addStretch(1)
+        actions.addStretch(1)
 
         self.status_label = QLabel("")
         self.status_label.setObjectName("Muted")
-        row.addWidget(self.status_label)
+        self.status_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        status.addWidget(self.status_label, 1)
 
         self.applied_chip = Chip("Not applied", "muted", self._theme)
-        row.addWidget(self.applied_chip)
+        status.addWidget(self.applied_chip)
 
         self.unapply_button = _action_button(
             "Unapply Database", self._unapply,
             "Stop decoding captured traffic with any database. The profile "
             "itself is not removed and stays available.")
-        row.addWidget(self.unapply_button)
+        status.addWidget(self.unapply_button)
 
         self.use_button = _action_button(
             "Use Database", self._use_selected,
@@ -297,7 +312,7 @@ class DatabaseWindow(QDialog):
             "traffic. Selecting a profile to look at it does not do this — "
             "this button is the only thing that does.",
             object_name="Primary")
-        row.addWidget(self.use_button)
+        status.addWidget(self.use_button)
         return bar
 
     # ------------------------------------------------------------------
@@ -306,7 +321,7 @@ class DatabaseWindow(QDialog):
 
     def _build_profiles(self) -> QWidget:
         panel = QWidget()
-        panel.setMinimumWidth(180)
+        panel.setMinimumWidth(140)
         column = QVBoxLayout(panel)
         column.setContentsMargins(0, 0, 0, 0)
         column.setSpacing(SPACE_SM)
@@ -321,6 +336,15 @@ class DatabaseWindow(QDialog):
         self.profile_note.setObjectName("Muted")
         self.profile_note.setWordWrap(True)
         column.addWidget(self.profile_note)
+        column.addWidget(_action_button(
+            "Import EDS/DCF", self._import_industrial_definition,
+            "Import a passive CANopen Object Dictionary definition"))
+        column.addWidget(_action_button(
+            "Import J1939 JSON", self._import_j1939_definition,
+            "Import a local, passive PGN/SPN JSON definition"))
+        column.addWidget(_action_button(
+            "Object Dictionary", self._open_object_dictionary,
+            "Inspect imported CANopen definitions and passive observations"))
         return panel
 
     # ------------------------------------------------------------------
@@ -329,7 +353,7 @@ class DatabaseWindow(QDialog):
 
     def _build_messages(self) -> QWidget:
         panel = QWidget()
-        panel.setMinimumWidth(360)
+        panel.setMinimumWidth(220)
         column = QVBoxLayout(panel)
         column.setContentsMargins(0, 0, 0, 0)
         column.setSpacing(SPACE_SM)
@@ -371,7 +395,7 @@ class DatabaseWindow(QDialog):
 
     def _build_workspace(self) -> QWidget:
         panel = QWidget()
-        panel.setMinimumWidth(420)
+        panel.setMinimumWidth(280)
         column = QVBoxLayout(panel)
         column.setContentsMargins(0, 0, 0, 0)
         column.setSpacing(SPACE_MD)
@@ -491,7 +515,7 @@ class DatabaseWindow(QDialog):
 
         self.signals_table = self._new_table([
             "Signal Name", "Start Byte", "Length", "Byte Order", "Signed",
-            "Factor", "Offset", "Unit", "Min", "Max",
+            "Factor", "Offset", "Unit", "Min", "Max", "Source",
         ])
         self.signals_table.itemSelectionChanged.connect(
             self._update_signal_actions_enabled)
@@ -563,6 +587,8 @@ class DatabaseWindow(QDialog):
                             if cid is not None)
         text = "Signals: {}\nMessages (CAN IDs): {}".format(
             len(profile.signals), message_count)
+        text += "\nIndustrial definitions: {}\nCANopen associations: {}".format(
+            len(profile.definitions), len(profile.canopen_associations))
         if profile.dirty:
             text += "\nEdited, not yet exported."
         if not profile.path:
@@ -628,6 +654,134 @@ class DatabaseWindow(QDialog):
         self._current_profile = profile.name
         self._emit_changed()
         self._reload_profiles()
+
+    def _import_industrial_definition(self) -> None:
+        current = self._selected_profile()
+        start_dir = (os.path.dirname(current.path)
+                     if current is not None and current.path else "")
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Import CANopen definition", start_dir,
+            "CANopen definitions (*.eds *.dcf);;All files (*)")
+        if not path:
+            return
+        try:
+            definition = DEFAULT_DEFINITION_CACHE.parse_file(path)
+        except DefinitionParseError as exc:
+            QMessageBox.warning(self, "Could not import definition", str(exc))
+            return
+        profile = current
+        if profile is None:
+            profile = self.store.add(Profile(name="Industrial definitions"))
+            self._current_profile = profile.name
+        same_path = next((item for item in profile.definitions
+                          if os.path.abspath(item.source.location)
+                          == os.path.abspath(path)), None)
+        if same_path is not None and same_path.identity != definition.source.content_hash:
+            box = QMessageBox(self)
+            box.setWindowTitle("Definition file changed")
+            box.setText(
+                "The same path now has different contents. Choose explicitly; "
+                "the stored import will not be overwritten automatically.")
+            replace_button = box.addButton("Replace association", QMessageBox.AcceptRole)
+            keep_button = box.addButton("Keep existing", QMessageBox.RejectRole)
+            another_button = box.addButton("Import as another definition", QMessageBox.ActionRole)
+            box.exec()
+            clicked = box.clickedButton()
+            if clicked is keep_button or clicked is None:
+                return
+            if clicked is replace_button:
+                profile.replace_definition(same_path.identity, definition.reference)
+            elif clicked is another_button:
+                profile.add_definition(definition.reference)
+        elif not profile.add_definition(definition.reference):
+            QMessageBox.information(
+                self, "Definition already imported",
+                "This exact file content is already present. Its original "
+                "provenance and associations were kept.")
+            return
+        self._emit_changed()
+        self._reload_profiles()
+        QMessageBox.information(
+            self, "Definition imported",
+            "{}\nValidation: {}\nObjects: {}\nWarnings: {}\n\n"
+            "Importing this file did not query or configure a CAN node."
+            .format(definition.source.display_name,
+                    definition.validation_state.display,
+                    len(definition.dictionary.objects),
+                    len(definition.diagnostics)))
+
+    def _open_object_dictionary(self) -> None:
+        profile = self._selected_profile()
+        if profile is None or not any(
+                item.source.kind in (DefinitionSourceKind.EDS,
+                                     DefinitionSourceKind.DCF)
+                for item in profile.definitions):
+            QMessageBox.information(
+                self, "No CANopen definition",
+                "Import an EDS or DCF file into the selected profile first.")
+            return
+        dialog = ObjectDictionaryDialog(
+            profile, self, self._theme, self._frames)
+        dialog.exec()
+        # Manual association is durable profile state, even though it never
+        # changes the existing DBC decode artifact.
+        self._emit_changed()
+        self._update_profile_note()
+
+    def _import_j1939_definition(self) -> None:
+        current = self._selected_profile()
+        start_dir = (os.path.dirname(current.path)
+                     if current is not None and current.path else "")
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Import J1939 PGN/SPN definition", start_dir,
+            "J1939 JSON definitions (*.json);;All files (*)")
+        if not path:
+            return
+        try:
+            definition = DEFAULT_J1939_DEFINITION_CACHE.parse_file(path)
+        except J1939DefinitionError as exc:
+            QMessageBox.warning(self, "Could not import J1939 definition", str(exc))
+            return
+        profile = current
+        if profile is None:
+            profile = self.store.add(Profile(name="J1939 definitions"))
+            self._current_profile = profile.name
+        same_path = next((item for item in profile.definitions
+                          if item.source.kind is DefinitionSourceKind.J1939
+                          and os.path.abspath(item.source.location)
+                          == os.path.abspath(path)), None)
+        if same_path is not None and same_path.identity != definition.source.content_hash:
+            box = QMessageBox(self)
+            box.setWindowTitle("J1939 definition file changed")
+            box.setText(
+                "The same path now has different contents. The pinned import "
+                "will not be overwritten automatically.")
+            replace_button = box.addButton("Replace import", QMessageBox.AcceptRole)
+            keep_button = box.addButton("Keep existing", QMessageBox.RejectRole)
+            another_button = box.addButton(
+                "Import as another definition", QMessageBox.ActionRole)
+            box.exec()
+            clicked = box.clickedButton()
+            if clicked is keep_button or clicked is None:
+                return
+            if clicked is replace_button:
+                profile.replace_definition(same_path.identity, definition.reference)
+            elif clicked is another_button:
+                profile.add_definition(definition.reference)
+        elif not profile.add_definition(definition.reference):
+            QMessageBox.information(
+                self, "Definition already imported",
+                "This exact J1939 definition content is already present.")
+            return
+        self._emit_changed()
+        self._reload_profiles()
+        QMessageBox.information(
+            self, "J1939 definition imported",
+            "{}\nValidation: {}\nPGNs: {}\nDiagnostics: {}\nLicense: {}\n\n"
+            "Importing this file did not query, configure, or transmit to a CAN bus."
+            .format(definition.source.display_name,
+                    definition.validation_state.display, len(definition.pgns),
+                    len(definition.diagnostics), definition.license_text or "not declared"))
 
     def _export_profile(self) -> None:
         self._commit_message_can_id(silent=True)
@@ -1055,6 +1209,8 @@ class DatabaseWindow(QDialog):
             QTableWidgetItem(signal.unit or "none"),
             QTableWidgetItem(_num_or_none(signal.minimum)),
             QTableWidgetItem(_num_or_none(signal.maximum)),
+            QTableWidgetItem("DBC" if signal.source_kind == "DBC"
+                             else "User-defined manual signal"),
         ]
         for col, item in enumerate(cells):
             self.signals_table.setItem(row, col, item)
@@ -1139,50 +1295,23 @@ class DatabaseWindow(QDialog):
     # closing
     # ------------------------------------------------------------------
 
-    def _fit_to_screen(self) -> None:
-        """Never open larger than the screen actually has room for.
-
-        The default size assumes a normal-DPI display. At high Windows
-        display-scaling settings the *logical* screen is far shorter than
-        that — a 3200x1800 panel at 225% scaling is only about 1420x800
-        logical pixels — and a window taller than that opened with its
-        bottom edge, including Use Database and Unapply Database, pushed
-        below the visible desktop: reported as unreachable even after
-        resizing, since there was nothing left on screen to drag by.
-        """
-        screen = self.screen()
-        if screen is None:
-            return
-        available = screen.availableGeometry()
-        # A margin, not the exact screen size: a window sized exactly to the
-        # screen can be nearly as hard to move or re-resize as one that
-        # overflows it, with no visible desktop left to grab.
-        max_width = max(480, available.width() - 40)
-        max_height = max(360, available.height() - 40)
-        width, height = min(self.width(), max_width), min(self.height(), max_height)
-        if (width, height) != (self.width(), self.height()):
-            self.resize(width, height)
-        self.move(available.center().x() - width // 2,
-                  available.center().y() - height // 2)
-
     def showEvent(self, event) -> None:
         super().showEvent(event)
         if getattr(self, "_sized", False):
             return
         self._sized = True
-        self._fit_to_screen()
         # Profiles only ever needs to show short file names; the messages
         # table needs enough width to read CAN ID/name/length comfortably;
         # the workspace (message details + signals) gets whatever's left —
-        # most of the window. Computed after _fit_to_screen, which may have
-        # just shrunk the window: self.width() below must reflect the final
+        # most of the window. ResponsiveDialog has already applied the
+        # available-screen clamp, so self.width() below reflects the final
         # size. Set once, here, and never again — nothing in this window
         # resets these sizes on a later resize event, so a manual drag
         # sticks until the window is reopened.
         width = self.width()
-        profiles_width = max(180, int(width * 0.16))
-        messages_width = max(360, int(width * 0.34))
-        workspace_width = max(420, width - profiles_width - messages_width)
+        profiles_width = max(140, int(width * 0.16))
+        messages_width = max(220, int(width * 0.30))
+        workspace_width = max(280, width - profiles_width - messages_width)
         self._splitter.setSizes([profiles_width, messages_width, workspace_width])
 
     def closeEvent(self, event) -> None:

@@ -20,14 +20,16 @@ from typing import Any, Dict, List, Optional
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
-    QFormLayout, QFrame, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
-    QListWidget, QListWidgetItem, QPushButton, QSpinBox, QVBoxLayout, QWidget,
+    QAbstractItemView, QCheckBox, QComboBox, QDialogButtonBox,
+    QFormLayout, QFrame, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
+    QListWidget, QListWidgetItem, QPushButton, QSizePolicy, QSpinBox, QSplitter,
+    QVBoxLayout, QWidget,
 )
 
 from ..filters import ALLOW, BLOCK, FilterRule, FilterSet
 from ..model import CanFrame
 from .theme import SPACE_MD, SPACE_SM, Theme
+from .widgets import ResponsiveDialog
 
 _ACTIONS = [("Keep only matching", ALLOW), ("Discard matching", BLOCK)]
 _ID_FORMATS = [("Any", None), ("11-bit standard", False), ("29-bit extended", True)]
@@ -68,7 +70,7 @@ def _int_or_blank(value: Any) -> str:
     return "" if value is None or value == "" else str(value)
 
 
-class FilterDialog(QDialog):
+class FilterDialog(ResponsiveDialog):
     """Edit the receive-side filters, one at a time, with a live verdict."""
 
     def __init__(self, rules: List[Dict[str, Any]], parent=None,
@@ -94,11 +96,14 @@ class FilterDialog(QDialog):
         help_label.setObjectName("Muted")
         root.addWidget(help_label)
 
-        body = QHBoxLayout()
-        body.setSpacing(SPACE_MD)
-        body.addWidget(self._build_list(), 0)
-        body.addWidget(self._build_editor(), 1)
-        root.addLayout(body, 1)
+        body = QSplitter(Qt.Horizontal)
+        body.setChildrenCollapsible(False)
+        body.addWidget(self._build_list())
+        body.addWidget(self._build_editor())
+        body.setStretchFactor(0, 1)
+        body.setStretchFactor(1, 3)
+        root.addWidget(body, 1)
+        self.body_splitter = body
 
         box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         box.accepted.connect(self._on_accept)
@@ -118,7 +123,9 @@ class FilterDialog(QDialog):
 
     def _build_list(self) -> QWidget:
         panel = QWidget()
-        panel.setFixedWidth(280)
+        panel.setMinimumWidth(140)
+        panel.setMaximumWidth(360)
+        panel.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
         column = QVBoxLayout(panel)
         column.setContentsMargins(0, 0, 0, 0)
         column.setSpacing(SPACE_SM)
@@ -129,7 +136,7 @@ class FilterDialog(QDialog):
         self.list.itemChanged.connect(self._on_item_changed)
         column.addWidget(self.list, 1)
 
-        buttons = QHBoxLayout()
+        buttons = QGridLayout()
         buttons.setSpacing(SPACE_SM)
         for text, slot, tip in (
             ("Add", self._add_rule, "Create a new filter rule"),
@@ -139,7 +146,8 @@ class FilterDialog(QDialog):
             button = QPushButton(text)
             button.setToolTip(tip)
             button.clicked.connect(slot)
-            buttons.addWidget(button)
+            index = buttons.count()
+            buttons.addWidget(button, index // 2, index % 2)
         column.addLayout(buttons)
         return panel
 

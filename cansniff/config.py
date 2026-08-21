@@ -71,16 +71,33 @@ DEFAULTS: Dict[str, Any] = {
             "bitrate": 500000,
             "data_bitrate": 2000000,     # CAN FD only
             "fd": False,
-            # Refuse to open unless hardware-enforced listen-only is confirmed.
-            # See cansniff/sources/live.py for what is supported per interface.
+            # Safe default: refuse unless listen-only is confirmed. Operators
+            # may explicitly set false to allow clearly-labelled unverified
+            # receive-only operation on other interfaces.
             "require_listen_only": True,
             "extra_kwargs": {},
         },
     },
     "capture": {
-        "queue_size": 20000,        # bounded; overflow drops oldest and is counted
+        # Compatibility name: used to derive a per-emission batch limit
+        # (queue_size // 10). Pending delivery is separately bounded to eight
+        # batches; overflow drops the incoming batch and counts its frames.
+        "queue_size": 20000,
         "ui_refresh_ms": 100,
         "max_frames_retained": 200000,
+    },
+    "discovery": {
+        "classic_bitrates": [
+            10000, 20000, 33333, 50000, 83333, 100000,
+            125000, 250000, 500000, 800000, 1000000,
+        ],
+        "observation_window": 1.5,
+        "receive_timeout": 0.05,
+        "minimum_valid_frames": 6,
+        "minimum_repeated_ids": 1,
+        "minimum_traffic_span": 0.5,
+        "minimum_window_coverage": 0.5,
+        "maximum_error_ratio": 0.2,
     },
     "interpret": {
         "word_size": 2,             # bytes per word; 4 unlocks the 32-bit decoders

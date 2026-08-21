@@ -44,11 +44,26 @@ the decode path this module builds.
 from __future__ import annotations
 
 import os
+import hashlib
+import json
+import uuid
 from dataclasses import dataclass, field, replace as _replace
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from ..model import CanFrame
 from .dbc import DbcDatabase
+from .definitions import CanopenNodeAssociation, DefinitionReference
+
+
+def _sha256_file(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as source:
+        while True:
+            block = source.read(1024 * 1024)
+            if not block:
+                break
+            digest.update(block)
+    return digest.hexdigest()
 
 #: Byte orders, in the spelling cantools uses.
 LITTLE_ENDIAN = "little_endian"
@@ -160,6 +175,9 @@ class Signal(object):
     #: data bitrate or a BRS flag; it only records/exports what a frame's
     #: message declares.
     message_is_fd: bool = False
+    #: Provenance of this interpretation. Imported DBC signals are marked by
+    #: import_dbc; signals created in the editor remain explicitly MANUAL.
+    source_kind: str = "MANUAL"
 
     def __post_init__(self) -> None:
         self.start = int(self.start)
@@ -272,6 +290,7 @@ class Signal(object):
             "message_senders": list(self.message_senders),
             "message_cycle_time": self.message_cycle_time,
             "message_is_fd": self.message_is_fd,
+            "source_kind": self.source_kind,
         }
 
     @classmethod
@@ -315,6 +334,7 @@ class Signal(object):
             message_senders=tuple(raw.get("message_senders", ()) or ()),
             message_cycle_time=raw.get("message_cycle_time"),
             message_is_fd=bool(raw.get("message_is_fd", False)),
+            source_kind=str(raw.get("source_kind", "MANUAL") or "MANUAL"),
         )
 
 
@@ -350,6 +370,28 @@ def _cantools_signal(signal: Signal):
         maximum=signal.maximum,
         unit=signal.unit or None,
     )
+
+
+def extract_little_endian_bits(data: bytes, start: int,
+                               length: int) -> Optional[int]:
+    """Shared sequential LSB-first extraction for mapped industrial fields.
+
+    DBC Motorola fields still belong to cantools' sawtooth implementation;
+    CANopen PDO mapping is sequential little-endian bit packing, for which
+    this bounded extractor avoids constructing a throwaway DBC per value.
+    """
+    integer = int.from_bytes(data, "little", signed=False)
+    return extract_little_endian_bits_from_integer(
+        integer, len(data) * 8, start, length)
+
+
+def extract_little_endian_bits_from_integer(
+        integer: int, data_bits: int, start: int,
+        length: int) -> Optional[int]:
+    """Same normalized extraction with a caller-reused payload integer."""
+    if start < 0 or length <= 0 or start + length > data_bits:
+        return None
+    return (integer >> start) & ((1 << length) - 1)
 
 
 def _cantools_message(frame_id: int, is_extended: bool, name: str,
@@ -447,7 +489,11 @@ class Profile(object):
     name: str = "untitled.dbc"
     path: str = ""
     signals: List[Signal] = field(default_factory=list)
+    definitions: List[DefinitionReference] = field(default_factory=list)
+    canopen_associations: List[CanopenNodeAssociation] = field(default_factory=list)
     dirty: bool = False
+    profile_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    source_hash: str = ""
 
     def describe(self) -> str:
         return "{} — {} signal{}".format(
@@ -614,6 +660,63 @@ class Profile(object):
             del self.signals[index]
             self.dirty = True
 
+    # -- industrial definitions -------------------------------------------
+
+    def add_definition(self, reference: DefinitionReference) -> bool:
+        """Add by content identity; never overwrite an existing import."""
+        if any(item.identity == reference.identity for item in self.definitions):
+            return False
+        self.definitions.append(reference)
+        return True
+
+    def replace_definition(self, old_hash: str,
+                           reference: DefinitionReference) -> bool:
+        """Explicit replacement, preserving node associations deliberately."""
+        for index, item in enumerate(self.definitions):
+            if item.identity != old_hash:
+                continue
+            self.definitions[index] = reference
+            self.canopen_associations = [
+                CanopenNodeAssociation(
+                    reference.identity if association.definition_hash == old_hash
+                    else association.definition_hash,
+                    association.node_id, association.channel, association.method)
+                for association in self.canopen_associations
+            ]
+            return True
+        return False
+
+    def remove_definition(self, content_hash: str) -> None:
+        self.definitions = [item for item in self.definitions
+                            if item.identity != content_hash]
+        self.canopen_associations = [item for item in self.canopen_associations
+                                     if item.definition_hash != content_hash]
+
+    def associate_canopen(self, content_hash: str, node_id: int,
+                          channel: str = "", method: str = "MANUAL") -> None:
+        if not 1 <= int(node_id) <= 127:
+            raise ValueError("CANopen node ID must be in 1..127")
+        if not any(item.identity == content_hash for item in self.definitions):
+            raise ValueError("definition is not part of this profile")
+        association = CanopenNodeAssociation(
+            content_hash, int(node_id), str(channel), str(method))
+        self.canopen_associations = [
+            item for item in self.canopen_associations
+            if not (item.node_id == association.node_id
+                    and item.channel == association.channel
+                    and item.definition_hash == association.definition_hash)
+        ]
+        self.canopen_associations.append(association)
+
+    def remove_canopen_association(self, content_hash: str, node_id: int,
+                                   channel: str = "") -> None:
+        self.canopen_associations = [
+            item for item in self.canopen_associations
+            if not (item.definition_hash == content_hash
+                    and item.node_id == int(node_id)
+                    and item.channel == channel)
+        ]
+
     # -- validation ---------------------------------------------------------
 
     def validate(self) -> List[str]:
@@ -634,17 +737,53 @@ class Profile(object):
     # -- serialisation ------------------------------------------------------
 
     def to_dict(self) -> Dict[str, Any]:
-        return {"name": self.name, "path": self.path,
-               "signals": [s.to_dict() for s in self.signals]}
+        return {"id": self.profile_id, "name": self.name, "path": self.path,
+               "source_hash": self.source_hash,
+               "signals": [s.to_dict() for s in self.signals],
+               "definitions": [item.to_dict() for item in self.definitions],
+               "canopen_associations": [
+                   item.to_dict() for item in self.canopen_associations],
+               }
 
     @classmethod
     def from_dict(cls, raw: Dict[str, Any]) -> "Profile":
+        path = str(raw.get("path", "") or "")
+        identity = str(raw.get("id", "") or "")
+        try:
+            uuid.UUID(identity)
+        except (ValueError, AttributeError):
+            # Stable compatibility identity for profiles saved before IDs
+            # existed. The next normal config save persists it explicitly.
+            legacy = dict(raw)
+            legacy.pop("id", None)
+            identity = str(uuid.uuid5(
+                uuid.NAMESPACE_URL,
+                json.dumps(legacy, sort_keys=True, separators=(",", ":"),
+                           ensure_ascii=False)))
+        signals = []
+        for item in raw.get("signals", ()):
+            if not isinstance(item, dict):
+                continue
+            signal = Signal.from_dict(item)
+            # Phase-5 configs predate per-signal provenance. A backed .dbc
+            # profile's legacy entries necessarily came through DBC import;
+            # new/manual entries persist their explicit source_kind.
+            if "source_kind" not in item and path.lower().endswith(".dbc"):
+                signal.source_kind = "DBC"
+            signals.append(signal)
         return cls(
             name=str(raw.get("name", "untitled.dbc")),
-            path=str(raw.get("path", "") or ""),
-            signals=[Signal.from_dict(s) for s in raw.get("signals", ())
-                    if isinstance(s, dict)],
+            path=path,
+            signals=signals,
+            definitions=[DefinitionReference.from_dict(item)
+                         for item in raw.get("definitions", ())
+                         if isinstance(item, dict)],
+            canopen_associations=[CanopenNodeAssociation.from_dict(item)
+                                  for item in raw.get("canopen_associations", ())
+                                  if isinstance(item, dict)],
             dirty=False,
+            profile_id=identity,
+            source_hash=str(raw.get("source_hash", "") or ""),
         )
 
 
@@ -669,7 +808,9 @@ def import_dbc(path: str) -> Profile:
         raise SignalError("Could not read {}: {}".format(
             os.path.basename(path), exc)) from exc
 
-    profile = Profile(name=os.path.basename(path), path=path)
+    source_hash = _sha256_file(path)
+    profile = Profile(name=os.path.basename(path), path=path,
+                      source_hash=source_hash)
     for message in getattr(database, "messages", ()) or ():
         frame_id = getattr(message, "frame_id", None)
         if frame_id is None:
@@ -708,6 +849,7 @@ def import_dbc(path: str) -> Profile:
                 message_senders=tuple(getattr(message, "senders", ()) or ()),
                 message_cycle_time=getattr(message, "cycle_time", None),
                 message_is_fd=bool(getattr(message, "is_fd", False)),
+                source_kind="DBC",
             ))
     return profile
 
@@ -803,6 +945,10 @@ def export_dbc(profile: Profile, path: str) -> Tuple[int, List[str]]:
     except Exception as exc:
         raise SignalError("Could not write {}: {}".format(
             os.path.basename(path), exc)) from exc
+    try:
+        profile.source_hash = _sha256_file(path)
+    except OSError:
+        profile.source_hash = ""
     return written, warnings
 
 
@@ -870,6 +1016,12 @@ class ProfileStore(object):
     def find(self, name: str) -> Optional[Profile]:
         for profile in self.profiles:
             if profile.name == name:
+                return profile
+        return None
+
+    def find_by_id(self, profile_id: str) -> Optional[Profile]:
+        for profile in self.profiles:
+            if profile.profile_id == profile_id:
                 return profile
         return None
 

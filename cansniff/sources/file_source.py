@@ -42,6 +42,10 @@ def _load_via_python_can(path: str) -> List[CanFrame]:
                     is_extended=bool(message.is_extended_id),
                     is_fd=bool(getattr(message, "is_fd", False)),
                     is_bitrate_switch=bool(getattr(message, "bitrate_switch", False)),
+                    is_error_state_indicator=(
+                        bool(getattr(message, "error_state_indicator", False))
+                        if bool(getattr(message, "is_fd", False)) else None
+                    ),
                     is_error_frame=bool(message.is_error_frame),
                     is_remote_frame=bool(message.is_remote_frame),
                     channel=str(message.channel if message.channel is not None else ""),

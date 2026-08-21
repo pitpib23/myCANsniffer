@@ -50,7 +50,7 @@ FORMATS: Dict[str, FormatSpec] = {
     "jsonl": FormatSpec("jsonl", "JSON lines", ".jsonl", False),
     "asc": FormatSpec(
         "asc", "Vector ASC", ".asc", True,
-        loses=("error-frame detail beyond the marker",),
+        loses=("error-frame detail beyond the marker", "unknown CAN FD ESI state"),
     ),
     "candump": FormatSpec(
         "candump", "candump / can-utils log", ".log", True,
@@ -58,7 +58,8 @@ FORMATS: Dict[str, FormatSpec] = {
         # channel of "1" is written and read back as "can1". That is the
         # format working as designed, not a loss — but it is a rename the
         # operator should not have to discover for themselves.
-        loses=("error frames", "remote frames", "channel naming"),
+        loses=("error frames", "remote frames", "channel naming",
+               "unknown CAN FD ESI state"),
     ),
 }
 
@@ -116,6 +117,7 @@ def _to_message(frame: CanFrame, adjust_channel: bool = False):
         is_error_frame=bool(frame.is_error_frame),
         is_fd=bool(frame.is_fd),
         bitrate_switch=bool(frame.is_bitrate_switch),
+        error_state_indicator=bool(frame.is_error_state_indicator),
         channel=_writer_channel(frame.channel, adjust_channel),
         dlc=int(frame.dlc),
         data=bytearray(frame.data),
@@ -163,7 +165,7 @@ def write_candump(frames: Iterable[CanFrame], path: str) -> int:
 # ---------------------------------------------------------------------------
 
 CSV_HEADER = ("timestamp", "channel", "id", "extended", "dlc", "fd",
-              "brs", "error", "remote", "data")
+              "brs", "esi", "error", "remote", "data")
 
 
 def write_csv(frames: Iterable[CanFrame], path: str) -> int:
@@ -175,7 +177,10 @@ def write_csv(frames: Iterable[CanFrame], path: str) -> int:
             writer.writerow([
                 "{:.6f}".format(frame.timestamp), frame.channel, frame.id_hex,
                 int(frame.is_extended), frame.dlc, int(frame.is_fd),
-                int(frame.is_bitrate_switch), int(frame.is_error_frame),
+                int(frame.is_bitrate_switch),
+                "" if frame.is_error_state_indicator is None
+                else int(frame.is_error_state_indicator),
+                int(frame.is_error_frame),
                 int(frame.is_remote_frame), frame.data_hex,
             ])
             count += 1
@@ -194,6 +199,7 @@ def write_jsonl(frames: Iterable[CanFrame], path: str) -> int:
                 "dlc": frame.dlc,
                 "fd": frame.is_fd,
                 "brs": frame.is_bitrate_switch,
+                "esi": frame.is_error_state_indicator,
                 "error": frame.is_error_frame,
                 "remote": frame.is_remote_frame,
                 "data": frame.data_hex,
@@ -256,6 +262,9 @@ def describe_losses(spec: FormatSpec, frames: Sequence[CanFrame]) -> str:
         notes.append("error frames")
     if "remote frames" in spec.loses and any(f.is_remote_frame for f in frames):
         notes.append("remote frames")
+    if "unknown CAN FD ESI state" in spec.loses and any(
+            f.is_fd and f.is_error_state_indicator is None for f in frames):
+        notes.append("unknown CAN FD ESI state")
     message = ""
     if notes:
         message = ("{} cannot represent {}; those frames will not survive a "

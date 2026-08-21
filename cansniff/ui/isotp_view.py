@@ -31,6 +31,7 @@ window survives.
 
 from __future__ import annotations
 
+import hashlib
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, QRectF, QSize, Qt, QTimer, Signal
@@ -38,9 +39,11 @@ from PySide6.QtGui import QFontMetrics, QPainter, QPen
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QFrame, QGridLayout, QHBoxLayout,
     QHeaderView, QLabel, QLineEdit, QPushButton, QSizePolicy,
-    QSplitter, QStyle, QStyledItemDelegate, QTableView, QVBoxLayout, QWidget,
+    QPlainTextEdit, QSplitter, QStyle, QStyledItemDelegate, QTableView,
+    QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget,
 )
 
+from ..analysis.diagnostics import CorrelationStatus, DiagnosticAnalysis
 from ..analysis.isotp import ADDRESSING, COMPLETE, ERROR_STATUSES, IsoTpTransfer, frame_facts
 from ..analysis.isotp_survey import (
     EVIDENCE_ORDER, NONE, POSSIBLE, STRONG, WEAK, IsoTpEvidence,
@@ -509,6 +512,10 @@ class IsoTpView(QWidget):
     #: Emitted with a CanFrame when the operator picks a raw frame, so the rest
     #: of the application can follow along.
     frameActivated = Signal(object)
+    bookmarkRequested = Signal(str, str, str)
+    diagnosticSelectionChanged = Signal()
+
+    MAX_DIAGNOSTIC_ROWS = 2000
 
     def __init__(self, config, theme: Theme, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -529,10 +536,23 @@ class IsoTpView(QWidget):
         #: Never read the table's current row and the navigator's own count
         #: as two separate ideas of "where we are"; there is only this one.
         self._transfer_index: int = -1
+        self._diagnostic_analysis: Optional[DiagnosticAnalysis] = None
+        self._conversation_rows = []
+        self._did_rows = []
+        self._dtc_rows = []
+        self._restored_diagnostic_selection: Dict[str, str] = {}
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(SPACE_SM)
+
+        self.tabs = QTabWidget()
+        self.tabs.currentChanged.connect(self._on_diagnostic_selection_changed)
+
+        transfers_page = QWidget()
+        transfers_layout = QVBoxLayout(transfers_page)
+        transfers_layout.setContentsMargins(0, 0, 0, 0)
+        transfers_layout.setSpacing(0)
 
         self.splitter = QSplitter(Qt.Vertical)
         self.splitter.setChildrenCollapsible(False)
@@ -556,7 +576,13 @@ class IsoTpView(QWidget):
         # In-memory only (see _SPLITTER_CONFIG_KEY) -- an operator dragging a
         # handle must never trigger a disk write per pixel of motion.
         self.splitter.splitterMoved.connect(self._remember_splitter_sizes)
-        root.addWidget(self.splitter, 1)
+        transfers_layout.addWidget(self.splitter, 1)
+        self.tabs.addTab(transfers_page, "Transfers")
+        self.tabs.addTab(self._build_diagnostic_overview(), "Overview")
+        self.tabs.addTab(self._build_conversations(), "Conversations")
+        self.tabs.addTab(self._build_dids(), "DIDs")
+        self.tabs.addTab(self._build_dtcs(), "DTCs")
+        root.addWidget(self.tabs, 1)
 
     def _remember_splitter_sizes(self, *_args) -> None:
         self.config.set(_SPLITTER_CONFIG_KEY, list(self.splitter.sizes()))
@@ -593,6 +619,127 @@ class IsoTpView(QWidget):
         view.setMinimumHeight(ROW_HEIGHT_COMPACT * 5 + 8)
         return view
 
+    def _diagnostic_table(self, columns) -> QTableWidget:
+        table = QTableWidget(0, len(columns))
+        table.setHorizontalHeaderLabels(columns)
+        table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        table.setSelectionMode(QAbstractItemView.SingleSelection)
+        table.setAlternatingRowColors(True)
+        table.setShowGrid(False)
+        table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        table.setSortingEnabled(False)
+        table.verticalHeader().setVisible(False)
+        table.verticalHeader().setDefaultSectionSize(ROW_HEIGHT_COMPACT)
+        table.horizontalHeader().setStretchLastSection(True)
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
+        return table
+
+    def _build_diagnostic_overview(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, SPACE_SM, 0, 0)
+        layout.setSpacing(SPACE_SM)
+        self.diagnostic_overview_note = QLabel(
+            "Conversation analysis is computed from observed complete ISO-TP transfers.")
+        self.diagnostic_overview_note.setObjectName("Muted")
+        self.diagnostic_overview_note.setWordWrap(True)
+        layout.addWidget(self.diagnostic_overview_note)
+        layout.addWidget(SectionLabel("Passive diagnostic peers", self._theme))
+        self.peer_table = self._diagnostic_table((
+            "Tester-like", "ECU-like", "Requests", "Positive", "Negative",
+            "Unanswered", "Services", "Basis"))
+        layout.addWidget(self.peer_table, 1)
+        self.diagnostic_caveats = QPlainTextEdit()
+        self.diagnostic_caveats.setReadOnly(True)
+        self.diagnostic_caveats.setMaximumHeight(110)
+        self.diagnostic_caveats.setPlaceholderText(
+            "Capture-integrity and retained-horizon caveats appear here.")
+        layout.addWidget(self.diagnostic_caveats)
+        return page
+
+    def _build_conversations(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, SPACE_SM, 0, 0)
+        layout.setSpacing(SPACE_SM)
+        controls = QHBoxLayout()
+        self.conversation_filter = QLineEdit()
+        self.conversation_filter.setPlaceholderText(
+            "Search CAN ID, peer, service, DID, NRC, status, timestamp…")
+        self.conversation_filter.setClearButtonEnabled(True)
+        self.conversation_filter.textChanged.connect(self._populate_conversations)
+        controls.addWidget(self.conversation_filter, 1)
+        self.conversation_status_filter = QComboBox()
+        self.conversation_status_filter.addItem("All correlations", "")
+        for status in CorrelationStatus:
+            self.conversation_status_filter.addItem(status.value, status.value)
+        self.conversation_status_filter.currentIndexChanged.connect(
+            self._populate_conversations)
+        controls.addWidget(self.conversation_status_filter)
+        self.bookmark_conversation_button = QPushButton("Bookmark conversation")
+        self.bookmark_conversation_button.clicked.connect(
+            self._bookmark_selected_conversation)
+        controls.addWidget(self.bookmark_conversation_button)
+        layout.addLayout(controls)
+        self.conversation_table = self._diagnostic_table((
+            "Time", "Peer pair", "Direction", "Service", "Detail",
+            "Correlation", "Latency", "Complete"))
+        self.conversation_table.itemSelectionChanged.connect(
+            self._on_conversation_selected)
+        layout.addWidget(self.conversation_table, 3)
+        layout.addWidget(SectionLabel("Observed evidence and correlation", self._theme))
+        self.conversation_detail = QPlainTextEdit()
+        self.conversation_detail.setReadOnly(True)
+        self.conversation_detail.setMinimumHeight(150)
+        layout.addWidget(self.conversation_detail, 2)
+        return page
+
+    def _build_dids(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, SPACE_SM, 0, 0)
+        layout.setSpacing(SPACE_SM)
+        controls = QHBoxLayout()
+        self.did_filter = QLineEdit()
+        self.did_filter.setPlaceholderText("Search DID, peer, raw value, timestamp…")
+        self.did_filter.setClearButtonEnabled(True)
+        self.did_filter.textChanged.connect(self._populate_dids)
+        controls.addWidget(self.did_filter, 1)
+        self.bookmark_did_button = QPushButton("Bookmark DID observation")
+        self.bookmark_did_button.clicked.connect(self._bookmark_selected_did)
+        controls.addWidget(self.bookmark_did_button)
+        layout.addLayout(controls)
+        self.did_table = self._diagnostic_table((
+            "Time", "Peer pair", "DID", "Raw value", "Request transfer",
+            "Response transfer", "Caveats"))
+        self.did_table.itemSelectionChanged.connect(
+            self._on_diagnostic_selection_changed)
+        layout.addWidget(self.did_table, 1)
+        return page
+
+    def _build_dtcs(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, SPACE_SM, 0, 0)
+        layout.setSpacing(SPACE_SM)
+        controls = QHBoxLayout()
+        self.dtc_filter = QLineEdit()
+        self.dtc_filter.setPlaceholderText("Search DTC, status, peer, subfunction…")
+        self.dtc_filter.setClearButtonEnabled(True)
+        self.dtc_filter.textChanged.connect(self._populate_dtcs)
+        controls.addWidget(self.dtc_filter, 1)
+        self.bookmark_dtc_button = QPushButton("Bookmark DTC observation")
+        self.bookmark_dtc_button.clicked.connect(self._bookmark_selected_dtc)
+        controls.addWidget(self.bookmark_dtc_button)
+        layout.addLayout(controls)
+        self.dtc_table = self._diagnostic_table((
+            "Time", "Peer pair", "DTC", "Status", "0x19 subfunction",
+            "Source", "Raw record"))
+        self.dtc_table.itemSelectionChanged.connect(
+            self._on_diagnostic_selection_changed)
+        layout.addWidget(self.dtc_table, 1)
+        return page
+
     # -- construction: CAN-ID evidence summary ---------------------------
 
     def _build_summary(self) -> QWidget:
@@ -608,7 +755,9 @@ class IsoTpView(QWidget):
         self.filter_box = QLineEdit()
         self.filter_box.setPlaceholderText("Filter by CAN ID…")
         self.filter_box.setClearButtonEnabled(True)
-        self.filter_box.setFixedWidth(150)
+        self.filter_box.setMinimumWidth(100)
+        self.filter_box.setMaximumWidth(220)
+        self.filter_box.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.filter_box.textChanged.connect(self._apply_filter)
         row.addWidget(self.filter_box)
 
@@ -802,6 +951,10 @@ class IsoTpView(QWidget):
         self.detail_status_chip.setVisible(False)
         header.addWidget(self.detail_status_chip)
         header.addStretch(1)
+        self.bookmark_transfer_button = QPushButton("Bookmark transfer")
+        self.bookmark_transfer_button.setEnabled(False)
+        self.bookmark_transfer_button.clicked.connect(self._bookmark_selected_transfer)
+        header.addWidget(self.bookmark_transfer_button)
         header.addWidget(self._build_navigator())
         outer.addLayout(header)
 
@@ -923,6 +1076,363 @@ class IsoTpView(QWidget):
         self.frame_view.doubleClicked.connect(self._on_frame_activated)
         layout.addWidget(self.frame_view, 1)
         return container
+
+    # -- passive diagnostic conversation workspace ----------------------
+
+    @staticmethod
+    def _bytes_text(value: bytes) -> str:
+        return " ".join("{:02X}".format(byte) for byte in value) or DASH
+
+    @staticmethod
+    def _pair_text(pair) -> str:
+        if pair is None:
+            return "Unknown peer"
+        return "{} ↔ {}".format(pair.endpoint_a.id_label,
+                                pair.endpoint_b.id_label)
+
+    def set_diagnostic_analysis(self, analysis: Optional[DiagnosticAnalysis]) -> None:
+        """Populate bounded views from the worker-owned immutable snapshot."""
+        self._diagnostic_analysis = analysis
+        if analysis is None:
+            self.clear_diagnostics()
+            return
+        self._populate_peers()
+        self._populate_conversations()
+        self._populate_dids()
+        self._populate_dtcs()
+        complete = sum(item.complete for item in analysis.transfers)
+        counts = {status: sum(
+            item.correlation_status is status for item in analysis.conversations)
+                  for status in CorrelationStatus}
+        self.diagnostic_overview_note.setText(
+            "{:,} normalized transfer{} ({} complete, {} incomplete) · "
+            "{:,} conversation event{} · {} paired positive · {} paired negative · "
+            "{} unanswered · {} orphan · {} ambiguous. Normal addressing only; "
+            "all rows were observed, never generated.".format(
+                len(analysis.transfers),
+                "" if len(analysis.transfers) == 1 else "s", complete,
+                len(analysis.transfers) - complete, len(analysis.conversations),
+                "" if len(analysis.conversations) == 1 else "s",
+                counts[CorrelationStatus.PAIRED_POSITIVE],
+                counts[CorrelationStatus.PAIRED_NEGATIVE],
+                counts[CorrelationStatus.UNANSWERED_REQUEST],
+                counts[CorrelationStatus.ORPHAN_RESPONSE],
+                counts[CorrelationStatus.AMBIGUOUS]))
+        self.diagnostic_caveats.setPlainText(
+            "\n".join("• " + item for item in analysis.caveats)
+            or "No additional retained-horizon caveats were reported. "
+               "Hardware/driver loss visibility is stated by the capture integrity context.")
+        self._apply_restored_diagnostic_selection()
+
+    def clear_diagnostics(self) -> None:
+        self._diagnostic_analysis = None
+        self._conversation_rows = []
+        self._did_rows = []
+        self._dtc_rows = []
+        for table in (self.peer_table, self.conversation_table,
+                      self.did_table, self.dtc_table):
+            table.blockSignals(True)
+            table.setRowCount(0)
+            table.blockSignals(False)
+        self.conversation_detail.clear()
+        self.diagnostic_overview_note.setText(
+            "No reconstructed diagnostic conversations in the retained capture.")
+        self.diagnostic_caveats.clear()
+
+    def _populate_peers(self) -> None:
+        analysis = self._diagnostic_analysis
+        rows = analysis.peers if analysis is not None else ()
+        self.peer_table.setRowCount(min(len(rows), self.MAX_DIAGNOSTIC_ROWS))
+        for position, summary in enumerate(rows[:self.MAX_DIAGNOSTIC_ROWS]):
+            pair = summary.peer_pair
+            services = ", ".join("0x{:02X} {} ({})".format(*item)
+                                 for item in summary.services)
+            values = (
+                pair.tester_like.id_label if pair.tester_like else "Unknown",
+                pair.ecu_like.id_label if pair.ecu_like else "Unknown",
+                str(summary.request_count), str(summary.positive_response_count),
+                str(summary.negative_response_count), str(summary.unanswered_count),
+                services or DASH, pair.direction_basis)
+            for column, value in enumerate(values):
+                self.peer_table.setItem(position, column, QTableWidgetItem(value))
+
+    def _conversation_search_text(self, conversation) -> str:
+        values = [conversation.conversation_id,
+                  conversation.correlation_status.value,
+                  self._pair_text(conversation.peer_pair),
+                  "{:.9g}".format(conversation.first_timestamp),
+                  conversation.service_name,
+                  "0x{:02X}".format(conversation.service or 0)]
+        for event in (conversation.request, conversation.response):
+            if event is None:
+                continue
+            message = event.uds
+            values.extend((event.transfer.endpoint.id_label, message.kind,
+                           message.describe(), self._bytes_text(message.raw_payload),
+                           event.transfer.status))
+            values.extend("0x{:04X}".format(item) for item in message.identifiers)
+            if message.nrc is not None:
+                values.extend(("0x{:02X}".format(message.nrc), message.nrc_text))
+        values.extend(conversation.reasons)
+        values.extend(conversation.caveats)
+        return " ".join(values).lower()
+
+    def _populate_conversations(self, *_args) -> None:
+        analysis = self._diagnostic_analysis
+        wanted = self._selected_logical_id(self.conversation_table,
+                                           self._conversation_rows,
+                                           "conversation_id")
+        text = self.conversation_filter.text().strip().lower()
+        status = self.conversation_status_filter.currentData() or ""
+        rows = [] if analysis is None else [
+            item for item in analysis.conversations
+            if (not status or item.correlation_status.value == status)
+            and (not text or text in self._conversation_search_text(item))]
+        self._conversation_rows = rows[:self.MAX_DIAGNOSTIC_ROWS]
+        table = self.conversation_table
+        table.blockSignals(True)
+        table.setRowCount(len(self._conversation_rows))
+        for position, conversation in enumerate(self._conversation_rows):
+            request, response = conversation.request, conversation.response
+            if request is not None and response is not None:
+                direction = "{} → {}".format(
+                    request.transfer.endpoint.id_label,
+                    response.transfer.endpoint.id_label)
+            else:
+                event = request or response
+                direction = (event.transfer.endpoint.id_label + " → ?"
+                             if request is not None else
+                             "? → " + event.transfer.endpoint.id_label)
+            detail_event = request or response
+            detail = detail_event.uds.describe() if detail_event else DASH
+            complete = "/".join(event.transfer.status for event in
+                                (request, response) if event is not None)
+            values = (
+                "{:.4f}s".format(conversation.first_timestamp - self._time_base),
+                self._pair_text(conversation.peer_pair), direction,
+                "0x{:02X} {}".format(conversation.service or 0,
+                                      conversation.service_name),
+                detail, conversation.correlation_status.value,
+                ("{:.3f} ms".format(conversation.latency * 1000)
+                 if conversation.latency is not None else DASH), complete)
+            for column, value in enumerate(values):
+                table.setItem(position, column, QTableWidgetItem(value))
+        self._select_logical_id(table, self._conversation_rows,
+                                "conversation_id", wanted)
+        table.blockSignals(False)
+        self._on_conversation_selected(False)
+
+    def _populate_dids(self, *_args) -> None:
+        analysis = self._diagnostic_analysis
+        wanted = self._selected_logical_id(
+            self.did_table, self._did_rows, "observation_id")
+        text = self.did_filter.text().strip().lower()
+        rows = [] if analysis is None else [item for item in analysis.dids
+            if not text or text in " ".join((
+                item.observation_id, "0x{:04X}".format(item.did),
+                self._pair_text(item.peer_pair), self._bytes_text(item.raw_value),
+                "{:.9g}".format(item.request_timestamp or
+                                 item.response_timestamp or 0),
+                " ".join(item.caveats))).lower()]
+        self._did_rows = rows[:self.MAX_DIAGNOSTIC_ROWS]
+        table = self.did_table
+        table.blockSignals(True)
+        table.setRowCount(len(self._did_rows))
+        for position, item in enumerate(self._did_rows):
+            stamp = item.request_timestamp if item.request_timestamp is not None \
+                else item.response_timestamp
+            values = (
+                "{:.4f}s".format((stamp or 0) - self._time_base),
+                self._pair_text(item.peer_pair), "0x{:04X}".format(item.did),
+                self._bytes_text(item.raw_value), item.request_transfer_id or DASH,
+                item.response_transfer_id or DASH, "; ".join(item.caveats) or DASH)
+            for column, value in enumerate(values):
+                table.setItem(position, column, QTableWidgetItem(value))
+        self._select_logical_id(table, self._did_rows, "observation_id", wanted)
+        table.blockSignals(False)
+
+    def _populate_dtcs(self, *_args) -> None:
+        analysis = self._diagnostic_analysis
+        wanted = self._selected_logical_id(
+            self.dtc_table, self._dtc_rows, "observation_id")
+        text = self.dtc_filter.text().strip().lower()
+        rows = [] if analysis is None else [item for item in analysis.dtcs
+            if not text or text in " ".join((
+                item.observation_id, "0x{:06X}".format(item.dtc),
+                "0x{:02X}".format(item.status), self._pair_text(item.peer_pair),
+                "0x{:02X}".format(item.sub_function),
+                "{:.9g}".format(item.timestamp))).lower()]
+        self._dtc_rows = rows[:self.MAX_DIAGNOSTIC_ROWS]
+        table = self.dtc_table
+        table.blockSignals(True)
+        table.setRowCount(len(self._dtc_rows))
+        for position, item in enumerate(self._dtc_rows):
+            values = (
+                "{:.4f}s".format(item.timestamp - self._time_base),
+                self._pair_text(item.peer_pair), "0x{:06X}".format(item.dtc),
+                "0x{:02X}".format(item.status),
+                "0x{:02X}".format(item.sub_function),
+                "Observed UDS response", self._bytes_text(item.raw_record))
+            for column, value in enumerate(values):
+                table.setItem(position, column, QTableWidgetItem(value))
+        self._select_logical_id(table, self._dtc_rows, "observation_id", wanted)
+        table.blockSignals(False)
+
+    @staticmethod
+    def _selected_logical_id(table, rows, attribute) -> str:
+        position = table.currentRow()
+        if 0 <= position < len(rows):
+            return str(getattr(rows[position], attribute))
+        return ""
+
+    @staticmethod
+    def _select_logical_id(table, rows, attribute, wanted: str) -> None:
+        if not rows:
+            table.clearSelection()
+            return
+        position = next((index for index, item in enumerate(rows)
+                         if str(getattr(item, attribute)) == wanted), 0)
+        table.selectRow(position)
+
+    def _format_event(self, title: str, event) -> List[str]:
+        if event is None:
+            return [title, "  Not observed"]
+        transfer, message = event.transfer, event.uds
+        lines = [title,
+                 "  Endpoint: {} ({})".format(
+                     transfer.endpoint.id_label, transfer.endpoint.identity),
+                 "  Timestamp: {:.6f} s".format(
+                     transfer.first_timestamp - self._time_base),
+                 "  UDS: {} · {} · service 0x{:02X} {}".format(
+                     message.kind, message.describe(), message.service or 0,
+                     message.service_name),
+                 "  Transfer: {} · {} · {} frame(s) · {} bytes".format(
+                     transfer.transfer_type, transfer.status,
+                     transfer.frame_count, len(transfer.payload)),
+                 "  Raw payload: {}".format(self._bytes_text(message.raw_payload))]
+        for name, value in message.structured_fields:
+            lines.append("  {}: {}".format(name, value))
+        if message.sub_function_name:
+            lines.append("  Subfunction meaning: {}".format(
+                message.sub_function_name))
+        if message.nrc is not None:
+            lines.append("  NRC: 0x{:02X} {}".format(
+                message.nrc, message.nrc_text or "unknown standard name"))
+        if transfer.diagnostics:
+            lines.append("  Transfer diagnostics: {}".format(
+                "; ".join(transfer.diagnostics)))
+        lines.append("  Raw frames:")
+        for raw in transfer.raw_frames:
+            lines.append("    {:.6f}s {} {} [{}]".format(
+                raw.timestamp - self._time_base, raw.channel,
+                "0x" + raw.id_hex, raw.data_hex))
+        return lines
+
+    def _on_conversation_selected(self, notify: bool = True) -> None:
+        position = self.conversation_table.currentRow()
+        if not 0 <= position < len(self._conversation_rows):
+            self.conversation_detail.clear()
+            return
+        item = self._conversation_rows[position]
+        lines = self._format_event("REQUEST", item.request)
+        lines += [""] + self._format_event("RESPONSE", item.response)
+        lines += ["", "CORRELATION", "  Status: " + item.correlation_status.value,
+                  "  Peer pair: " + self._pair_text(item.peer_pair)]
+        if item.latency is not None:
+            lines.append("  Latency: {:.3f} ms".format(item.latency * 1000))
+        lines.extend("  Reason: " + reason for reason in item.reasons)
+        lines.extend("  Caveat: " + caveat for caveat in item.caveats)
+        self.conversation_detail.setPlainText("\n".join(lines))
+        if notify:
+            self._on_diagnostic_selection_changed()
+
+    def _bookmark_selected_conversation(self) -> None:
+        position = self.conversation_table.currentRow()
+        if 0 <= position < len(self._conversation_rows):
+            item = self._conversation_rows[position]
+            self.bookmarkRequested.emit(
+                "conversation", item.conversation_id,
+                "{} · {}".format(item.service_name,
+                                  item.correlation_status.value))
+
+    def _bookmark_selected_did(self) -> None:
+        position = self.did_table.currentRow()
+        if 0 <= position < len(self._did_rows):
+            item = self._did_rows[position]
+            self.bookmarkRequested.emit(
+                "did", item.observation_id,
+                "DID 0x{:04X} · {}".format(item.did,
+                                            self._pair_text(item.peer_pair)))
+
+    def _bookmark_selected_dtc(self) -> None:
+        position = self.dtc_table.currentRow()
+        if 0 <= position < len(self._dtc_rows):
+            item = self._dtc_rows[position]
+            self.bookmarkRequested.emit(
+                "dtc", item.observation_id,
+                "DTC 0x{:06X} · status 0x{:02X}".format(item.dtc, item.status))
+
+    def diagnostic_selection(self) -> Dict[str, str]:
+        names = ("transfers", "overview", "conversations", "dids", "dtcs")
+        state = {
+            "tab": names[self.tabs.currentIndex()],
+            "conversation_filter": self.conversation_filter.text(),
+            "conversation_status": str(
+                self.conversation_status_filter.currentData() or ""),
+            "did_filter": self.did_filter.text(),
+            "dtc_filter": self.dtc_filter.text(),
+        }
+        conversation = self._selected_logical_id(
+            self.conversation_table, self._conversation_rows, "conversation_id")
+        did = self._selected_logical_id(
+            self.did_table, self._did_rows, "observation_id")
+        dtc = self._selected_logical_id(
+            self.dtc_table, self._dtc_rows, "observation_id")
+        if conversation:
+            state["conversation_id"] = conversation
+        if did:
+            state["did_observation_id"] = did
+        if dtc:
+            state["dtc_observation_id"] = dtc
+        return state
+
+    def apply_diagnostic_selection(self, state: Dict[str, str]) -> None:
+        self._restored_diagnostic_selection = {
+            str(key): str(value) for key, value in state.items()}
+        self._apply_restored_diagnostic_selection()
+
+    def _apply_restored_diagnostic_selection(self) -> None:
+        state = self._restored_diagnostic_selection
+        if not state:
+            return
+        controls = ((self.conversation_filter, "conversation_filter"),
+                    (self.did_filter, "did_filter"),
+                    (self.dtc_filter, "dtc_filter"))
+        for control, key in controls:
+            control.blockSignals(True)
+            control.setText(state.get(key, ""))
+            control.blockSignals(False)
+        status = state.get("conversation_status", "")
+        index = self.conversation_status_filter.findData(status)
+        self.conversation_status_filter.blockSignals(True)
+        self.conversation_status_filter.setCurrentIndex(max(0, index))
+        self.conversation_status_filter.blockSignals(False)
+        self._populate_conversations()
+        self._populate_dids()
+        self._populate_dtcs()
+        self._select_logical_id(self.conversation_table, self._conversation_rows,
+                                "conversation_id", state.get("conversation_id", ""))
+        self._select_logical_id(self.did_table, self._did_rows,
+                                "observation_id", state.get("did_observation_id", ""))
+        self._select_logical_id(self.dtc_table, self._dtc_rows,
+                                "observation_id", state.get("dtc_observation_id", ""))
+        names = ("transfers", "overview", "conversations", "dids", "dtcs")
+        if state.get("tab") in names:
+            self.tabs.setCurrentIndex(names.index(state["tab"]))
+        self._restored_diagnostic_selection = {}
+
+    def _on_diagnostic_selection_changed(self, *_args) -> None:
+        self.diagnosticSelectionChanged.emit()
 
     # -- content -----------------------------------------------------------
 
@@ -1127,6 +1637,7 @@ class IsoTpView(QWidget):
             if self._selected_id_label else "Transfer details")
 
         if transfer is None:
+            self.bookmark_transfer_button.setEnabled(False)
             self.detail_status_chip.setVisible(False)
             for value in list(self._identity_fields.values()) + list(self._timing_fields.values()):
                 value.setText(DASH)
@@ -1134,6 +1645,7 @@ class IsoTpView(QWidget):
             self.diagnostic_line.setStyleSheet("")
             return
 
+        self.bookmark_transfer_button.setEnabled(True)
         self.detail_status_chip.setVisible(True)
         self.detail_status_chip.set_text_and_tone(transfer.status, _status_tone(transfer.status))
 
@@ -1160,6 +1672,20 @@ class IsoTpView(QWidget):
                 "{}  {}".format(glyph, transfer.detail or transfer.describe()))
             self.diagnostic_line.setStyleSheet(
                 "color: {}; font-weight: 600;".format(self._theme.hex(tone)))
+
+    def _bookmark_selected_transfer(self) -> None:
+        transfer = self.transfer_model.row_at(self._transfer_index)
+        if transfer is None:
+            return
+        logical_id = "{}|{:.9f}|{}|{}|{}".format(
+            transfer.key, transfer.first_timestamp,
+            transfer.declared_length, transfer.status,
+            hashlib.sha256(bytes(transfer.data)).hexdigest()[:16])
+        self.bookmarkRequested.emit(
+            "transfer", logical_id,
+            "ISO-TP {} {} at {:.6f}s".format(
+                "0x" + transfer.id_hex, transfer.status,
+                transfer.first_timestamp - self._time_base))
 
     def _on_frame_activated(self, index: QModelIndex) -> None:
         if not index.isValid():

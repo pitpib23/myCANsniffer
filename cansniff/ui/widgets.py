@@ -14,7 +14,8 @@ from PySide6.QtGui import (
     QColor, QFont, QFontMetrics, QFontMetricsF, QPainter, QPainterPath, QPen,
 )
 from PySide6.QtWidgets import (
-    QButtonGroup, QFrame, QHBoxLayout, QLabel, QPushButton, QScrollArea,
+    QApplication, QButtonGroup, QDialog, QFrame, QHBoxLayout, QLabel,
+    QPushButton, QScrollArea,
     QSizePolicy, QStackedWidget, QStyle, QStyledItemDelegate,
     QStyleOptionViewItem, QVBoxLayout, QWidget,
 )  # noqa: F401  (QSizePolicy used by NavRail and PayloadStrip)
@@ -175,6 +176,44 @@ def scrollable(content: QWidget) -> QScrollArea:
     scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
     scroll.setWidget(content)
     return scroll
+
+
+def fit_top_level_to_screen(widget: QWidget, margin: int = 20) -> None:
+    """Keep a normal top-level widget inside its screen's usable geometry."""
+    if widget.isMaximized() or widget.isFullScreen():
+        return
+    screen = widget.screen()
+    if screen is None:
+        parent = widget.parentWidget()
+        screen = parent.screen() if parent is not None else QApplication.primaryScreen()
+    if screen is None:
+        return
+
+    available = screen.availableGeometry()
+    inset = max(0, min(int(margin),
+                       max(0, min(available.width(), available.height()) // 4)))
+    left, top = available.left() + inset, available.top() + inset
+    max_width = max(1, available.width() - inset * 2)
+    max_height = max(1, available.height() - inset * 2)
+    width = min(widget.width(), max_width)
+    height = min(widget.height(), max_height)
+    widget.resize(width, height)
+
+    # ``right``/``bottom`` are inclusive.  Preserve useful on-screen
+    # positions and only pull stale/restored geometry back into reach.
+    right = available.right() - inset - width + 1
+    bottom = available.bottom() - inset - height + 1
+    x = min(max(widget.x(), left), max(left, right))
+    y = min(max(widget.y(), top), max(top, bottom))
+    widget.move(x, y)
+
+
+class ResponsiveDialog(QDialog):
+    """Resizable dialog whose initial/restored geometry stays reachable."""
+
+    def showEvent(self, event) -> None:
+        fit_top_level_to_screen(self)
+        super().showEvent(event)
 
 
 class MetricChip(QWidget):
@@ -481,6 +520,39 @@ class _NavButton(QPushButton):
                     int(x1 + size), int(y1 + size / 2),
                     int(x2), int(y2 + size / 2),
                 )
+        elif self._glyph == "survey":
+            # Four observed protocol families converging on one survey.
+            center_x, center_y = box.center().x(), box.center().y()
+            for x, y in ((box.left() + 2, box.top() + 2),
+                         (box.right() - 4, box.top() + 2),
+                         (box.left() + 2, box.bottom() - 4),
+                         (box.right() - 4, box.bottom() - 4)):
+                painter.drawRect(QRectF(x, y, 3, 3))
+                painter.drawLine(int(x + 1.5), int(y + 1.5),
+                                 int(center_x), int(center_y))
+            painter.drawEllipse(QRectF(center_x - 2, center_y - 2, 4, 4))
+        elif self._glyph == "compare":
+            # Two observed intervals feeding one difference marker.
+            left = QRectF(box.left(), box.top() + 2, 6, box.height() - 4)
+            right = QRectF(box.right() - 6, box.top() + 2, 6, box.height() - 4)
+            painter.drawRect(left)
+            painter.drawRect(right)
+            center_x, center_y = box.center().x(), box.center().y()
+            painter.drawLine(int(left.right()), int(center_y),
+                             int(center_x - 2), int(center_y))
+            painter.drawLine(int(center_x + 2), int(center_y),
+                             int(right.left()), int(center_y))
+            painter.drawLine(int(center_x), int(center_y - 3),
+                             int(center_x), int(center_y + 3))
+        elif self._glyph == "match":
+            # A local profile card and observed message card joined by a
+            # dotted structural-comparison path; it is not an apply arrow.
+            painter.drawRect(QRectF(box.left(), box.top() + 2, 5, box.height() - 4))
+            painter.drawRect(QRectF(box.right() - 5, box.top() + 2,
+                                    5, box.height() - 4))
+            center_y = int(box.center().y())
+            for offset in (7, 10, 13):
+                painter.drawPoint(int(box.left() + offset), center_y)
 
 
 class FilterChip(QFrame):

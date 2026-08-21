@@ -35,6 +35,31 @@ On first run `sniffer_config.json` is created next to `main.py`.
 
 ---
 
+## Qualification status
+
+myCANsniffer distinguishes implementation from evidence. `SOFTWARE_TESTED`
+means mocks, unit/integration tests, or synthetic captures passed;
+`CAPTURE_VALIDATED` requires a real permissioned capture with ground truth;
+`HARDWARE_TESTED` requires a physical adapter run; and
+`ELECTRICALLY_PASSIVE_VERIFIED` requires independent measurement of zero DUT
+transmissions. One level never implies the next.
+
+The repository currently contains a permissioned synthetic software baseline,
+but no locally available real capture corpus, vendor EDS/DCF study, physical
+adapter record, or electrical analyzer result. Therefore protocol analysis,
+definition parsing, virtual transport, and passive backend policy have software
+evidence only. Real CANopen/J1939/ISO-TP/UDS interoperability, all physical
+backends, hardware CAN FD behavior, and electrical passivity remain unqualified.
+The offline qualification runner, evidence-derived matrix, corpus policy,
+opt-in fail-closed hardware harness, electrical procedure, large-capture
+harness, and exact current limitations are in [qualification/README.md](qualification/README.md).
+
+This is **ready with documented limitations for the existing software-tested
+offline workflows**. It is not a release claim for physical adapters or broad
+real-world interoperability.
+
+---
+
 ## The interface
 
 ```
@@ -57,7 +82,7 @@ On first run `sniffer_config.json` is created next to `main.py`.
 │    │ BLOCK SIZE [1│2│4│8]  BYTES 0 to 63                                          Columns         │
 │    │ Bytes   Raw   <one column per decoder>                                                      │
 ├────┴─────────────────────────────────────────────────────────────────────────────────────────────┤
-│ Received · Shown · Dropped · IDs · Rate                    status                 [receive-only]  │
+│ Received · UI dropped · IDs · Rate                         status                 [receive-only]  │
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -568,8 +593,10 @@ without touching the code.
 | --- | --- |
 | `source.type` | `file` (offline playback) or `live` (listen-only hardware) |
 | `source.file.path` / `.speed` / `.loop` | capture to replay; speed `0` = as fast as possible, `1.0` = original timing |
-| `source.live.*` | interface, channel, bitrate, CAN FD, listen-only enforcement, extra python-can kwargs |
-| `capture.queue_size` / `.ui_refresh_ms` / `.max_frames_retained` | pipeline and scrollback sizing |
+| `source.live.*` | interface, channel, bitrate, CAN FD, safe-by-default listen-only enforcement, extra python-can kwargs |
+| `capture.queue_size` | compatibility name for the batch-sizing target; each emitted batch is capped at `queue_size // 10` frames |
+| `capture.ui_refresh_ms` / `.max_frames_retained` | display cadence and scrollback sizing |
+| `discovery.*` | Classic CAN candidate rates, observation window, and centralized evidence thresholds |
 | `interpret.*` | block size, byte range, decoder columns |
 | `interpret.bit_window` | frames the bit activity matrix averages over; `0` turns per-bit tracking off |
 | `filters` | capture (receive-side) filter rules |
@@ -581,10 +608,11 @@ Edits in the Raw JSON tab win over the other tabs when you press OK.
 
 ---
 
-## Supported inputs
+## Implemented inputs and evidence status
 
 **Offline files.** `.asc` is handled by the in-house parser (classic and FD
-lines, standard and extended IDs, remote and error frames; lines that cannot be
+lines, including independent BRS and ESI metadata, standard and extended IDs,
+remote and error frames; lines that cannot be
 parsed with confidence are counted and skipped rather than guessed at). Other
 formats — `.blf`, `.log`, `.csv`, `.trc` — go through python-can's read-only
 `LogReader`.
@@ -594,6 +622,13 @@ cannot become, replay onto a bus.
 
 **Live capture.** Only through `Bus.recv()`. The bus object stays private to
 `cansniff/sources/live.py`; no other module can reach a driver handle.
+
+The capture-to-UI pipeline permits eight unacknowledged batches. If all eight
+slots are occupied, the newly completed batch is dropped and every frame in it
+is added to the displayed dropped-frame count; already queued batches are not
+evicted. Pause similarly skips display delivery while reception, filtering,
+and logging continue. Logging is synchronous on the capture worker and can
+therefore limit receive throughput if its destination is slow.
 
 ### How passive operation is enforced
 
@@ -605,7 +640,7 @@ The interface is checked *before* frames are read:
 | `kvaser` | driver silent mode selected at initialisation |
 | `pcan` | `PCAN_LISTEN_ONLY` applied immediately after initialisation — see caveat |
 | `socketcan` | must be set at OS level; the sniffer verifies it and refuses to open otherwise |
-| anything else | not verifiable → **refused** |
+| anything else | not verifiable → refused by default; explicit unverified opt-out available |
 
 For socketcan, configure it first:
 
@@ -618,14 +653,702 @@ sudo ip link set can0 up
 **PCAN caveat.** PCAN-Basic has no initialise-time listen-only parameter, so
 the channel is briefly initialised before the flag is applied. That window is
 reported rather than hidden. If the flag cannot be set, the interface is closed
-and capture refuses to start — it never continues in active mode.
+and capture refuses to start by default. If the operator explicitly disables
+confirmed listen-only mode, a failed flag application instead continues with a
+red **NOT VERIFIED** warning.
 
 **Known limitation.** Listen-only is enforced where the driver exposes it and
 verified where the OS reports it. On adapters with no such control the sniffer
-refuses to open rather than assume. Setting
-`source.live.require_listen_only` to `false` overrides that; the UI then shows
-a persistent red banner, because the controller may still acknowledge frames
-electrically even though this application transmits nothing.
+refuses to open by default. An operator can uncheck **Require confirmed
+listen-only mode** (or set `source.live.require_listen_only` to `false`) after
+acknowledging that receive-only software does not guarantee electrically
+passive hardware. That mode is marked **NOT VERIFIED** in the UI. `extra_kwargs`
+still cannot override
+interface, channel, bitrate/FD settings, receive-own-messages, driver mode, or
+listen-only/passive-related bus arguments. These guarantees are covered by
+software tests; no physical adapter's electrical listen-only behavior was
+hardware-verified as part of this implementation.
+
+### Auto Discover (Classic CAN only)
+
+**Auto Discover** enumerates supported interfaces without opening them, then
+offers passive Classic CAN bitrate testing only when the backend can apply the
+candidate bitrate and silent mode together. Manual live configuration remains
+available in Settings and is never overwritten by a failed or cancelled scan.
+
+| Backend | Enumeration | Passive capture policy | Auto bitrate |
+| --- | --- | --- | --- |
+| Kvaser | python-can CANlib detection | silent driver mode at construction; software-tested policy, no physical record | implemented and software-tested; hardware unqualified |
+| PCAN | python-can PCAN-Basic detection | listen-only immediately after initialization; software-tested policy, no physical record | intentionally unavailable because the initialization window is not hidden |
+| SocketCAN | operating-system interface detection | existing link must already report listen-only; software-tested policy, no physical record | intentionally unavailable; the application does not run privileged `ip link` reconfiguration |
+| Virtual | stable synthetic test entry | nonphysical; software-tested | not applicable to physical bitrate discovery |
+| UDP multicast | not adapter-enumerated | nonphysical network transport | not applicable to physical bitrate discovery |
+| Other backends | not qualified | refused by the existing passive policy | not qualified / refused |
+
+The default candidate list is 10, 20, 33.333, 50, 83.333, 100, 125, 250,
+500, 800, and 1000 kbit/s. A candidate needs multiple valid Classic data
+frames, a repeated identifier, an acceptable error ratio, and traffic spread
+across a meaningful part of the observation window. One frame, error-only
+traffic, or a short startup burst cannot win. If no traffic is present the
+result is **No traffic**; if multiple candidates appear stable the result is
+**Ambiguous**, and the user must use manual configuration or gather better
+evidence.
+
+Enumeration results and backend capability declarations are software evidence,
+not electrical qualification. No physical adapter was tested for this feature,
+and Auto Discover never transmits, actively probes nodes, changes SocketCAN
+links, or falls back to an active CAN mode.
+
+### BUS overview and traffic-profile horizons
+
+**BUS** opens a read-only, protocol-neutral overview of what the application
+actually observed since the last **Clear**. It reports source state, configured
+live bitrate (or unavailable capture-file metadata), session rate and duration,
+frame formats, message-key count, retained history, and capture integrity. It
+does not identify CANopen, J1939, UDS, proprietary traffic, or payload meaning.
+
+The underlying profile is incremental. Each frame delivered to the application's
+downstream path updates one session accumulator; opening the overview creates an
+immutable snapshot instead of rescanning captured frames. Per-message identity
+is exactly the same as Messages and FrameStore: channel + arbitration ID +
+standard/extended format. Unique payload tracking is exact up to 4,096 payloads
+per message and then explicitly marked incomplete, keeping memory bounded.
+
+Two horizons are always named:
+
+- **Session** covers every frame processed since Clear, including frames later
+  evicted from retained history.
+- **Retained** describes the existing bounded `FrameStore`. “Contains whole
+  session” becomes false after eviction; no second frame store is created.
+
+Average rate is `(valid timestamp count - 1) / (last timestamp - first
+timestamp)` when the duration is positive. A message period is a non-negative
+timestamp difference between consecutive observations of the same key. Equal
+timestamps are valid zero periods; negative periods are excluded and counted;
+non-finite timestamps are counted but excluded. Jitter is the population
+standard deviation of valid periods, calculated online with Welford's method.
+Payload changes compare consecutive observations, count length changes
+separately, and treat a byte appearing or disappearing as a change at that
+position.
+
+Capture integrity deliberately separates received, filter-accepted,
+application-processed, retained, UI-delivery dropped, pause-hidden,
+source/backend errors, file parse errors, and logger failures. File parse and
+driver-overrun metrics remain **unavailable** when a source cannot report them;
+unavailable is never displayed as zero. A zero UI-drop count therefore makes
+no claim about hardware or driver loss. Stop → Start continues the current
+session, while Clear and opening a new capture reset profile and integrity
+state. Playback loops remain in the same normalized session timeline. Changing
+capture filters or manually changing the configured source does not silently
+erase existing observations; the session spans those operator changes until
+Clear. The BUS source row therefore says “Configured/current source,” while
+observed channels and totals remain session-wide.
+
+---
+
+## Passive Protocol Survey
+
+**Protocols** builds one immutable, session-aware survey from the current
+retained `FrameStore` window. It can report CANopen, J1939, ISO-TP, UDS, and
+Unknown / proprietary evidence at the same time; it does not force the whole
+network into one protocol label. Messages and Trace remain the raw source of
+truth, and no frame is hidden or rewritten by a protocol interpretation.
+
+Evidence is categorical and explainable:
+
+- **None** means no meaningful supporting observation was retained.
+- **Weak** means compatible syntax exists, but ordinary unrelated CAN traffic
+  can readily produce the same pattern.
+- **Possible** means multiple correlated observations support the reading,
+  while important ambiguity remains.
+- **Strong** means several independent protocol-specific structures correlate
+  consistently and common accidental explanations are unlikely.
+- **Confirmed** is reserved for genuinely definitive evidence. Phase 4 passive
+  heuristics never manufacture this label merely from a high score.
+
+Every result carries generated reasons, related message keys, the exact
+retained horizon, and the Phase 3 capture-integrity snapshot. Retention
+eviction and unavailable driver-loss visibility are stated rather than hidden.
+Application drops, pause-hidden frames, parse/source errors, and reported
+driver overruns add caveats; sequence-sensitive Strong ISO-TP or UDS evidence
+is reduced when known application/source loss could have removed frames.
+Out-of-order per-message timing is also reported. These are observations over
+the retained capture, not packet-by-packet protocol ownership claims.
+
+### Detector boundaries
+
+**CANopen** considers only standard 11-bit communication-object ranges. Legal
+node offsets, one-byte heartbeat/boot-up states, repetition and timing
+regularity, PDO-family correlation, and structurally matched SDO
+request/response fields contribute evidence per observed node and channel.
+An isolated heartbeat-range or PDO-range identifier stays Weak; several
+correlated object classes are required for Strong. The node table exposes
+objects, heartbeat states/timing, SDO pairs, related IDs, and first/last times.
+It does not import EDS/DCF data, decode an Object Dictionary, or send NMT/SDO.
+
+**J1939** first parses a 29-bit identifier without claiming that it is J1939.
+For PDU1 (`PF < 240`), PDU Specific is the destination and is excluded from
+the PGN; for PDU2 it is the group extension and remains in the PGN. Evidence
+then comes from repeated stable PGNs, source-address aggregation, coherent
+PDU1/PDU2 use, and passive management shapes such as Request, Address Claim,
+TP.CM, and TP.DT. One arbitrary extended ID remains Weak. The UI reports
+observed source addresses, destinations, numeric PGNs, priorities, payload
+lengths, counts, and timing. The expanded passive intelligence layer described
+below also reassembles bounded TP sessions and decodes explicitly imported
+local definitions without increasing this detector's confidence category from
+a single syntactically valid transfer.
+
+**ISO-TP** is adapted from the existing conservative survey, preserving its
+None/Weak/Possible/Strong sequence, length, Flow Control observation, peer,
+and false-positive rules. **UDS is strictly layered on complete reconstructed
+ISO-TP payloads** (including syntactically complete ISO-TP Single Frames).
+Service-looking bytes in arbitrary raw frames are never sent to the UDS
+classifier. Request/positive/negative response observations are displayed,
+and stronger UDS evidence requires time-correlated request/response shapes on
+distinct message keys.
+
+**Unknown / proprietary** is a normal positive outcome when usable retained
+traffic remains outside possible-or-strong known-protocol evidence. It can
+coexist with CANopen, J1939, ISO-TP, or UDS. A silent capture or error-frame-only
+capture instead reports that no protocol classification is possible; absence
+of traffic is not called proprietary traffic.
+
+The survey is passive end to end. It never opens a source, holds a driver
+handle, transmits a frame, emits Flow Control, probes a node, or changes bus
+configuration. Results are cached by retained-window revision plus integrity
+context. Live updates are debounced, and an uncached scan runs on a
+cooperatively cancellable Qt worker so the interface does not scan 200,000
+frames during a repaint.
+
+## Expanded passive J1939 intelligence (Phase 9)
+
+The Protocol Survey makes one chronological pass over retained traffic for
+J1939-21 TP.CM/TP.DT. It recognizes BAM and observed RTS/CTS exchanges, with
+control values `0x20` (BAM), `0x10` (RTS), `0x11` (CTS), `0x13`
+(EndOfMsgACK), and `0xFF` (Abort). Announcements are limited to 9..1785 bytes,
+1..255 packets, and an exact `ceil(size / 7)` packet count. BAM becomes
+complete only after every announced data packet. Peer-to-peer transport also
+requires an observed CTS and EndOfMsgACK; this application never sends either.
+Payload padding is trimmed to the announced size.
+
+Session identity includes channel, source, destination, transported PGN, mode,
+and an observation serial. Exact duplicates are counted, conflicting
+duplicates are malformed, and skipped/out-of-order/excess packets, invalid
+control fields, replacements, Abort, orphan TP.DT/control frames, capture-end
+incompleteness, and conservative BAM/peer timeouts remain inspectable. Orphan
+or incomplete data is never promoted to an application payload. Known capture
+loss and incomplete retention are attached to every session as caveats. A
+standard frame can advance passive timeouts, but no analysis path opens a bus,
+acknowledges a session, or transmits.
+
+Complete transport payloads and ordinary extended single frames share one
+immutable `J1939PayloadObservation` decode input. Unknown PGNs stay visible as
+numeric observations. The J1939 page adds source and definition coverage,
+searchable transport sessions, control/packet/diagnostic detail, and decoded
+SPN rows. Search accepts source/destination, numeric PGN/SPN, BAM/RTS/CTS,
+status, and names. Address Claim is still shown as a management shape; its
+64-bit NAME field is not semantically expanded in this phase.
+
+`Import J1939 JSON` accepts only the documented repository-local schema version
+1. Files are UTF-8 JSON, capped at 8 MiB, duplicate-key checked, non-finite
+number checked, count/range bounded, and never evaluated as code. Each import
+stores its absolute local location, SHA-256, import time, schema/parser version,
+validation state, diagnostics, and declared license. Missing and changed paths
+do not silently substitute new content. Imported definitions live in a profile
+and decoding uses only the explicitly active profile; importing does not
+activate it. The repository ships only `tests/fixtures/synthetic_j1939.json`,
+a CC0 repository-authored synthetic fixture, not SAE Digital Annex or vendor
+content.
+
+Bit numbering in this JSON schema is zero-based sequential LSB-first from
+payload byte 0. Supported SPNs provide `start_bit`, `bit_length`, optional
+signed two's-complement interpretation, finite scale/offset, unit/range, state
+labels, and special raw values. Only `little_endian` is decoded. Other declared
+orders are preserved as unsupported diagnostics rather than guessed or
+executed. A PGN can declare an exact length or inclusive min/max range and
+single/transport/either use. Reports keep Observed numeric PGNs, Inferred TP
+sessions, and Defined source/hash/SPN values separate.
+
+Profile matching exposes J1939 definition provenance and source conflicts but
+does not feed transported PGNs into CAN-ID coverage: a transported application
+PGN does not map one-to-one to TP.CM/TP.DT message keys, so treating it as a
+normal DBC-style ID would make coverage misleading.
+
+## Passive ISO-TP / UDS conversations (Phase 10)
+
+The existing ISO-TP workspace now has **Transfers**, **Overview**,
+**Conversations**, **DIDs**, and **DTCs** pages. Transfers preserves the
+original evidence-first reassembly/raw-frame workflow. The other pages are
+views over those already reconstructed transfers: they do not rescan the raw
+capture for every conversation and do not create traffic to fill gaps.
+
+An endpoint identity contains channel, arbitration ID, standard/extended frame
+format, and the reassembler's addressing mode. A peer pair is learned only
+from an observed syntactically compatible request/response or a bounded
+observed Flow Control hint. Lower ID is never assumed to be the tester.
+Direction stays unknown where evidence is insufficient. Conversation grouping
+currently supports **normal addressing**, the mode implemented by the existing
+reassembler, for both standard and extended CAN IDs. Extended/mixed addressing
+and broader CAN FD ISO-TP behavior are not added by this phase.
+
+Correlation requires the same channel/frame format/addressing mode, opposite
+endpoints, request-before-response chronology within the centralized passive
+five-second window, matching service, and service-specific fields where safely
+available. Positive response SID arithmetic and a negative response's explicit
+original service are preserved as reasons. DID, subfunction, and routine ID
+separate overlapping requests. Multiple remaining candidates are labelled
+**Ambiguous correlation**; nearest timestamp alone never chooses one. Same-ID,
+stale, different-channel, malformed, or peer-conflicting shapes do not pair.
+Requests without a response are labelled **Request — no observed response**,
+not failed. Responses without a retained request remain orphans. NRC `0x78` is
+shown as an observed interim negative response while the request remains
+available for a later final response. Suppress-positive-response is displayed
+and makes absence explicitly non-failure evidence.
+
+The bounded structured UDS presentation covers:
+
+- `0x10` DiagnosticSessionControl: subfunction, suppress bit, and the small
+  local session-name table;
+- `0x11` ECUReset: subfunction/reset type;
+- `0x19` ReadDTCInformation: request status mask for subfunction `0x02`, and
+  validated DTC/status records only for positive `0x02` and `0x0A` layouts;
+- `0x22` ReadDataByIdentifier: one or more request DIDs and the first explicit
+  response DID, preserving remaining response bytes raw;
+- `0x27` SecurityAccess: observed subfunction and seed/key direction from its
+  odd/even level only, plus raw bytes;
+- `0x31` RoutineControl: control type, routine identifier, and raw option/status
+  bytes;
+- `0x3E` TesterPresent: observed subfunction and suppress-positive-response bit;
+- `0x7F` negative responses: original service, numeric NRC, a small standard
+  local name table, raw payload, request correlation, and frame provenance.
+
+Other already named services remain name/raw-payload observations. Unsupported
+`0x19` variants remain raw and are never parsed as arbitrary three-byte DTCs.
+Multi-DID response value boundaries require trusted local DID lengths, so the
+whole response stays raw rather than being guessed. No OEM DID/DTC semantic
+database or online lookup is included; DID/DTC views show numeric identifiers,
+raw values, status bytes, source transfer IDs, and capture frames.
+
+Overview summarizes tester-like/ECU-like endpoints, service counts, positive,
+negative, unanswered, and incomplete observations without claiming ECU roles
+such as engine or transmission. Conversation search covers CAN ID, peer,
+service, DID, NRC, direction/status, completeness, payload text, and timestamp.
+Selecting a row shows request and response endpoints, decoded fields, raw
+payloads, raw frame times/bytes, latency, pairing reasons, and integrity
+caveats. DID and DTC pages have focused filters. UI detail is capped at 2,000
+rows while the immutable analysis snapshot remains complete.
+
+Conversation generation shares Protocol Survey's cancellable, main-window-owned
+worker and revision cache. Its cache identity includes retained window/revision,
+capture-integrity caveats, settings, and algorithm version. Clear, close,
+incoming revisions, and stale work use the established worker lifecycle.
+Projects schema 3 persists only filters and stable selections; conversations
+are recomputed. Transfer, conversation, DID, and DTC bookmark actions store
+stable logical ISO-TP targets, which remain unresolved rather than disappearing
+if later evidence changes. Markdown reports label raw diagnostic facts as
+Observed, pairing chronology/latency as Inferred, and explicitly report that
+no local DID/DTC semantics are Defined.
+
+Known capture loss, retention eviction, source/parser errors, unavailable
+driver-overrun visibility, and incomplete ISO-TP transfer status remain visible
+as caveats. Incomplete transfers are retained but never decoded as complete
+UDS. The application never sends Flow Control, TesterPresent, UDS requests,
+session control, routine control, retries, or security keys. It contains no
+seed/key calculation or diagnostic sender.
+
+ISO-TP/UDS conversation analysis was software-tested against synthetic
+repository fixtures; broad real-world diagnostic interoperability remains
+unqualified.
+
+## Baseline/event comparison and structural candidates
+
+**Compare** supports a controlled, passive investigation workflow:
+
+1. Observe and mark a baseline interval.
+2. Cause a physical event outside myCANsniffer.
+3. Mark the event interval.
+4. Compare and inspect the ranked message differences.
+5. Inspect byte, bit, structural-candidate, and selected correlation evidence.
+
+Interval labels are optional user annotations. The application does not infer
+what "Idle", "Pump running", or any other label means, and it never generates
+the event over CAN. Start/end values can be entered directly or marked at the
+latest retained timestamp. Both intervals are extracted through the existing
+revisioned `FrameStore`; no second retained frame store is created.
+
+### What ranking means
+
+The Most Affected table combines normalized, explicit facts: repeatable new or
+removed IDs, baseline/event byte-distribution distance, bit-state differences,
+normalized rate and period changes, payload-change-frequency shifts, and
+payload-length changes. High frame count is not itself a ranking advantage.
+A one-frame new ID is surfaced as sparse evidence but does not automatically
+outrank a repeatable payload change. Ties are resolved by the repository's
+channel + arbitration-ID + standard/extended message key, so results are
+reproducible. Every score contributor is also displayed as a reason; a score
+is never presented without its factual components.
+
+Per-byte detail reports usable and missing samples separately, observed ranges,
+Shannon entropy, change frequency, and total-variation distance between the
+two empirical byte distributions. Shannon entropy is:
+
+```text
+H(X) = -sum p(x) log2 p(x)
+```
+
+It describes value diversity only. High entropy does not by itself mean a
+checksum. Per-bit detail reports the observed fraction of ones and transition
+counts in each condition. Missing bytes from variable-DLC frames are never
+padded with zero.
+
+### Structural, not semantic, candidates
+
+Candidate evidence uses None, Weak, Possible, and Strong. Heuristic candidates
+never become Confirmed and are never converted automatically into database
+signals.
+
+- **Counter-like** checks exact and small positive modular steps, sample count,
+  and observed wrap. A monotonic sequence without a wrap remains Weak because
+  a smoothly changing numeric value is an equally valid explanation.
+- **Status-bitfield-like** looks for several independently toggling bits and a
+  high fraction of single-bit state transitions. Static bytes and smooth
+  multi-bit increments are rejected.
+- **Checksum/CRC-like** requires more than a high-entropy final byte: changes
+  must track changes elsewhere in the payload, repeated payload cores must
+  reproduce the same candidate byte, obvious direct numeric correlation must
+  be absent, and a detected counter-like explanation takes precedence. This
+  does not identify or verify any particular checksum algorithm.
+- **Numeric** candidates reuse the existing `u8`/`i8`, 16-bit and 32-bit
+  integer, endian, and IEEE-754 float decoders. They are ranked using finite
+  sample count, missingness, observed range, local smoothness, discontinuities,
+  and baseline/event mean separation. Signed and unsigned alternatives remain
+  tied when the observations cannot distinguish them. Float candidates reject
+  frequent NaN/Inf, denormal-dominated, or extreme-magnitude interpretations.
+
+Generation is intentionally bounded. Only the most changed byte regions of at
+most 32 ranked messages are considered; fields are byte-aligned and limited to
+1, 2, and 4 bytes. A CAN FD payload can contain 64 bytes, but Phase 5 does not
+perform an exhaustive search of every range or arbitrary bit offset.
+
+### Correlation
+
+Correlation runs only for two numeric candidates explicitly selected by the
+user, over the Event interval. Samples are paired by nearest timestamp within
+the displayed tolerance; they are never paired merely by array index and one
+sample is never reused. Pearson's linear correlation coefficient is:
+
+```text
+r = sum((x - mean(x)) (y - mean(y)))
+    / sqrt(sum((x - mean(x))^2) sum((y - mean(y))^2))
+```
+
+At least five paired finite samples are required. Constant series report an
+undefined coefficient. The paired count, tolerance, and missing/invalid counts
+are shown. Correlation describes linear association, not causation, direction,
+command/feedback roles, or semantic identity.
+
+### Horizons, integrity, and performance
+
+An interval outside the current retained timestamps, an evicted baseline, a
+reversed/non-finite interval, or an interval without usable data is refused
+rather than compared as complete. Results preserve the selection bounds,
+FrameStore revision, sample counts, and capture-integrity snapshot. Application
+drops, pause-hidden frames, source/parse errors, out-of-order timing, and
+reported overruns remain visible. When driver overrun metrics are unavailable,
+the UI says so; unavailable is never converted to zero.
+
+Comparison scans only the two selected windows. Immutable results are cached by
+capture revision, both intervals, labels, integrity context, and candidate
+bounds. Comparison and selected correlation run in cancellable one-shot Qt
+workers, never on repaint or on every arriving frame. Clear and close cancel
+and join their workers deterministically.
+
+The complete feature remains receive-only. It does not replay traffic, perform
+active diagnostics, generate physical events, infer signal names or units,
+write a DBC, or mutate raw frames.
+
+---
+
+## Industrial definitions: EDS/DCF and CANopen Object Dictionaries
+
+Phase 6 adds imported industrial definitions as an interpretation layer inside
+the existing profile database. It deliberately keeps four categories apart:
+
+- **Observed** is immutable traffic retained from the CAN source.
+- **Defined** is metadata read from a named, hashed EDS/DCF file.
+- **Inferred** is evidence produced by passive analysis.
+- **User-defined** is a manual signal or explicit node association.
+
+Importing a definition never applies DCF bitrate/node settings, performs an SDO
+upload, sends NMT, remaps a PDO, or otherwise contacts a node. Unknown raw
+traffic remains visible whether or not a definition is loaded.
+
+### Provenance, validation, and persistence
+
+Every import records its source kind (EDS or DCF), display name and original
+path, SHA-256 content identity, UTC import time, advertised file version, and
+parser version. A path is not an identity: if its bytes change, the saved
+definition is marked **Changed** and requires an explicit re-import. If it is
+missing, its provenance and node association remain in the profile and it is
+marked **Missing** instead of crashing or silently disappearing. Parsed
+immutable definitions are cached by `(SHA-256, parser version)`; source files
+are not embedded wholesale in JSON configuration.
+
+Validation states are Valid, Valid With Warnings, Invalid, Unsupported
+Features, Missing, and Changed. Syntactic validity is separate from agreement
+with observed traffic. A valid EDS can still describe the wrong device.
+
+The implemented, synthetic-software-tested EDS/DCF subset is:
+
+- INI-style `FileInfo`, `DeviceInfo`, and `DeviceCommissioning` metadata;
+- `MandatoryObjects`, `OptionalObjects`, and `ManufacturerObjects` references;
+- hexadecimal object sections and `<index>sub<decimal>` subobject sections;
+- VAR (`ObjectType=7`), ARRAY (`8`), and RECORD (`9`);
+- `ParameterName`, `DataType`, `AccessType`, `DefaultValue`, `ParameterValue`,
+  `LowLimit`, `HighLimit`, `PDOMapping`, and `SubNumber`;
+- BOOLEAN, signed/unsigned 8/16/32/64-bit integers, REAL32/REAL64,
+  VISIBLE_STRING, OCTET_STRING, and visible-but-not-decoded DOMAIN metadata;
+- decimal, hexadecimal, signed values, and constrained `$NODEID` addition or
+  subtraction (including `0x180+$NODEID`) without `eval` or `exec`;
+- RPDO mappings at `0x1600..0x17FF`, TPDO mappings at
+  `0x1A00..0x1BFF`, and matching communication-parameter COB-IDs at
+  `0x1400..0x15FF` / `0x1800..0x19FF`.
+
+Compact object forms, external include/upload/download resources, arbitrary
+symbolic expressions, segmented/block SDO value reassembly, arbitrary data
+types, and complete CiA conformance are not claimed. Unknown manufacturer
+sections and fields are preserved as metadata with warnings where practical.
+
+### Association and passive interpretation
+
+The Database window has focused **Import EDS/DCF** and **Object Dictionary**
+actions. A definition is added to the selected profile (or a new profile when
+none exists), beside—not converted into—its DBC/manual signals. Re-importing
+identical content keeps the first provenance. A changed file offers explicit
+keep, replace-association, or import-another behavior.
+
+Node association is manual and constrained to node IDs 1 through 127, with an
+optional channel. A DCF `NodeID` is shown as configuration metadata and a
+mismatch with the user-associated observed node becomes a warning; it never
+overrides that association. Protocol Survey CANopen rows show the associated
+definition, object count, mapping count, and validation warnings, and link to
+the same Object Dictionary inspector.
+
+For a valid association, mapping entries are checked for total size, target
+existence, declared data-type length, `PDOMapping` permission, and observed
+payload length. Configured COB-IDs and constrained node-dependent defaults are
+resolved only after association. Matching retained PDO frames are decoded at
+bit precision, including signed and non-byte-aligned fields. Insufficient
+payloads are conflicts and are never zero-padded or truncated. The table labels
+each decoded value as observed and shows its EDS/DCF source; no unit or scale is
+invented.
+
+Existing passive expedited SDO-shaped observations gain Object Dictionary
+names and types. Unknown indexes remain raw, while missing objects, data-size
+mismatches, and conservative access-direction disagreements become warnings.
+No request is generated to fill missing information.
+
+DBC/manual signals and one or more EDS/DCF interpretations coexist. Overlapping
+payload regions and differing object names/types produce explicit,
+deterministic conflict records with both provenances. Raw observed length and
+bytes remain authoritative facts; there is no hidden global definition winner
+and no EDS-derived DBC export.
+
+### Import security and data licensing
+
+EDS/DCF input is treated as untrusted. Parsing is pure Python without Qt or
+source handles, limited to 32 MiB and 50,000 sections, uses strict duplicate
+section detection, does not execute expressions, load modules named by input,
+follow URLs/includes, access the network, invoke a shell, or write outside the
+normal profile/config workflow. The repository includes only small synthetic
+EDS/DCF fixtures authored for its tests. It bundles no vendor, proprietary,
+SPN, or industrial definition dataset; external data must have separately
+verified provenance and licensing.
+
+EDS/DCF behavior was software-tested against synthetic repository fixtures;
+no permissioned real-vendor file was available, so broad vendor
+interoperability is unqualified.
+
+---
+
+## Investigation projects
+
+Phase 7 adds an optional, durable investigation workflow without changing the
+ordinary capture workflow. A project records the context needed to resume and
+explain an investigation; it is not a capture and never becomes the source of
+truth for observed frames.
+
+Projects use inspectable UTF-8 JSON with the extension
+`.cansniff-project`. Schema version 3 contains stable UUIDs, timestamps,
+external capture references, the current baseline/event inputs, annotations,
+bookmarks, display-only filters, useful selections/workspace state, and a
+project-local snapshot of the selected interpretation profile. Large raw frame
+arrays and derived Traffic Profile, Protocol Survey, Compare, candidate, and
+diagnostic-conversation results are deliberately not stored. Diagnostic
+filters and stable logical selections are saved, while conversations are
+recomputed. Central analysis-version identifiers
+explain why recomputation under a newer application can legitimately differ.
+
+The selected profile is snapshotted because merely naming a mutable global
+ProfileStore entry would not be reproducible. This snapshot includes manual
+and DBC signals, EDS/DCF references, and CANopen node associations. It is
+applied as project-local interpretation and never inserts, replaces, or edits a
+global profile. A backed DBC retains its display name and SHA-256; a missing or
+changed source is reported while the unchanged snapshot remains usable.
+EDS/DCF references retain their existing source hashes and Missing/Changed
+resolution behavior; the external definition contents are not embedded.
+
+### Save, reopen, and recovery
+
+Open **Project** for New, Open, Save, Save As, capture attachment, annotations,
+bookmarks, and report generation. Project mode is optional and capture start
+never creates a project implicitly. Project writes are canonicalized and
+validated into a temporary file in the destination directory, flushed to
+disk, then atomically replaced. An interrupted replacement leaves the previous
+canonical file intact. Schema 0 migrates deterministically through schemas 1
+and 2 to schema 3; loading schema 1 adds an empty profile-matching decision
+history, while loading schema 2 adds empty diagnostic selections and pinned
+diagnostic analysis versions;
+unsupported future schemas, malformed types, excessive collections/depth,
+non-finite numbers, oversized files, and duplicate identities fail with a
+diagnostic. No pickle or executable serialization is used.
+
+Capture files stay external. Attaching a configured offline file records its
+absolute path, display name, format, byte size, SHA-256, application version,
+observed channels and retained time horizon, plus available receive/accept/
+process/drop/error integrity counters. Historical attachment metadata is not
+rewritten when current settings change. SHA-256 is streamed in 1 MiB chunks;
+results are held in a bounded 256-entry cache keyed by absolute path, size, and
+nanosecond modification/change times. This avoids hashing again on UI refresh while
+still invalidating normal file changes. Multi-gigabyte evidence is never read
+into memory, though its first explicit attach/load verification can take time.
+
+Missing evidence does not prevent project metadata from loading. **Locate
+missing/moved capture** accepts a new path automatically only when its hash
+matches. A different hash is marked Changed and requires explicit acceptance;
+acceptance updates the evidence identity and invalidates derived protocol and
+comparison outputs while retaining the user's saved interval inputs for explicit
+revalidation. A matching file at another path is marked Moved. A matching
+filename alone is never trusted. Saved comparison bounds are validated against
+recorded retained-range metadata, reported when unavailable or outside it, and
+never silently adjusted. **Open attached capture** only configures the offline
+source; playback still requires an explicit Start. Merely opening a project
+never opens physical CAN hardware, starts capture, follows a URL, or executes
+project content.
+
+Project dirty state covers title, capture association, comparison inputs,
+annotations, bookmarks, display filters, selected message, diagnostic
+filters/selections, active workspace,
+the project-local profile snapshot, and explicit profile-matching decisions.
+Live counters and analysis
+recomputation do not make a project dirty. New/Open/window-close follows the
+Save, Discard, Cancel convention. Global window layout, capture filters,
+hardware/backend settings, playback speed, and other application preferences
+remain in Config. In particular, a project display filter can never silently
+become a future live acquisition filter.
+
+### Annotations, bookmarks, and reports
+
+Annotations are plain-text user assertions at a point or range, with stable
+identity, creation/modification times, and optional tags. They can be added,
+edited, deleted, and navigated to the closest retained trace time. Rendering
+does not interpret annotation text as HTML or executable links.
+
+Bookmarks use stable logical targets rather than UI row numbers. The schema
+supports frame, timestamp, range, message, ISO-TP, protocol, comparison,
+Object Dictionary, and candidate targets; the UI creates message/time and
+ISO-TP transfer/conversation/DID/DTC bookmarks. If a target or capture cannot
+be resolved after reopen, the bookmark
+is retained and visibly marked unresolved rather than deleted.
+
+Reports are deterministic Markdown for a fixed project and generation time.
+They contain selected summaries—not raw frame dumps—and keep provenance
+categories explicit:
+
+- **Observed**: capture identity, availability, retained horizon, and integrity
+  limitations when current verified evidence is loaded.
+- **Inferred**: reproducible Protocol Survey evidence levels/reasons and ranked
+  comparison reasons, only when derived from the unchanged active evidence.
+- **Defined**: the project-local profile and hashed definition provenance.
+- **User-Annotated**: investigator-authored assertions, clearly labelled as
+  such, plus bookmarks.
+
+Reports include schema/application/analysis versions and capture/definition
+hashes, omit unnecessary machine-local absolute paths, escape HTML-significant
+annotation text, and disclose stale/missing/out-of-range limitations. Changing
+or missing evidence prevents in-memory derived snapshots from masquerading as
+current report evidence. PDF, embedded capture archives, collaboration/cloud
+sync, and broad vendor EDS/DCF interoperability are outside Phase 7.
+
+---
+
+## Local profile matching (Phase 8)
+
+**Profile Matches** compares the current immutable TrafficProfile facts with
+profiles already stored locally. It is a recommendation workspace, not an
+identity detector: running matching never changes the active profile, applies a
+database, or binds an EDS/DCF. The investigator must press **Use this profile**
+or **Associate definition**, review the displayed provenance and conflicts, and
+confirm the action. Structural results use only received evidence; matching
+does not access a network, open CAN hardware, transmit, execute definition
+content, or search an online catalog.
+
+The list keeps its factual measurements separate:
+
+- **Observed ID coverage** = matched observed message keys / all observed keys.
+- **Definition ID coverage** = observed candidate-defined keys / all defined
+  candidate keys.
+- **Weighted frame coverage** = frames on matched keys / all observed frames.
+- **Balanced frame coverage** caps each ID at four times the median observed
+  per-ID count, preventing one high-rate ID from concealing many misses.
+- **Structural compatibility** = matched keys whose payload length and
+  Classic/FD structure agree / all matched observed keys.
+
+The qualitative result is **None**, **Weak**, **Possible**, or **Strong**;
+structural matching never emits Confirmed. Ranking combines the labeled
+coverage facts and structural agreement with centralized contradiction
+penalties. Stable profile identity and display name provide deterministic tie
+ordering. Standard/extended identity, channel constraints, expected payload
+length, Classic/FD format, source availability, configured timing when present,
+protocol context, and CANopen node/PDO facts are checked explicitly. Conflicts
+remain visible and unmatched/proprietary traffic is retained in candidate
+details. Profile names are searchable metadata and never scoring evidence.
+
+DBC and manual adapters reuse the existing Profile/Signal representation. DBC
+source hashes and Missing/Changed state affect trust; manual profiles are
+explicitly treated as potentially partial. Multiplexing is not scored because
+the current Profile snapshot does not retain a complete message-level
+multiplexing model. EDS/DCF adapters reuse the Phase 6 parser and content cache.
+Generic EDS `$NODEID` values are resolved only for nodes already observed by
+the passive Protocol Survey, never by brute-forcing every node. DCF
+commissioning NodeID and configured PDO COB-IDs remain specific; a mismatch is
+surfaced rather than silently relocating the DCF. A possible association is
+only an action offered to the user.
+
+Silent captures produce no candidates. Missing/changed definitions remain
+inspectable with reduced trust and explicit caveats. Session-wide message
+counts drive ID coverage, while retained-horizon and integrity caveats disclose
+eviction and known loss; unavailable driver-overrun data stays unknown.
+Observed facts are precomputed once, candidate keys are indexed, shared
+definition hashes reuse the parser cache, and the revision cache is keyed by
+observed-fact identity, candidate-set identity, algorithm version, and settings.
+New traffic, Clear, profile/source changes, and project context changes
+invalidate suggestions. Matching runs in a cancellable Qt worker owned by the
+main window.
+
+Inside an investigation, accepting a suggestion snapshots the selected profile
+as project-local interpretation and records the user decision, capture hash,
+candidate-set identity, algorithm version, and optional definition/node/channel.
+It does not mutate the unrelated global ProfileStore. Outside a project, an
+explicit confirmation uses the existing global profile/association path.
+Reports label a current candidate as **inferred, not selected** and list
+accepted choices separately as **User decision**.
+
+Profile matching was software-tested against synthetic repository fixtures;
+real-world matching precision/recall remains unqualified. It remains structural
+only: there is no semantic ML classifier, fuzzy signal-name inference,
+automatic DBC generation, online profile discovery, or real-network accuracy
+claim.
 
 ---
 
@@ -639,6 +1362,35 @@ cansniff/
   interpret.py                 word splitting, decoders, scale/offset rules
   filters.py                   receive-side filter rules
   capture.py                   worker thread, bounded pipeline, frame logging
+  analysis/
+    definitions.py             shared provenance, validation, conflict, and J1939 interfaces
+    canopen_definitions.py     safe EDS/DCF parser, Object Dictionary, passive PDO/SDO enrichment
+    j1939_definitions.py       bounded local JSON PGN/SPN parser, cache, and unified decoder
+    matching.py                immutable local-profile facts, ranking, and revision cache
+    diagnostics.py             immutable ISO-TP endpoint/conversation/DID/DTC analysis + cache
+    profile.py                 immutable traffic/integrity snapshots + streaming accumulator
+    store.py                   shared bounded retained-frame history
+    protocols/
+      model.py                 immutable generic evidence and survey snapshots
+      canopen.py               passive COB-ID/node/heartbeat/SDO correlation
+      j1939.py                 pure 29-bit parser + PGN/source aggregation
+      j1939_transport.py       passive BAM/RTS-CTS sessions and normalized payloads
+      survey.py                ISO-TP/UDS adapters, Unknown result, revision cache
+    compare/
+      model.py                 immutable windows, differences, candidates, correlation results
+      engine.py                validation, factual comparison, ranking, revision cache
+      candidates.py            bounded counter/bitfield/checksum/numeric evidence
+      correlation.py           nearest-timestamp Pearson correlation
+  investigation/
+    model.py                   versioned immutable project entities and validation
+    io.py                      atomic JSON persistence and capture identity recovery
+    report.py                  deterministic evidence-separated Markdown reports
+  qualification/
+    model.py                   evidence levels, records, environments, matrix derivation
+    manifest.py               bounded local corpus schema and provenance enforcement
+    runner.py                 hash-first offline analyses and JSON/Markdown results
+    hardware.py               dry-run-by-default production-path hardware harness
+    stress.py / soak.py       opt-in scale and lifecycle qualification jobs
   sources/
     __init__.py                CanFrameSource: open / receive / close
     asc_reader.py              Vector ASC parser
@@ -649,12 +1401,20 @@ cansniff/
     widgets.py                 nav rail, chips, payload strip, delegates
     filter_bar.py              display filters, chips, clear-all
     main_window.py             window, top bar, capture lifecycle
+    bus_overview.py            factual BUS and capture-integrity dialog
+    protocols_view.py          non-blocking Protocol Survey and detail tables
+    isotp_view.py              transfers plus peer/conversation/DID/DTC investigation
+    object_dictionary_window.py imported facts beside passive CANopen observations
+    compare_view.py            baseline/event ranking and structural detail workspace
+    investigation_window.py    project summary, annotation, bookmark, and file actions
+    profile_matches_view.py    searchable suggestions and explicit activation actions
     tables.py                  ID and trace models, search proxy, delegates
     interpret_view.py          the interpretation panel
     filter_dialog.py           filter editor
     signal_dialog.py           scale/offset editor
     config_dialog.py           settings + raw JSON editor
-tests/                         offline tests; none open a CAN interface
+tests/                         ordinary offline tests; hardware tests mock live operations
+qualification/                 manifests, reports, policy, and current evidence matrix
 ```
 
 Capture runs on a worker thread, so slow rendering, filtering or logging cannot
@@ -668,12 +1428,19 @@ rather than queued without limit.
 .\.venv\Scripts\python.exe -m unittest discover -s tests -t .
 ```
 
-125 tests covering payload splitting and decoding, capture-filter evaluation,
+The test suite covers payload splitting and decoding, capture-filter evaluation,
 display filtering, ASC parsing, offline playback, the listen-only refusal
 logic, and payload block selection — including regression guards that a block's
 displayed index names only bytes it actually contains, that changing the block
 size never leaves the strip highlighting a block that is no longer selected,
 that a newly seen ID is sorted into place rather than appended, and that
 clearing filters restores the complete dataset. The UI tests run headless
-against Qt's offscreen platform. Every fixture is constructed in-process or
-read from a file — no test opens a CAN interface, and none transmits.
+against Qt's offscreen platform. Phase 10 fixtures also cover positive and
+negative conversations, ambiguity, overlapping DIDs, validated DTC layouts,
+malformed/truncated payloads, integrity caveats, logical bookmarks, project
+restoration, and a 100,000-transfer/2,000-peer cache/performance shape. Every
+fixture is constructed in-process or
+read from a file — no ordinary test opens a CAN interface, and none transmits.
+Qualification and hardware harness tests are separated under
+`tests/qualification` and `tests/hardware`; the physical harness remains a
+manual command with an exact opt-in confirmation token.

@@ -1,0 +1,140 @@
+[FileInfo]
+FileName=synthetic_drive.eds
+FileVersion=1
+EDSVersion=4.0
+
+[DeviceInfo]
+VendorName=Synthetic Repository Fixture
+ProductName=Passive Drive
+
+[MandatoryObjects]
+SupportedObjects=2
+1=0x1000
+2=0x1018
+
+[OptionalObjects]
+SupportedObjects=2
+1=0x6041
+2=0x606C
+
+[1000]
+ParameterName=Device Type
+ObjectType=0x7
+DataType=0x0007
+AccessType=ro
+DefaultValue=0x00000000
+PDOMapping=0
+
+[1018]
+ParameterName=Identity Object
+ObjectType=0x9
+SubNumber=2
+
+[1018sub0]
+ParameterName=Number of entries
+ObjectType=0x7
+DataType=0x0005
+AccessType=ro
+DefaultValue=1
+PDOMapping=0
+
+[1018sub1]
+ParameterName=Vendor ID
+ObjectType=0x7
+DataType=0x0007
+AccessType=ro
+DefaultValue=0x12345678
+PDOMapping=0
+VendorNote=synthetic-only
+
+[1800]
+ParameterName=TPDO1 communication parameter
+ObjectType=0x9
+SubNumber=2
+
+[1800sub0]
+ParameterName=Number of entries
+ObjectType=0x7
+DataType=0x0005
+AccessType=ro
+DefaultValue=1
+PDOMapping=0
+
+[1800sub1]
+ParameterName=COB-ID used by TPDO1
+ObjectType=0x7
+DataType=0x0007
+AccessType=rw
+DefaultValue=0x180+$NODEID
+PDOMapping=0
+
+[1A00]
+ParameterName=TPDO1 mapping parameter
+ObjectType=0x9
+SubNumber=3
+
+[1A00sub0]
+ParameterName=Number of mapped objects
+ObjectType=0x7
+DataType=0x0005
+AccessType=rw
+DefaultValue=2
+PDOMapping=0
+
+[1A00sub1]
+ParameterName=Mapped object 1
+ObjectType=0x7
+DataType=0x0007
+AccessType=rw
+DefaultValue=0x60410010
+PDOMapping=0
+
+[1A00sub2]
+ParameterName=Mapped object 2
+ObjectType=0x7
+DataType=0x0007
+AccessType=rw
+DefaultValue=0x606C0020
+PDOMapping=0
+
+[6041]
+ParameterName=Statusword
+ObjectType=0x7
+DataType=0x0006
+AccessType=ro
+DefaultValue=0
+LowLimit=0
+HighLimit=0xFFFF
+PDOMapping=1
+
+[606C]
+ParameterName=Velocity actual value
+ObjectType=0x7
+DataType=0x0004
+AccessType=ro
+DefaultValue=-1
+PDOMapping=1
+
+[2000]
+ParameterName=Samples
+ObjectType=0x8
+SubNumber=2
+
+[2000sub0]
+ParameterName=Number of entries
+ObjectType=0x7
+DataType=0x0005
+AccessType=ro
+DefaultValue=1
+PDOMapping=0
+
+[2000sub1]
+ParameterName=Sample
+ObjectType=0x7
+DataType=0x0002
+AccessType=rw
+ParameterValue=-2
+PDOMapping=1
+
+[ManufacturerExtension]
+FixtureLicense=Created for this repository

@@ -244,6 +244,8 @@ class IdTableModel(QAbstractTableModel):
         marks = "29-bit" if frame.is_extended else "11-bit"
         if frame.is_fd:
             marks += " FD"
+        if frame.is_error_state_indicator:
+            marks += " ESI"
         if frame.is_error_frame:
             marks += " error"
         if frame.is_remote_frame:

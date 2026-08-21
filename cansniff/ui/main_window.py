@@ -9,11 +9,15 @@ Capture still runs on a worker thread; this window only consumes frames.
 
 from __future__ import annotations
 
+import copy
+import json
 import os
+import tempfile
+import threading
 import time
 from typing import Dict, List, Optional
 
-from PySide6.QtCore import QThread, Qt, QTimer, Signal
+from PySide6.QtCore import QObject, QThread, Qt, QTimer, Signal, Slot
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QFileDialog, QFrame, QHBoxLayout,
@@ -21,9 +25,21 @@ from PySide6.QtWidgets import (
     QSplitter, QStackedWidget, QTableView, QVBoxLayout, QWidget,
 )
 
+from .. import __version__
 from ..analysis.dbc import DbcDatabase
+from ..analysis.compare import (
+    ComparisonCache, ComparisonCancelled, correlate_candidates,
+)
 from ..analysis.isotp_survey import IsoTpSurveyCache
-from ..analysis.signals import ProfileStore, build_dbc_database
+from ..analysis.profile import (
+    CaptureIntegrityAccumulator, SourceState, TrafficProfileAccumulator,
+    TrafficProfileSnapshot,
+)
+from ..analysis.matching import (
+    ProfileMatchCache, ProfileMatchingCancelled, candidate_set_identity,
+)
+from ..analysis.protocols import ProtocolSurveyCache, SurveyCancelled
+from ..analysis.signals import Profile, ProfileStore, build_dbc_database
 from ..analysis.store import FrameStore
 from ..capture import CaptureWorker, FrameLogger
 from ..config import Config
@@ -32,19 +48,37 @@ from ..export import (
 )
 from ..filters import FilterSet
 from ..model import CanFrame
+from ..investigation import (
+    Annotation, Bookmark, BookmarkKind, CaptureReferenceStatus, ComparisonDefinition,
+    InvestigationProject, PROJECT_EXTENSION, ProjectError, ReportContext,
+    ProfileMatchAction, ProfileMatchDecision,
+    attach_capture, generate_markdown_report, load_project, new_project,
+    relocate_capture, save_project, validate_comparisons, verify_capture,
+)
+from ..investigation.model import new_id, utc_now
+from ..investigation.io import hash_file
 from ..sources import SourceError, build_source
 from .config_dialog import ConfigDialog
+from .compare_view import CompareView
+from .bus_overview import BusOverviewDialog
 from .database_window import DatabaseWindow
+from .discovery_dialog import DiscoveryDialog
 from .filter_bar import FilterBar
 from .filter_dialog import FilterDialog
 from .interpret_view import MESSAGES, TRACE, InterpretView
 from .isotp_view import IsoTpView
+from .investigation_window import InvestigationWindow
+from .protocols_view import ProtocolsView
+from .profile_matches_view import ProfileMatchesView
 from .tables import (
     ByteHighlightDelegate, IdFilterProxy, IdTableModel, KEY_ROLE, TraceTableModel,
     exemplar_widths,
 )
 from .theme import ROW_HEIGHT_COMPACT, SPACE_LG, SPACE_MD, SPACE_SM, Theme
-from .widgets import Chip, CurrentPageStack, MetricChip, NavRail, SectionLabel, scrollable
+from .widgets import (
+    Chip, CurrentPageStack, MetricChip, NavRail, SectionLabel,
+    fit_top_level_to_screen, scrollable,
+)
 
 #: Minimum spacing between ISO-TP survey rebuilds while frames are still
 #: arriving -- see MainWindow._refresh_isotp. A live capture can bump the
@@ -52,6 +86,151 @@ from .widgets import Chip, CurrentPageStack, MetricChip, NavRail, SectionLabel, 
 #: capture that often would make the window stutter for a result nobody can
 #: read that fast.
 _ISOTP_MIN_INTERVAL = 1.5
+
+
+class _ProtocolSurveyWorker(QObject):
+    """Runs a pure retained-window survey away from Qt's UI thread."""
+
+    finished = Signal()
+
+    def __init__(self, cache, window, profile):
+        super().__init__()
+        self.cache = cache
+        self.window = window
+        self.profile = profile
+        self.result = None
+        self.error = ""
+        self._cancelled = threading.Event()
+
+    def cancel(self) -> None:
+        self._cancelled.set()
+
+    @property
+    def cancelled(self) -> bool:
+        return self._cancelled.is_set()
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            self.result = self.cache.build(
+                self.window, self.profile, self._cancelled.is_set)
+        except SurveyCancelled:
+            pass
+        except Exception as exc:
+            self.error = str(exc)
+        finally:
+            self.finished.emit()
+
+
+class _ComparisonWorker(QObject):
+    """Builds one immutable baseline/event comparison away from the UI."""
+
+    finished = Signal()
+
+    def __init__(self, cache, store, comparison_input, profile):
+        super().__init__()
+        self.cache = cache
+        self.store = store
+        self.comparison_input = comparison_input
+        self.profile = profile
+        self.result = None
+        self.error = ""
+        self._cancelled = threading.Event()
+
+    def cancel(self) -> None:
+        self._cancelled.set()
+
+    @property
+    def cancelled(self) -> bool:
+        return self._cancelled.is_set()
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            self.result = self.cache.build(
+                self.store, self.comparison_input, self.profile,
+                self._cancelled.is_set)
+        except ComparisonCancelled:
+            pass
+        except Exception as exc:
+            self.error = str(exc)
+        finally:
+            self.finished.emit()
+
+
+class _CorrelationWorker(QObject):
+    """Extracts and correlates only the two fields explicitly selected."""
+
+    finished = Signal()
+
+    def __init__(self, window, left, right, tolerance):
+        super().__init__()
+        self.window = window
+        self.left = left
+        self.right = right
+        self.tolerance = tolerance
+        self.result = None
+        self.error = ""
+        self._cancelled = threading.Event()
+
+    def cancel(self) -> None:
+        self._cancelled.set()
+
+    @property
+    def cancelled(self) -> bool:
+        return self._cancelled.is_set()
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            if not self.cancelled:
+                result = correlate_candidates(
+                    self.window, self.left, self.right, self.tolerance)
+                if not self.cancelled:
+                    self.result = result
+        except Exception as exc:
+            self.error = str(exc)
+        finally:
+            self.finished.emit()
+
+
+class _ProfileMatchWorker(QObject):
+    """Matches immutable facts and a copied ProfileStore off the UI thread."""
+
+    finished = Signal()
+
+    def __init__(self, cache, traffic, store, protocols, capture_identity,
+                 frame_revision):
+        super().__init__()
+        self.cache = cache
+        self.traffic = traffic
+        self.store = store
+        self.protocols = protocols
+        self.capture_identity = capture_identity
+        self.frame_revision = frame_revision
+        self.result = None
+        self.error = ""
+        self._cancelled = threading.Event()
+
+    def cancel(self) -> None:
+        self._cancelled.set()
+
+    @property
+    def cancelled(self) -> bool:
+        return self._cancelled.is_set()
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            self.result = self.cache.build(
+                self.traffic, self.store, self.protocols,
+                self.capture_identity, cancelled=self._cancelled.is_set)
+        except ProfileMatchingCancelled:
+            pass
+        except Exception as exc:
+            self.error = str(exc)
+        finally:
+            self.finished.emit()
 
 
 class MainWindow(QMainWindow):
@@ -75,10 +254,16 @@ class MainWindow(QMainWindow):
     _NAV_MESSAGES = 0
     _NAV_TRACE = 1
     _NAV_ISOTP = 2
+    _NAV_PROTOCOLS = 3
+    _NAV_COMPARE = 4
+    _NAV_PROFILE_MATCHES = 5
 
     #: self.top_stack's two pages -- see _build_ui.
     _STACK_BROWSER = 0
     _STACK_ISOTP = 1
+    _STACK_PROTOCOLS = 2
+    _STACK_COMPARE = 3
+    _STACK_PROFILE_MATCHES = 4
 
     #: Shared floor for every top-bar button's *minimum* width (not its
     #: preferred/shown width, which stays whatever its label needs — see
@@ -107,6 +292,8 @@ class MainWindow(QMainWindow):
 
         self._thread: Optional[QThread] = None
         self._worker: Optional[CaptureWorker] = None
+        self._discovery_dialog: Optional[DiscoveryDialog] = None
+        self._bus_overview: Optional[BusOverviewDialog] = None
         #: Idle / Running / Paused / Stopping — see _apply_capture_state.
         self._capture_state = self._IDLE
         #: Re-entrancy guard for _apply_capture_state <-> _on_pause_toggled:
@@ -163,6 +350,11 @@ class MainWindow(QMainWindow):
         #: to the same frames the tables show, bounded like the trace view.
         self.frame_store = FrameStore(
             int(config.get("capture.max_frames_retained", 200000)))
+        #: Protocol-neutral session facts are accumulated on this UI ingestion
+        #: path.  It is O(payload width) per delivered frame and never rescans
+        #: FrameStore; immutable snapshots are only built on demand/status tick.
+        self.traffic_profile = TrafficProfileAccumulator()
+        self.integrity_accumulator = CaptureIntegrityAccumulator()
         #: Active DBC, or None. Decoding is always optional — the application
         #: stays fully usable on unknown, undocumented traffic. Built from
         #: profile_store.active_profile — see _apply_profile_store.
@@ -171,6 +363,14 @@ class MainWindow(QMainWindow):
         #: active. Replaces the old separate dbc.path / signals config keys;
         #: see analysis/signals.py.
         self.profile_store: ProfileStore = ProfileStore()
+        #: Optional investigation context. It never owns a source or bus.
+        self.project: Optional[InvestigationProject] = None
+        self._project_path = ""
+        self._project_dirty = False
+        self._project_loading = False
+        self._project_profile_snapshot_active = False
+        self._project_verification = None
+        self._investigation_window: Optional[InvestigationWindow] = None
 
         #: ISO-TP surveys the whole capture, not one selected message (see
         #: _refresh_isotp) -- it is a top-level workspace in its own right,
@@ -183,6 +383,36 @@ class MainWindow(QMainWindow):
         self._isotp_built_at: Optional[float] = None
         self._isotp_note = ""
         self._sized_isotp = False
+
+        #: Unified Protocol Survey state. The analysis itself is pure and
+        #: cached by retained revision; only this window owns its QThread.
+        self._protocol_cache = ProtocolSurveyCache()
+        self._protocol_thread: Optional[QThread] = None
+        self._protocol_worker: Optional[_ProtocolSurveyWorker] = None
+        self._protocol_snapshot = None
+        self._protocol_pending = False
+        self._protocol_closing = False
+        self._protocol_refresh_timer = QTimer(self)
+        self._protocol_refresh_timer.setSingleShot(True)
+        self._protocol_refresh_timer.timeout.connect(self._refresh_protocols)
+
+        #: Baseline/event comparison and selected correlation have independent
+        #: one-shot workers. Neither restarts on incoming frames or repaint.
+        self._comparison_cache = ComparisonCache()
+        self._comparison_thread: Optional[QThread] = None
+        self._comparison_worker: Optional[_ComparisonWorker] = None
+        self._comparison_snapshot = None
+        self._correlation_thread: Optional[QThread] = None
+        self._correlation_worker: Optional[_CorrelationWorker] = None
+        self._compare_closing = False
+
+        #: Local structural suggestions have their own one-shot worker and
+        #: cache. A result never changes ProfileStore by itself.
+        self._profile_match_cache = ProfileMatchCache()
+        self._profile_match_thread: Optional[QThread] = None
+        self._profile_match_worker: Optional[_ProfileMatchWorker] = None
+        self._profile_match_snapshot = None
+        self._profile_match_closing = False
 
         self._build_ui()
         self._apply_capture_state(self._IDLE)
@@ -220,7 +450,7 @@ class MainWindow(QMainWindow):
         banner_wrap.setVisible(False)
         outer.addWidget(banner_wrap)
 
-        # Primary navigation: Messages / Trace / ISO-TP. The icon rail is a
+        # Primary navigation: Messages / Trace / ISO-TP / Protocols / Compare.
         # permanent fixture beside whichever top-level section is active —
         # not just inside the Messages/Trace packet-list sidebar — so ISO-TP
         # is always one click away and never a detour through Messages. See
@@ -233,6 +463,12 @@ class MainWindow(QMainWindow):
                                     "the whole capture — every CAN ID, not "
                                     "just the one selected in Messages or "
                                     "Trace"),
+                ("survey", "Protocols", "Explainable passive CANopen, J1939, "
+                                          "ISO-TP, UDS and Unknown evidence"),
+                ("compare", "Compare", "Baseline/event structural change ranking "
+                                          "without semantic guesses"),
+                ("match", "Matches", "Explainable structural suggestions from "
+                                       "local profiles; never auto-applied"),
             ],
             self.theme,
             # Messages/Trace double as a collapse toggle for the packet list
@@ -249,7 +485,7 @@ class MainWindow(QMainWindow):
         content_row.addWidget(self.nav)
 
         self.browser_panel = self._build_browser()
-        self.browser_panel.setMinimumWidth(330)
+        self.browser_panel.setMinimumWidth(220)
 
         self.splitter = QSplitter(Qt.Horizontal)
         self.splitter.setChildrenCollapsible(False)
@@ -260,7 +496,7 @@ class MainWindow(QMainWindow):
         workspace_layout.setContentsMargins(SPACE_MD, SPACE_MD, SPACE_MD, SPACE_MD)
         workspace_layout.setSpacing(0)
         self.interpret_view = InterpretView(self.config, self.theme)
-        self.interpret_view.setMinimumWidth(520)
+        self.interpret_view.setMinimumWidth(280)
         workspace_layout.addWidget(self.interpret_view, 1)
         self.splitter.addWidget(workspace)
 
@@ -275,6 +511,19 @@ class MainWindow(QMainWindow):
         browser_workspace_layout.addWidget(self.splitter)
 
         isotp_page = self._build_isotp_workspace()
+        self.protocols_view = ProtocolsView(self.theme)
+        self.protocols_view.definitionStoreChanged.connect(
+            self._on_profile_store_changed)
+        self.compare_view = CompareView(self.theme)
+        self.compare_view.compareRequested.connect(self._start_comparison)
+        self.compare_view.correlationRequested.connect(self._start_correlation)
+        self.compare_view.intervalsChanged.connect(self._on_project_intervals_changed)
+        self.profile_matches_view = ProfileMatchesView(self.theme)
+        self.profile_matches_view.matchRequested.connect(self._start_profile_matching)
+        self.profile_matches_view.useProfileRequested.connect(
+            self._use_profile_match)
+        self.profile_matches_view.associateRequested.connect(
+            self._associate_profile_match)
 
         # CurrentPageStack, not a plain QStackedWidget: ISO-TP's own stacked
         # evidence/transfers/frames tables have a real, largely fixed
@@ -284,6 +533,11 @@ class MainWindow(QMainWindow):
         self.top_stack = CurrentPageStack()
         self.top_stack.addWidget(browser_workspace)             # 0 Messages/Trace
         self.top_stack.addWidget(scrollable(isotp_page))        # 1 ISO-TP
+        self.top_stack.addWidget(scrollable(self.protocols_view))       # 2 Protocol Survey
+        self.top_stack.addWidget(scrollable(self.compare_view))         # 3 Compare
+        self.top_stack.addWidget(scrollable(self.profile_matches_view)) # 4 Profile Matches
+        self.top_stack.currentChanged.connect(self._on_project_ui_state_changed)
+        self.browser_stack.currentChanged.connect(self._on_project_ui_state_changed)
         content_row.addWidget(self.top_stack, 1)
 
         outer.addLayout(content_row, 1)
@@ -295,6 +549,7 @@ class MainWindow(QMainWindow):
         self.resize(int(size.get("width", 1640)), int(size.get("height", 940)))
 
         self._min_sidebar = self.browser_panel.minimumWidth()
+        self._min_workspace = self.interpret_view.minimumWidth()
         self._sidebar_width = max(
             self._min_sidebar, int(self.config.get("ui.sidebar_width", 470))
         )
@@ -348,6 +603,9 @@ class MainWindow(QMainWindow):
 
         self.isotp_view = IsoTpView(self.config, self.theme)
         self.isotp_view.frameActivated.connect(self._on_isotp_frame_activated)
+        self.isotp_view.bookmarkRequested.connect(self._bookmark_isotp_target)
+        self.isotp_view.diagnosticSelectionChanged.connect(
+            self._on_project_ui_state_changed)
         layout.addWidget(self.isotp_view, 1)
         return page
 
@@ -393,14 +651,16 @@ class MainWindow(QMainWindow):
             # entirely, so 0 here (rather than some small floor) is enough —
             # unlike the old icon-rail-inside-the-splitter arrangement, there
             # is nothing left in this pane that still needs room.
-            self.splitter.setSizes([0, max(520, total_width)])
+            self.splitter.setSizes([0, max(1, total_width)])
         else:
             self.browser_panel.setMinimumWidth(self._min_sidebar)
             self.browser_panel.setMaximumWidth(16777215)
-            total = max(total_width, self._sidebar_width + 520)
-            self.splitter.setSizes(
-                [self._sidebar_width, max(520, total - self._sidebar_width)]
+            total = max(1, total_width)
+            sidebar = min(
+                self._sidebar_width,
+                max(self._min_sidebar, total - self._min_workspace),
             )
+            self.splitter.setSizes([sidebar, max(1, total - sidebar)])
         if remember:
             self._selector_on[current_page] = not collapsed
             self.config.set("ui.sidebar_collapsed", collapsed)
@@ -425,7 +685,7 @@ class MainWindow(QMainWindow):
         sits beside the splitter (see content_row in _build_ui), not inside
         it.
         """
-        return self.width() - self.nav.WIDTH
+        return max(1, self.width() - self.nav.WIDTH)
 
     def _remember_width(self) -> None:
         sizes = self.splitter.sizes()
@@ -439,21 +699,27 @@ class MainWindow(QMainWindow):
     def _build_top_bar(self) -> QWidget:
         bar = QFrame()
         bar.setObjectName("TopBar")
-        row = QHBoxLayout(bar)
-        row.setContentsMargins(SPACE_LG, SPACE_MD, SPACE_LG, SPACE_MD)
-        row.setSpacing(SPACE_SM)
+        rows = QVBoxLayout(bar)
+        rows.setContentsMargins(SPACE_LG, SPACE_MD, SPACE_LG, SPACE_MD)
+        rows.setSpacing(SPACE_SM)
+        primary_row = QHBoxLayout()
+        primary_row.setSpacing(SPACE_SM)
+        secondary_row = QHBoxLayout()
+        secondary_row.setSpacing(SPACE_SM)
+        rows.addLayout(primary_row)
+        rows.addLayout(secondary_row)
 
         title_block = QVBoxLayout()
         title_block.setSpacing(0)
         title = QLabel("CAN Sniffer")
         title.setObjectName("AppTitle")
         title_block.addWidget(title)
-        row.addLayout(title_block)
+        primary_row.addLayout(title_block)
         # Lowers only the hard floor, same reasoning as _bar_button below —
         # the title still shows in full at any realistic window width.
         title.setMinimumWidth(min(title.sizeHint().width(), self._BAR_BUTTON_MIN_WIDTH))
 
-        row.addSpacing(SPACE_LG)
+        primary_row.addSpacing(SPACE_LG)
 
         self.start_button = self._bar_button("Start", primary=True, slot=self.start_capture,
                                              tip="Open the configured source and begin "
@@ -479,18 +745,23 @@ class MainWindow(QMainWindow):
                 "The capture log on disk, the loaded database and the filters "
                 "are untouched  (Ctrl+L)",
         )
+        self.discover_button = self._bar_button(
+            "Auto Discover", slot=self._auto_discover, ghost=True,
+            tip="Enumerate supported adapters and test Classic CAN bitrates "
+                "using passive-only backend policy",
+        )
         for button in (self.start_button, self.stop_button, self.pause_button,
                        self.clear_button):
-            row.addWidget(button)
+            primary_row.addWidget(button)
 
-        row.addStretch(1)
+        primary_row.addStretch(1)
 
         # Capped, not left to grow with whatever the configured file path or
         # live interface name happens to be — see _set_chip_text.
         self.source_chip = Chip("no source", "muted", self.theme)
         self.source_chip.setMaximumWidth(self._CHIP_MAX_WIDTH)
-        row.addWidget(self.source_chip)
-        row.addSpacing(SPACE_SM)
+        primary_row.addWidget(self.source_chip)
+        primary_row.addSpacing(SPACE_SM)
 
         self.dbc_chip = Chip("no database", "muted", self.theme)
         self.dbc_chip.setMaximumWidth(self._CHIP_MAX_WIDTH)
@@ -498,13 +769,19 @@ class MainWindow(QMainWindow):
             "No database applied. Frames are shown raw — which is all this "
             "tool ever needs to be useful."
         )
-        row.addWidget(self.dbc_chip)
-        row.addSpacing(SPACE_SM)
+        primary_row.addWidget(self.dbc_chip)
+
+        secondary_row.addWidget(self.discover_button)
+        secondary_row.addStretch(1)
 
         # One button, one concept: a DBC's message-bound signals and the old
         # "scaled value" byte rules are both just Signals now — see
         # analysis/signals.py and ui/database_window.py.
         for text, slot, tip in (
+            ("BUS", self._show_bus_overview,
+             "Show factual session traffic and capture-integrity observations"),
+            ("Project", self._show_investigation,
+             "New, open, save, annotate and report an investigation project"),
             ("Database", self._edit_database_window,
              "Create, import, export and edit signal databases, and choose "
              "which one — if any — decodes captured traffic"),
@@ -516,7 +793,8 @@ class MainWindow(QMainWindow):
              "captured, use the filter bar above the table."),
             ("Settings", self._edit_settings, "Source, capture, display and raw configuration"),
         ):
-            row.addWidget(self._bar_button(text, slot=slot, ghost=True, tip=tip))
+            secondary_row.addWidget(
+                self._bar_button(text, slot=slot, ghost=True, tip=tip))
         return bar
 
     def _bar_button(self, text: str, slot=None, primary: bool = False, ghost: bool = False,
@@ -658,7 +936,12 @@ class MainWindow(QMainWindow):
         row.setSpacing(SPACE_LG)
 
         self.metric_received = MetricChip("Received", self.theme)
-        self.metric_dropped = MetricChip("Dropped", self.theme, "muted")
+        self.metric_dropped = MetricChip("UI dropped", self.theme, "muted")
+        self.metric_dropped.setToolTip(
+            "Frames accepted by capture filters but not delivered to the views "
+            "because the bounded UI pipeline was full. This is not a driver "
+            "or bus-overrun metric."
+        )
         self.metric_ids = MetricChip("IDs", self.theme)
         self.metric_rate = MetricChip("Rate", self.theme, "muted")
         for metric in (self.metric_received, self.metric_dropped,
@@ -669,6 +952,7 @@ class MainWindow(QMainWindow):
 
         self.status_message = QLabel("Idle — press Start")
         self.status_message.setObjectName("Caption")
+        self.status_message.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         row.addWidget(self.status_message)
 
         divider = QFrame()
@@ -745,6 +1029,91 @@ class MainWindow(QMainWindow):
         chip.setToolTip(text)
 
     # ------------------------------------------------------------------
+    # protocol-neutral traffic overview
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _worker_integrity_counts(worker: CaptureWorker) -> Dict[str, int]:
+        return {
+            "received": worker.received,
+            "accepted": worker.accepted,
+            "ui_dropped": worker.dropped,
+            "pause_hidden": worker.display_skipped,
+            "source_errors": worker.source_errors,
+            "logger_failures": worker.logger_failures,
+        }
+
+    @staticmethod
+    def _worker_optional_metric(worker: CaptureWorker, name: str,
+                                baseline_name: str) -> Optional[int]:
+        source = getattr(worker, "_source", None)
+        value = getattr(source, name, None)
+        if value is None:
+            return None
+        baseline = getattr(worker, baseline_name, 0)
+        return max(0, int(value) - int(baseline))
+
+    def _profile_snapshot(self) -> TrafficProfileSnapshot:
+        worker = self._worker
+        current = None
+        parse_errors = driver_overruns = None
+        if worker is not None:
+            current = self._worker_integrity_counts(worker)
+            parse_errors = self._worker_optional_metric(
+                worker, "skipped_lines", "_integrity_parse_baseline")
+            driver_overruns = self._worker_optional_metric(
+                worker, "driver_overruns", "_integrity_driver_baseline")
+        integrity = self.integrity_accumulator.snapshot(
+            processed=self.traffic_profile.processed_frames,
+            retained=len(self.frame_store),
+            current=current,
+            current_parse_errors=parse_errors,
+            driver_overruns=driver_overruns,
+        )
+        return self.traffic_profile.snapshot(self.frame_store, integrity)
+
+    def _overview_source_text(self) -> str:
+        if str(self.config.get("source.type", "file")) == "file":
+            return str(self.config.get("source.file.path", "")) or "capture file not selected"
+        return "{} / channel {}".format(
+            self.config.get("source.live.interface", "?"),
+            self.config.get("source.live.channel", "?"),
+        )
+
+    def _overview_mode_text(self) -> str:
+        if str(self.config.get("source.type", "file")) == "file":
+            return "offline playback"
+        source = getattr(self._worker, "_source", None)
+        verified = getattr(source, "passive_verified", None)
+        if verified is True:
+            return "passive / listen-only verified"
+        if verified is False:
+            return "receive-only application; passive hardware mode not verified"
+        return "passive mode required; not currently verified"
+
+    def _overview_bitrate_text(self) -> str:
+        if str(self.config.get("source.type", "file")) == "file":
+            return "unavailable from normalized capture frames"
+        value = int(self.config.get("source.live.bitrate", 0) or 0)
+        return "{:g} kbit/s (configured)".format(value / 1000.0) if value else "unavailable"
+
+    def _update_bus_overview(self) -> None:
+        if self._bus_overview is None:
+            return
+        self._bus_overview.set_snapshot(
+            self._profile_snapshot(), self._overview_source_text(),
+            self._overview_mode_text(), self._overview_bitrate_text(),
+        )
+
+    def _show_bus_overview(self) -> None:
+        if self._bus_overview is None:
+            self._bus_overview = BusOverviewDialog(self.theme, self)
+        self._update_bus_overview()
+        self._bus_overview.show()
+        self._bus_overview.raise_()
+        self._bus_overview.activateWindow()
+
+    # ------------------------------------------------------------------
     # capture control
     # ------------------------------------------------------------------
 
@@ -761,6 +1130,9 @@ class MainWindow(QMainWindow):
             # fresh timeline, exactly like a capture's very first Start.
             source = build_source(self.config, resume_from=self._playback_high_water)
         except SourceError as exc:
+            self.integrity_accumulator.commit(
+                {"source_errors": 1}, state=SourceState.ERROR)
+            self._update_bus_overview()
             QMessageBox.critical(self, "Cannot start capture", str(exc))
             return
 
@@ -772,6 +1144,8 @@ class MainWindow(QMainWindow):
                     str(self.config.get("logging.format", "csv")),
                 )
             except Exception as exc:
+                self.integrity_accumulator.commit({"logger_failures": 1})
+                self._update_bus_overview()
                 QMessageBox.warning(self, "Logging disabled", str(exc))
 
         worker = CaptureWorker(
@@ -789,7 +1163,11 @@ class MainWindow(QMainWindow):
         worker.errorOccurred.connect(self._on_error)
         worker.statusChanged.connect(self.status_message.setText)
         worker.started.connect(self._on_source_started)
-        worker.sourceFinished.connect(self._on_source_finished)
+        # run() blocks the capture thread's event loop. Quit it directly when
+        # the worker has closed its source, then release QObject references
+        # only after QThread confirms it has finished.
+        worker.sourceFinished.connect(thread.quit, Qt.DirectConnection)
+        thread.finished.connect(self._on_thread_finished)
         # DirectConnection, emphatically. worker.run() is a blocking receive
         # loop, so the capture thread never reaches QThread::exec() and never
         # processes a queued slot call. With the default AutoConnection this
@@ -803,6 +1181,10 @@ class MainWindow(QMainWindow):
 
         self._worker = worker
         self._thread = thread
+        # Optional source counters are session-relative. Clear advances these
+        # baselines without touching the source or restarting reception.
+        worker._integrity_parse_baseline = 0
+        worker._integrity_driver_baseline = 0
         self._last_received = 0
         self._last_rate_at = time.monotonic()
         # A fresh worker starts at zero drops; carrying the previous capture's
@@ -826,20 +1208,50 @@ class MainWindow(QMainWindow):
         self._lock_interactions()
 
     def _teardown_thread(self) -> None:
-        if self._thread is not None:
-            self._thread.quit()
-            self._thread.wait(3000)
-            self._thread = None
+        thread = self._thread
+        if thread is None:
+            self._apply_capture_state(self._IDLE)
+            return
+        if self._worker is not None:
+            self._worker.request_stop()
+        thread.quit()
+        # Teardown is the synchronous path used by close and tests. Never
+        # discard the worker while run() can still be executing.
+        thread.wait()
+        self._finalize_thread(thread)
+
+    def _finalize_thread(self, thread: QThread) -> None:
+        if thread is not self._thread:
+            return
+        # Take final counters while the worker wrapper is still owned here.
+        self._update_status(final=True)
+        worker = self._worker
+        if worker is not None:
+            state = {
+                "end-of-source": SourceState.END_OF_SOURCE,
+                "error": SourceState.ERROR,
+            }.get(worker.completion_reason, SourceState.STOPPED)
+            self.integrity_accumulator.commit(
+                self._worker_integrity_counts(worker),
+                parse_errors=self._worker_optional_metric(
+                    worker, "skipped_lines", "_integrity_parse_baseline"),
+                driver_overruns=self._worker_optional_metric(
+                    worker, "driver_overruns", "_integrity_driver_baseline"),
+                state=state,
+            )
         self._worker = None
+        self._thread = None
         # Returning to Idle resets Pause — unchecked, disabled, labelled
         # "Pause" — so a stopped-while-paused capture never comes back up
         # already claiming "Resume" for a capture that has not even
         # started, and the next Start always runs rather than coming up
         # frozen with no visible reason why no frames are arriving.
         self._apply_capture_state(self._IDLE)
+        self._update_bus_overview()
 
     def _on_source_started(self, description: str) -> None:
         self.status_message.setText(description)
+        self.integrity_accumulator.set_source_state(SourceState.ACTIVE)
         source = getattr(self._worker, "_source", None)
         verified = getattr(source, "passive_verified", True)
         note = getattr(source, "passive_note", "")
@@ -862,16 +1274,22 @@ class MainWindow(QMainWindow):
         if note:
             self.passive_chip.setToolTip(note)
         self._update_source_chip()
+        self._update_bus_overview()
 
-    def _on_source_finished(self) -> None:
-        # Take the final counters before the worker goes away: a file replayed
-        # at full speed can finish before the status timer's first tick.
-        self._update_status(final=True)
-        self._teardown_thread()
+    def _on_thread_finished(self) -> None:
+        thread = self.sender()
+        if not isinstance(thread, QThread):
+            thread = self._thread
+        if thread is None:
+            return
+        self._finalize_thread(thread)
         if not self.status_message.text().startswith("End of capture"):
             self.status_message.setText("Stopped")
 
     def _on_error(self, message: str) -> None:
+        worker = self._worker
+        if worker is not None and worker.completion_reason == "error":
+            self.integrity_accumulator.set_source_state(SourceState.ERROR)
         QMessageBox.critical(self, "Capture error", message)
         self.status_message.setText("Error: {}".format(message.splitlines()[0]))
 
@@ -928,6 +1346,7 @@ class MainWindow(QMainWindow):
         active = state in (self._RUNNING, self._PAUSED)
         interactive = not self._interaction_locked
         self.start_button.setEnabled(state == self._IDLE and interactive)
+        self.discover_button.setEnabled(state == self._IDLE and interactive)
         self.stop_button.setEnabled(active and interactive)
         self.pause_button.setEnabled(active and interactive)
 
@@ -1038,6 +1457,14 @@ class MainWindow(QMainWindow):
             # the store keeps references, so this costs a pointer per frame and
             # its retention limit is kept in step with the trace view's.
             self.frame_store.add(frames)
+            self.traffic_profile.update(frames)
+            if frames and (self._profile_match_snapshot is not None
+                           or self._profile_match_thread is not None):
+                self._invalidate_profile_matches(
+                    "Observed traffic changed; run profile matching again.")
+            first_retained, last_retained = self.frame_store.time_span()
+            self.compare_view.set_capture_context(
+                self.frame_store.revision, first_retained, last_retained)
 
             if frames:
                 newest = max(f.timestamp for f in frames)
@@ -1066,6 +1493,15 @@ class MainWindow(QMainWindow):
             # but only while it is actually the page on screen.
             if self.top_stack.currentIndex() == self._STACK_ISOTP:
                 self._refresh_isotp()
+                # Conversation reconstruction shares the established
+                # Protocol Survey worker/cache and is therefore debounced
+                # off the UI thread even while the transfer page is live.
+                self._protocol_refresh_timer.start(1000)
+            elif self.top_stack.currentIndex() == self._STACK_PROTOCOLS:
+                # Debounced and off-thread: a busy bus may update this store
+                # many times per second, while a human cannot read surveys at
+                # that cadence.
+                self._protocol_refresh_timer.start(1000)
         finally:
             self.batchConsumed.emit()
 
@@ -1097,6 +1533,15 @@ class MainWindow(QMainWindow):
         if index == self._NAV_ISOTP:
             self._activate_isotp()
             return
+        if index == self._NAV_PROTOCOLS:
+            self._activate_protocols()
+            return
+        if index == self._NAV_COMPARE:
+            self._activate_compare()
+            return
+        if index == self._NAV_PROFILE_MATCHES:
+            self._activate_profile_matches()
+            return
         already_open = (self.top_stack.currentIndex() == self._STACK_BROWSER
                         and index == self.browser_stack.currentIndex())
         if already_open:
@@ -1127,6 +1572,31 @@ class MainWindow(QMainWindow):
         self.nav.set_indicator(None)
         self.nav.update_hints(True)
         self._refresh_isotp()
+        self._refresh_protocols()
+
+    def _activate_protocols(self) -> None:
+        """Open the session-level Protocol Survey without disturbing raw views."""
+        self.top_stack.setCurrentIndex(self._STACK_PROTOCOLS)
+        self.nav.set_current(self._NAV_PROTOCOLS)
+        self.nav.set_indicator(None)
+        self.nav.update_hints(True)
+        self._refresh_protocols()
+
+    def _activate_compare(self) -> None:
+        """Open passive baseline/event analysis without starting work."""
+        self.top_stack.setCurrentIndex(self._STACK_COMPARE)
+        self.nav.set_current(self._NAV_COMPARE)
+        self.nav.set_indicator(None)
+        self.nav.update_hints(True)
+        first, last = self.frame_store.time_span()
+        self.compare_view.set_capture_context(self.frame_store.revision, first, last)
+
+    def _activate_profile_matches(self) -> None:
+        """Open suggestions without running or applying any candidate."""
+        self.top_stack.setCurrentIndex(self._STACK_PROFILE_MATCHES)
+        self.nav.set_current(self._NAV_PROFILE_MATCHES)
+        self.nav.set_indicator(None)
+        self.nav.update_hints(True)
 
     def _activate_browser(self, index: int) -> None:
         """Open Messages or Trace (``index`` 0 or 1) — whether arriving from
@@ -1158,6 +1628,8 @@ class MainWindow(QMainWindow):
         # silently changes what is being hidden.
         self.id_proxy.set_filter(display_filter)
         self.trace_model.set_filter(display_filter)
+        if self.project is not None and not self._project_loading:
+            self._set_project_dirty(True)
         self._update_match_count()
 
     def _update_match_count(self) -> None:
@@ -1185,6 +1657,7 @@ class MainWindow(QMainWindow):
         if not key:
             return
         self._selected_key = key
+        self._on_project_ui_state_changed()
         self._push_selection(key)
 
     def _on_trace_selection(self, *_args) -> None:
@@ -1194,6 +1667,7 @@ class MainWindow(QMainWindow):
             return
         # Picking a trace row pins that exact frame instead of following an ID.
         self._selected_key = None
+        self._on_project_ui_state_changed()
         self.interpret_view.show_frame(
             frame, self.id_model.stats_for_key(frame.key), self.id_model.time_base
         )
@@ -1268,6 +1742,396 @@ class MainWindow(QMainWindow):
         self.isotp_note.setText(self._isotp_note)
 
     # ------------------------------------------------------------------
+    # unified protocol survey (off-thread, revision-cached)
+    # ------------------------------------------------------------------
+
+    def _refresh_protocols(self) -> None:
+        if self._protocol_closing:
+            return
+        if self._protocol_thread is not None:
+            self._protocol_pending = True
+            return
+        window = self.frame_store.all_frames(label="Protocol Survey retained")
+        self.protocols_view.set_definition_context(self.profile_store, window)
+        profile = self._profile_snapshot()
+        cached = self._protocol_cache.lookup(window, profile)
+        if cached is not None:
+            self._protocol_snapshot = cached
+            self.protocols_view.set_snapshot(cached)
+            self.isotp_view.set_diagnostic_analysis(cached.diagnostic_analysis)
+            return
+
+        self.protocols_view.show_loading(len(window))
+        worker = _ProtocolSurveyWorker(self._protocol_cache, window, profile)
+        thread = QThread(self)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(thread.quit, Qt.DirectConnection)
+        thread.finished.connect(self._on_protocol_thread_finished)
+        self._protocol_worker = worker
+        self._protocol_thread = thread
+        self._protocol_pending = False
+        thread.start()
+
+    def _on_protocol_thread_finished(self) -> None:
+        thread = self.sender()
+        if not isinstance(thread, QThread) or thread is not self._protocol_thread:
+            return
+        worker = self._protocol_worker
+        pending = self._protocol_pending
+        self._protocol_worker = None
+        self._protocol_thread = None
+        self._protocol_pending = False
+        if worker is not None and not worker.cancelled and not pending:
+            if worker.result is not None:
+                self._protocol_snapshot = worker.result
+                self.protocols_view.set_snapshot(worker.result)
+                self.isotp_view.set_diagnostic_analysis(
+                    worker.result.diagnostic_analysis)
+            elif worker.error:
+                self.protocols_view.show_error(worker.error)
+        if (pending and not self._protocol_closing
+                and self.top_stack.currentIndex() in (
+                    self._STACK_PROTOCOLS, self._STACK_ISOTP)):
+            QTimer.singleShot(0, self._refresh_protocols)
+        thread.deleteLater()
+
+    def _cancel_protocol_survey(self, wait: bool = False) -> None:
+        self._protocol_refresh_timer.stop()
+        self._protocol_pending = False
+        worker = self._protocol_worker
+        thread = self._protocol_thread
+        if worker is not None:
+            worker.cancel()
+        if wait and thread is not None:
+            thread.quit()
+            thread.wait()
+            if thread is self._protocol_thread:
+                self._protocol_worker = None
+                self._protocol_thread = None
+
+    # ------------------------------------------------------------------
+    # baseline/event comparison and explicitly selected correlation
+    # ------------------------------------------------------------------
+
+    @Slot(object)
+    def _start_comparison(self, comparison_input) -> None:
+        if self._compare_closing or self._comparison_thread is not None:
+            return
+        profile = self._profile_snapshot()
+        cached = self._comparison_cache.lookup(
+            self.frame_store, comparison_input, profile)
+        if cached is not None:
+            self._comparison_snapshot = cached
+            self.compare_view.set_snapshot(cached)
+            return
+        self.compare_view.show_loading()
+        worker = _ComparisonWorker(
+            self._comparison_cache, self.frame_store, comparison_input, profile)
+        thread = QThread(self)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(thread.quit, Qt.DirectConnection)
+        thread.finished.connect(self._on_comparison_finished)
+        self._comparison_worker = worker
+        self._comparison_thread = thread
+        thread.start()
+
+    def _on_comparison_finished(self) -> None:
+        thread = self.sender()
+        if not isinstance(thread, QThread) or thread is not self._comparison_thread:
+            return
+        worker = self._comparison_worker
+        self._comparison_worker = None
+        self._comparison_thread = None
+        if worker is not None and not worker.cancelled:
+            if worker.result is not None:
+                self._comparison_snapshot = worker.result
+                self.compare_view.set_snapshot(worker.result)
+            elif worker.error:
+                self.compare_view.show_error(worker.error)
+        thread.deleteLater()
+
+    @Slot(object, object, float)
+    def _start_correlation(self, left, right, tolerance: float) -> None:
+        if (self._compare_closing or self._correlation_thread is not None
+                or self._comparison_snapshot is None):
+            return
+        ref = self._comparison_snapshot.comparison_input.event
+        retained_first, retained_last = self.frame_store.time_span()
+        if (retained_first is None or retained_last is None
+                or ref.start_timestamp < retained_first
+                or ref.end_timestamp > retained_last):
+            self.compare_view.show_correlation_error(
+                "the Event interval is no longer completely retained")
+            return
+        window = self.frame_store.window(
+            ref.start_timestamp, ref.end_timestamp,
+            label="Event correlation")
+        self.compare_view.show_correlation_loading()
+        worker = _CorrelationWorker(window, left, right, tolerance)
+        thread = QThread(self)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(thread.quit, Qt.DirectConnection)
+        thread.finished.connect(self._on_correlation_finished)
+        self._correlation_worker = worker
+        self._correlation_thread = thread
+        thread.start()
+
+    def _on_correlation_finished(self) -> None:
+        thread = self.sender()
+        if not isinstance(thread, QThread) or thread is not self._correlation_thread:
+            return
+        worker = self._correlation_worker
+        self._correlation_worker = None
+        self._correlation_thread = None
+        if worker is not None and not worker.cancelled:
+            if worker.result is not None:
+                self.compare_view.show_correlation(worker.result)
+            elif worker.error:
+                self.compare_view.show_correlation_error(worker.error)
+        thread.deleteLater()
+
+    def _cancel_compare_workers(self, wait: bool = False) -> None:
+        pairs = (
+            (self._comparison_worker, self._comparison_thread),
+            (self._correlation_worker, self._correlation_thread),
+        )
+        for worker, thread in pairs:
+            if worker is not None:
+                worker.cancel()
+            if wait and thread is not None:
+                thread.quit()
+                thread.wait()
+                thread.deleteLater()
+        if wait:
+            self._comparison_worker = None
+            self._comparison_thread = None
+            self._correlation_worker = None
+            self._correlation_thread = None
+
+    # ------------------------------------------------------------------
+    # local profile matching and explicit user decisions
+    # ------------------------------------------------------------------
+
+    def _match_capture_identity(self) -> str:
+        if self.project is not None and self.project.active_capture is not None:
+            active = self.project.active_capture
+            configured = os.path.abspath(str(
+                self.config.get("source.file.path", "") or ""))
+            if (len(self.frame_store) and configured == os.path.abspath(active.path)
+                    and verify_capture(active).status
+                    is CaptureReferenceStatus.AVAILABLE):
+                return active.content_hash
+        return ""
+
+    @Slot()
+    def _start_profile_matching(self) -> None:
+        if self._profile_match_closing or self._profile_match_thread is not None:
+            return
+        traffic = self._profile_snapshot()
+        protocols = (self._protocol_snapshot
+                     if self._protocol_snapshot is not None
+                     and self._protocol_snapshot.generated_from_revision
+                     == self.frame_store.revision else None)
+        # Matching never observes mutable profiles from another thread.
+        store = ProfileStore.from_config(self.profile_store.to_config())
+        self.profile_matches_view.show_loading(
+            len(store.profiles), traffic.unique_message_keys)
+        worker = _ProfileMatchWorker(
+            self._profile_match_cache, traffic, store, protocols,
+            self._match_capture_identity(), self.frame_store.revision)
+        thread = QThread(self)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(thread.quit, Qt.DirectConnection)
+        thread.finished.connect(self._on_profile_match_finished)
+        self._profile_match_worker = worker
+        self._profile_match_thread = thread
+        thread.start()
+
+    def _on_profile_match_finished(self) -> None:
+        thread = self.sender()
+        if not isinstance(thread, QThread) or thread is not self._profile_match_thread:
+            return
+        worker = self._profile_match_worker
+        self._profile_match_worker = None
+        self._profile_match_thread = None
+        if worker is not None and not worker.cancelled:
+            stale = (worker.frame_revision != self.frame_store.revision
+                     or (worker.result is not None
+                         and worker.result.candidate_set_identity
+                         != candidate_set_identity(self.profile_store)))
+            if stale:
+                self.profile_matches_view.clear(
+                    "Traffic or local profiles changed while matching; run matching again.")
+            elif worker.result is not None:
+                self._profile_match_snapshot = worker.result
+                self.profile_matches_view.set_snapshot(worker.result)
+            elif worker.error:
+                self.profile_matches_view.show_error(worker.error)
+        thread.deleteLater()
+
+    def _cancel_profile_matching(self, wait: bool = False) -> None:
+        worker, thread = self._profile_match_worker, self._profile_match_thread
+        if worker is not None:
+            worker.cancel()
+        if wait and thread is not None:
+            thread.quit()
+            thread.wait()
+            thread.deleteLater()
+            if thread is self._profile_match_thread:
+                self._profile_match_worker = None
+                self._profile_match_thread = None
+
+    def _invalidate_profile_matches(self, reason: str) -> None:
+        self._cancel_profile_matching(wait=False)
+        self._profile_match_snapshot = None
+        self.profile_matches_view.clear(reason)
+
+    def _profile_match_decision(self, action: ProfileMatchAction, profile: Profile,
+                                definition_hash: str = "",
+                                node_id: Optional[int] = None,
+                                channel: str = "") -> ProfileMatchDecision:
+        snapshot = self._profile_match_snapshot
+        return ProfileMatchDecision(
+            new_id(), action, profile.profile_id, profile.name,
+            self._match_capture_identity(),
+            snapshot.candidate_set_identity if snapshot is not None else "",
+            snapshot.algorithm_version if snapshot is not None else "",
+            utc_now(), definition_hash, node_id, channel)
+
+    def _apply_project_match_profile(self, profile: Profile,
+                                     decision: ProfileMatchDecision) -> None:
+        if self.project is None:
+            return
+        snapshot_json = json.dumps(
+            profile.to_dict(), sort_keys=True, separators=(",", ":"),
+            ensure_ascii=False)
+        self.project = self.project.changed(
+            profile_snapshot_json=snapshot_json,
+            profile_match_decisions=self.project.profile_match_decisions + (decision,))
+        self._project_profile_snapshot_active = True
+        self._set_database(build_dbc_database(profile))
+        self.protocols_view.set_definition_context(ProfileStore([profile], profile.name))
+        self._profile_match_cache.clear()
+        self._invalidate_profile_matches(
+            "Project-local interpretation changed; run matching again if needed.")
+        self._set_project_dirty(True)
+        self._sync_project_window()
+
+    @Slot(str)
+    def _use_profile_match(self, profile_id: str) -> None:
+        if self._profile_match_snapshot is None:
+            return
+        profile = self.profile_store.find_by_id(profile_id)
+        if profile is None:
+            QMessageBox.warning(self, "Profile unavailable",
+                                "The suggested profile changed or was removed.")
+            return
+        try:
+            candidate = self._profile_match_snapshot.candidate_for(profile_id)
+        except KeyError:
+            return
+        current = (self.project.profile_snapshot.get("name", "none")
+                   if self.project is not None and self.project.profile_snapshot is not None
+                   else self.profile_store.active or "none")
+        conflict_text = "\n".join(
+            "- {}".format(item.explanation) for item in candidate.conflicts[:8]) or "- none"
+        scope = ("this investigation's project-local interpretation"
+                 if self.project is not None else "the global active profile")
+        choice = QMessageBox.question(
+            self, "Use suggested profile?",
+            "Current interpretation: {}\nSuggested profile: {}\n"
+            "Provenance: {}\n\nConflicts:\n{}\n\n"
+            "This will change {}. Matching itself has not applied anything."
+            .format(current, profile.name,
+                    ", ".join("{} {}".format(item.kind, item.state)
+                              for item in candidate.provenance),
+                    conflict_text, scope),
+            QMessageBox.Yes | QMessageBox.Cancel, QMessageBox.Cancel)
+        if choice != QMessageBox.Yes:
+            return
+        decision = self._profile_match_decision(ProfileMatchAction.USE_PROFILE, profile)
+        if self.project is not None:
+            self._apply_project_match_profile(Profile.from_dict(profile.to_dict()), decision)
+        else:
+            self.profile_store.active = profile.name
+            self._apply_profile_store()
+            self._persist_profile_store()
+        self.status_message.setText(
+            "User selected profile {} from a structural suggestion".format(profile.name))
+
+    @Slot(str, str, int, str)
+    def _associate_profile_match(self, profile_id: str, definition_hash: str,
+                                 node_id: int, channel: str) -> None:
+        if self._profile_match_snapshot is None:
+            return
+        source_profile = self.profile_store.find_by_id(profile_id)
+        if source_profile is None:
+            return
+        try:
+            candidate = self._profile_match_snapshot.candidate_for(profile_id)
+        except KeyError:
+            return
+        suggestion = next((item for item in candidate.association_suggestions
+                           if item.definition_hash == definition_hash
+                           and item.node_id == node_id and item.channel == channel), None)
+        if suggestion is None:
+            return
+        conflict_text = "\n".join(
+            "- {}".format(item.explanation) for item in candidate.conflicts[:8]) or "- none"
+        choice = QMessageBox.question(
+            self, "Associate definition?",
+            "Profile: {}\nDefinition: {}\nObserved CANopen node: {} {}\n"
+            "PDO agreement: {}/{}\n\nConflicts:\n{}\n\n"
+            "Association is a user decision; matching has not changed it."
+            .format(source_profile.name, suggestion.definition_name, node_id,
+                    channel or "(any channel)", suggestion.matched_pdos,
+                    suggestion.defined_pdos, conflict_text),
+            QMessageBox.Yes | QMessageBox.Cancel, QMessageBox.Cancel)
+        if choice != QMessageBox.Yes:
+            return
+        if self.project is not None and self.project.profile_snapshot is not None \
+                and self.project.profile_snapshot.get("id") == profile_id:
+            profile = Profile.from_dict(self.project.profile_snapshot)
+        elif self.project is not None:
+            profile = Profile.from_dict(source_profile.to_dict())
+        else:
+            profile = source_profile
+        existing = [item for item in profile.canopen_associations
+                    if item.node_id == node_id and item.channel == channel
+                    and item.definition_hash != definition_hash]
+        if existing:
+            resolution = QMessageBox.warning(
+                self, "Association conflict",
+                "Node {} {} already has a different definition association.\n\n"
+                "Yes: replace existing association(s)\n"
+                "No: keep existing and add this definition\n"
+                "Cancel: make no change".format(node_id, channel or "(any channel)"),
+                QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
+                QMessageBox.Cancel)
+            if resolution == QMessageBox.Cancel:
+                return
+            if resolution == QMessageBox.Yes:
+                profile.canopen_associations = [
+                    item for item in profile.canopen_associations
+                    if not (item.node_id == node_id and item.channel == channel)]
+        profile.associate_canopen(definition_hash, node_id, channel,
+                                  method="PROFILE_MATCH_USER_ACCEPTED")
+        decision = self._profile_match_decision(
+            ProfileMatchAction.ASSOCIATE_DEFINITION, profile,
+            definition_hash, node_id, channel)
+        if self.project is not None:
+            self._apply_project_match_profile(profile, decision)
+        else:
+            self._on_profile_store_changed(self.profile_store)
+        self.status_message.setText(
+            "User associated {} with CANopen Node {}".format(
+                suggestion.definition_name, node_id))
+
+    # ------------------------------------------------------------------
     # actions
     # ------------------------------------------------------------------
 
@@ -1293,6 +2157,25 @@ class MainWindow(QMainWindow):
         self.id_model.clear()
         self.trace_model.clear()
         self.frame_store.clear()
+        self.traffic_profile.reset()
+        self.integrity_accumulator.reset()
+        if self._protocol_thread is None:
+            self._protocol_cache.clear()
+        else:
+            self._cancel_protocol_survey(wait=False)
+        self._protocol_snapshot = None
+        self.protocols_view.clear()
+        self.isotp_view.clear_diagnostics()
+        if self._comparison_thread is None:
+            self._comparison_cache.clear()
+        self._cancel_compare_workers(wait=False)
+        self._comparison_snapshot = None
+        self.compare_view.clear()
+        self._cancel_profile_matching(wait=False)
+        self._profile_match_cache.clear()
+        self._profile_match_snapshot = None
+        self.profile_matches_view.clear(
+            "Capture evidence was cleared; run matching after traffic is observed.")
         self._seen_channels.clear()
         self._selected_key = None
         self._playback_high_water = None
@@ -1313,6 +2196,12 @@ class MainWindow(QMainWindow):
         # interrupted: the worker keeps receiving, filtering and logging.
         if self._worker is not None:
             self._worker.reset_counters()
+            source = getattr(self._worker, "_source", None)
+            parse_value = getattr(source, "skipped_lines", None)
+            driver_value = getattr(source, "driver_overruns", None)
+            self._worker._integrity_parse_baseline = int(parse_value or 0)
+            self._worker._integrity_driver_baseline = int(driver_value or 0)
+            self.integrity_accumulator.set_source_state(SourceState.ACTIVE)
         self._last_received = 0
         self._last_rate_at = time.monotonic()
         self.metric_received.set_value("0")
@@ -1321,6 +2210,7 @@ class MainWindow(QMainWindow):
 
         self._update_match_count()
         self._update_status()
+        self._update_bus_overview()
 
     def _open_capture(self) -> None:
         start_dir = os.path.dirname(str(self.config.get("source.file.path", "")) or ".")
@@ -1391,6 +2281,447 @@ class MainWindow(QMainWindow):
             count, os.path.basename(path)))
 
     # ------------------------------------------------------------------
+    # investigation projects (context only; never a capture source)
+    # ------------------------------------------------------------------
+
+    def _project_current_timestamp(self) -> float:
+        _first, last = self.frame_store.time_span()
+        return float(last or 0.0)
+
+    def _show_investigation(self) -> None:
+        if self.project is None:
+            self._new_project(confirm=False)
+        if self.project is None:
+            return
+        if self._investigation_window is None:
+            window = InvestigationWindow(self.project, self, self.theme)
+            window.setAttribute(Qt.WA_DeleteOnClose, True)
+            window.destroyed.connect(lambda *_: setattr(
+                self, "_investigation_window", None))
+            window.projectChanged.connect(self._on_project_changed)
+            window.newRequested.connect(self._new_project)
+            window.openRequested.connect(self._open_project)
+            window.saveRequested.connect(self._save_project)
+            window.saveAsRequested.connect(self._save_project_as)
+            window.reportRequested.connect(self._generate_project_report)
+            window.attachRequested.connect(self._attach_configured_capture)
+            window.openCaptureRequested.connect(self._open_project_capture)
+            window.locateCaptureRequested.connect(self._locate_project_capture)
+            window.navigateTimestamp.connect(self._navigate_project_timestamp)
+            window.navigateMessage.connect(self._navigate_project_message)
+            self._investigation_window = window
+        self._sync_project_window()
+        self._investigation_window.show()
+        self._investigation_window.raise_()
+        self._investigation_window.activateWindow()
+
+    def _sync_project_window(self) -> None:
+        if self._investigation_window is not None and self.project is not None:
+            self._investigation_window.set_project(
+                self.project, self._project_path, self._project_dirty,
+                self._project_verification)
+
+    def _set_project_dirty(self, dirty: bool = True) -> None:
+        self._project_dirty = bool(dirty)
+        if self.project is not None:
+            suffix = " *" if self._project_dirty else ""
+            self.setWindowTitle("CAN Sniffer — passive receive-only — {}{}".format(
+                self.project.title, suffix))
+        if self._investigation_window is not None:
+            self._investigation_window.set_state(
+                self._project_path, self._project_dirty, self._project_verification)
+
+    def _confirm_project_transition(self) -> bool:
+        if self.project is None or not self._project_dirty:
+            return True
+        choice = QMessageBox.warning(
+            self, "Unsaved investigation",
+            "The current investigation has unsaved changes.",
+            QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel,
+            QMessageBox.Save)
+        if choice == QMessageBox.Cancel:
+            return False
+        if choice == QMessageBox.Save:
+            return self._save_project()
+        return True
+
+    def _new_project(self, *_args, confirm: bool = True) -> None:
+        if confirm and not self._confirm_project_transition():
+            return
+        self.project = new_project()
+        self._project_path = ""
+        self._project_profile_snapshot_active = False
+        self._project_verification = None
+        self._set_project_dirty(True)
+        self._sync_project_window()
+
+    def _open_project(self) -> None:
+        if self._thread is not None:
+            QMessageBox.information(
+                self, "Stop capture before opening",
+                "Stop the current capture before opening an investigation. "
+                "Project loading never changes or starts a physical CAN source.")
+            return
+        if not self._confirm_project_transition():
+            return
+        start = os.path.dirname(self._project_path or
+                                str(self.config.get("source.file.path", "") or "."))
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Open investigation", start,
+            "CAN Sniffer projects (*{});;JSON files (*.json);;All files (*)"
+            .format(PROJECT_EXTENSION))
+        if not path:
+            return
+        try:
+            result = load_project(path)
+        except ProjectError as exc:
+            QMessageBox.warning(self, "Could not open investigation", str(exc))
+            return
+        self._project_loading = True
+        try:
+            self.clear_views()
+            self.project = result.project
+            self._project_path = result.path
+            self._project_profile_snapshot_active = bool(
+                result.project.profile_snapshot_json)
+            self._project_verification = (
+                result.verification_for(result.project.active_capture_id)
+                if result.project.active_capture_id else None)
+            self._restore_project_context()
+            self._set_project_dirty(False)
+        finally:
+            self._project_loading = False
+        self._sync_project_window()
+        notices = result.migrations + result.comparison_issues
+        if notices:
+            self.status_message.setText("; ".join(notices))
+
+    def _collect_project_context(self) -> None:
+        project = self.project
+        if project is None:
+            return
+        fields = {}
+        capture = project.active_capture
+        if capture is not None:
+            current = self.compare_view.comparison_input()
+            old = project.comparisons[0] if project.comparisons else None
+            value = ComparisonDefinition(
+                old.comparison_id if old else new_id(), capture.capture_id,
+                current.baseline.label, current.baseline.start_timestamp,
+                current.baseline.end_timestamp, current.event.label,
+                current.event.start_timestamp, current.event.end_timestamp,
+                old.created_at if old else utc_now(), old.note if old else "")
+            fields["comparisons"] = (value,) + project.comparisons[1:]
+        fields["selected_message_keys"] = (
+            (self._selected_key,) if self._selected_key else ())
+        top_index = self.top_stack.currentIndex()
+        if top_index == self._STACK_BROWSER:
+            fields["active_workspace"] = (
+                "Trace" if self.browser_stack.currentIndex() == self._NAV_TRACE
+                else "Messages")
+        else:
+            workspace_names = {self._STACK_ISOTP: "ISO-TP",
+                               self._STACK_PROTOCOLS: "Protocols",
+                               self._STACK_COMPARE: "Compare",
+                               self._STACK_PROFILE_MATCHES: "Profile Matches"}
+            fields["active_workspace"] = workspace_names.get(top_index, "Messages")
+        fields["display_filter"] = tuple(sorted(
+            (str(k), str(v)) for k, v in self.filter_bar.project_state().items()))
+        fields["diagnostic_selection"] = tuple(sorted(
+            (str(k), str(v))
+            for k, v in self.isotp_view.diagnostic_selection().items()))
+        if not self._project_profile_snapshot_active:
+            profile = self.profile_store.active_profile
+            if profile is None:
+                fields["profile_snapshot_json"] = ""
+            else:
+                snapshot = profile.to_dict()
+                if profile.path and os.path.isfile(profile.path):
+                    try:
+                        snapshot["_project_source_hash"] = hash_file(profile.path)
+                        snapshot["_project_source_name"] = os.path.basename(profile.path)
+                    except ProjectError:
+                        pass
+                fields["profile_snapshot_json"] = json.dumps(
+                    snapshot, sort_keys=True, separators=(",", ":"),
+                    ensure_ascii=False)
+            self._project_profile_snapshot_active = True
+        if any(getattr(project, key) != value for key, value in fields.items()):
+            self.project = project.changed(**fields)
+            self._set_project_dirty(True)
+
+    def _restore_project_context(self) -> None:
+        project = self.project
+        if project is None:
+            return
+        if project.comparisons:
+            self.compare_view.apply_project_intervals(project.comparisons[0])
+        self.filter_bar.apply_project_state(dict(project.display_filter))
+        self._selected_key = (project.selected_message_keys[0]
+                              if project.selected_message_keys else None)
+        self.isotp_view.apply_diagnostic_selection(
+            dict(project.diagnostic_selection))
+        snapshot = project.profile_snapshot
+        if snapshot is not None:
+            try:
+                profile = Profile.from_dict(snapshot)
+                expected_hash = str(snapshot.get("_project_source_hash", "") or "")
+                if expected_hash:
+                    if not profile.path or not os.path.isfile(profile.path):
+                        self.status_message.setText(
+                            "Project DBC source is missing; using project-local snapshot")
+                    elif hash_file(profile.path) != expected_hash:
+                        self.status_message.setText(
+                            "Project DBC source changed; using unchanged project-local snapshot")
+                self._set_database(build_dbc_database(profile))
+                local_store = ProfileStore([profile], profile.name)
+                self.protocols_view.set_definition_context(local_store)
+            except Exception as exc:
+                self.status_message.setText(
+                    "Project profile snapshot unavailable: {}".format(exc))
+        workspace = project.active_workspace
+        if workspace == "Compare":
+            self._activate_compare()
+        elif workspace == "Profile Matches":
+            self._activate_profile_matches()
+        elif workspace == "Protocols":
+            self._activate_protocols()
+        elif workspace == "ISO-TP":
+            self._activate_isotp()
+        elif workspace == "Trace":
+            self._activate_browser(self._NAV_TRACE)
+        else:
+            self._activate_browser(self._NAV_MESSAGES)
+
+    def _save_project(self) -> bool:
+        if self.project is None:
+            return False
+        if not self._project_path:
+            return self._save_project_as()
+        self._collect_project_context()
+        try:
+            save_project(self.project, self._project_path)
+        except ProjectError as exc:
+            QMessageBox.warning(self, "Could not save investigation", str(exc))
+            return False
+        self._set_project_dirty(False)
+        self.status_message.setText("Saved investigation {}".format(
+            os.path.basename(self._project_path)))
+        return True
+
+    def _save_project_as(self) -> bool:
+        if self.project is None:
+            return False
+        start = self._project_path or "investigation" + PROJECT_EXTENSION
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save investigation", start,
+            "CAN Sniffer projects (*{})".format(PROJECT_EXTENSION))
+        if not path:
+            return False
+        if not path.lower().endswith(PROJECT_EXTENSION):
+            path += PROJECT_EXTENSION
+        previous = self._project_path
+        self._project_path = os.path.abspath(path)
+        if self._save_project():
+            return True
+        self._project_path = previous
+        self._sync_project_window()
+        return False
+
+    def _on_project_changed(self, project: InvestigationProject) -> None:
+        self.project = project
+        self._set_project_dirty(True)
+
+    def _on_project_intervals_changed(self) -> None:
+        if self.project is not None and not self._project_loading:
+            self._set_project_dirty(True)
+
+    def _on_project_ui_state_changed(self, *_args) -> None:
+        if self.project is not None and not self._project_loading:
+            self._set_project_dirty(True)
+
+    def _attach_configured_capture(self) -> None:
+        if self.project is None:
+            return
+        if str(self.config.get("source.type", "file")) != "file":
+            QMessageBox.information(
+                self, "Save capture first",
+                "Live capture is never attached implicitly. Save/export it to a "
+                "capture file, select that file source, then attach it explicitly.")
+            return
+        path = str(self.config.get("source.file.path", "") or "")
+        try:
+            first, last = self.frame_store.time_span()
+            integrity = self._profile_snapshot().integrity
+            channels = sorted({key.split(":", 1)[0] for key in self.frame_store.keys()})
+            reference = attach_capture(path, {
+                "source_type": "offline file",
+                "application_version": __version__,
+                "channels_observed": ",".join(channels),
+                "retained_frames_at_attach": str(len(self.frame_store)),
+                "retained_start": "" if first is None else "{:.9g}".format(first),
+                "retained_end": "" if last is None else "{:.9g}".format(last),
+                "received_frames_at_attach": str(integrity.received),
+                "accepted_frames_at_attach": str(integrity.accepted),
+                "processed_frames_at_attach": str(integrity.processed),
+                "ui_dropped_frames_at_attach": str(integrity.ui_dropped),
+                "source_errors_at_attach": str(integrity.source_errors),
+                "capture_integrity": integrity.status.value,
+            })
+        except ProjectError as exc:
+            QMessageBox.warning(self, "Could not attach capture", str(exc))
+            return
+        self.project = self.project.changed(
+            captures=self.project.captures + (reference,),
+            active_capture_id=reference.capture_id)
+        self._project_verification = verify_capture(reference)
+        self._set_project_dirty(True)
+        self._sync_project_window()
+
+    def _locate_project_capture(self) -> None:
+        if self.project is None or self.project.active_capture is None:
+            return
+        reference = self.project.active_capture
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Locate referenced capture", os.path.dirname(reference.path),
+            "CAN captures (*.asc *.blf *.log *.csv *.trc);;All files (*)")
+        if not path:
+            return
+        updated, verification = relocate_capture(reference, path)
+        if verification.status is CaptureReferenceStatus.CHANGED:
+            choice = QMessageBox.warning(
+                self, "Capture contents changed",
+                "The selected file has a different SHA-256. Accept it as changed "
+                "evidence and invalidate derived analysis?",
+                QMessageBox.Yes | QMessageBox.Cancel, QMessageBox.Cancel)
+            if choice != QMessageBox.Yes:
+                self._project_verification = verification
+                self._sync_project_window()
+                return
+            updated, verification = relocate_capture(reference, path, accept_changed=True)
+        values = tuple(updated if item.capture_id == reference.capture_id else item
+                       for item in self.project.captures)
+        self.project = self.project.changed(captures=values)
+        self._comparison_snapshot = None
+        self._protocol_snapshot = None
+        self._project_verification = verification
+        self._set_project_dirty(True)
+        self._sync_project_window()
+
+    def _open_project_capture(self) -> None:
+        if self.project is None or self.project.active_capture is None:
+            return
+        verification = verify_capture(self.project.active_capture)
+        self._project_verification = verification
+        if verification.status not in (CaptureReferenceStatus.AVAILABLE,
+                                       CaptureReferenceStatus.MOVED):
+            QMessageBox.warning(self, "Capture unavailable", verification.explanation)
+            self._sync_project_window()
+            return
+        if self._thread is not None:
+            QMessageBox.information(self, "Capture running", "Stop the capture first.")
+            return
+        self.config.set("source.type", "file")
+        self.config.set("source.file.path", verification.path)
+        self.config.save()
+        self.clear_views()
+        self._update_source_chip()
+        self.status_message.setText(
+            "Attached capture configured. Press Start to begin offline playback.")
+        self._sync_project_window()
+
+    def _generate_project_report(self) -> None:
+        if self.project is None:
+            return
+        self._collect_project_context()
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Generate investigation report", "investigation-report.md",
+            "Markdown (*.md)")
+        if not path:
+            return
+        if not os.path.splitext(path)[1]:
+            path += ".md"
+        active = self.project.active_capture
+        configured = os.path.abspath(str(self.config.get("source.file.path", "") or ""))
+        evidence_current = bool(
+            active is not None and len(self.frame_store)
+            and configured == os.path.abspath(active.path)
+            and verify_capture(active).status is CaptureReferenceStatus.AVAILABLE)
+        report = generate_markdown_report(self.project, ReportContext(
+            utc_now(), self._profile_snapshot() if evidence_current else None,
+            self._protocol_snapshot if evidence_current else None,
+            self._comparison_snapshot if evidence_current else None,
+            self._project_verification,
+            validate_comparisons(
+                self.project,
+                ((active.capture_id, self._project_verification),)
+                if active is not None and self._project_verification is not None
+                else ()),
+            self._profile_match_snapshot if evidence_current else None,
+            (self.protocols_view.j1939_definitions if evidence_current else ()),
+            (self.protocols_view.j1939_decoded if evidence_current else ())))
+        directory = os.path.dirname(os.path.abspath(path)) or os.curdir
+        os.makedirs(directory, exist_ok=True)
+        temporary = ""
+        try:
+            descriptor, temporary = tempfile.mkstemp(
+                prefix=".cansniff-report-", suffix=".tmp", dir=directory, text=True)
+            with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+                handle.write(report)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+            temporary = ""
+        except OSError as exc:
+            QMessageBox.warning(self, "Could not generate report", str(exc))
+            return
+        finally:
+            if temporary:
+                try:
+                    os.unlink(temporary)
+                except OSError:
+                    pass
+        self.status_message.setText("Generated report {}".format(os.path.basename(path)))
+
+    def _navigate_project_timestamp(self, timestamp: float) -> None:
+        self._activate_browser(self._NAV_TRACE)
+        if self.trace_model.rowCount():
+            row = min(range(self.trace_model.rowCount()),
+                      key=lambda index: abs(
+                          self.trace_model.frame_at(index).timestamp - timestamp))
+            index = self.trace_model.index(row, 0)
+            self.trace_view.setCurrentIndex(index)
+            self.trace_view.scrollTo(index)
+        self.status_message.setText(
+            "Investigation time {:.6f} s selected".format(timestamp))
+
+    @Slot(str, str, str)
+    def _bookmark_isotp_target(self, target_type: str,
+                               logical_id: str, label: str) -> None:
+        """Persist a stable logical diagnostic target, never derived bytes."""
+        project = self.project
+        capture = project.active_capture if project is not None else None
+        if project is None or capture is None:
+            self.status_message.setText(
+                "Create/open an investigation with an attached capture before "
+                "bookmarking diagnostic evidence.")
+            return
+        bookmark = Bookmark(
+            new_id(), BookmarkKind.ISOTP, label, capture.capture_id,
+            tuple(sorted((("target_type", target_type),
+                          ("logical_id", logical_id)))), utc_now())
+        self.project = project.changed(
+            bookmarks=project.bookmarks + (bookmark,))
+        self._set_project_dirty(True)
+        self._sync_project_window()
+        self.status_message.setText("Bookmarked {}".format(label))
+
+    def _navigate_project_message(self, key: str) -> None:
+        self._selected_key = key
+        self._activate_browser(self._NAV_MESSAGES)
+        self._push_selection(key)
+
+    # ------------------------------------------------------------------
     # signal database
     # ------------------------------------------------------------------
 
@@ -1408,6 +2739,7 @@ class MainWindow(QMainWindow):
         dialog = DatabaseWindow(
             self.profile_store, self, self.theme,
             self.interpret_view.current_frame(),
+            self.frame_store.all_frames(label="Definition observation context"),
         )
         dialog.storeChanged.connect(self._on_profile_store_changed)
         dialog.exec()
@@ -1415,8 +2747,14 @@ class MainWindow(QMainWindow):
 
     def _on_profile_store_changed(self, store: ProfileStore) -> None:
         self.profile_store = store
+        self._profile_match_cache.clear()
+        self._invalidate_profile_matches(
+            "Local profiles changed; previous suggestions were invalidated.")
         self._apply_profile_store()
         self._persist_profile_store()
+        if self.project is not None and not self._project_loading:
+            self._project_profile_snapshot_active = False
+            self._set_project_dirty(True)
 
     def _apply_profile_store(self) -> None:
         """Rebuild the decode artifact from the active profile, or clear it.
@@ -1429,6 +2767,7 @@ class MainWindow(QMainWindow):
         """
         profile = self.profile_store.active_profile
         self._set_database(None if profile is None else build_dbc_database(profile))
+        self.protocols_view.set_definition_context(self.profile_store)
         self.interpret_view.refresh()
 
     def _set_database(self, database: Optional[DbcDatabase]) -> None:
@@ -1530,6 +2869,41 @@ class MainWindow(QMainWindow):
             "Settings saved — source changes take effect on the next Start"
         )
 
+    def _auto_discover(self) -> None:
+        if self._capture_state != self._IDLE or self._thread is not None:
+            QMessageBox.information(
+                self, "Capture running", "Stop the capture before Auto Discover.")
+            return
+        try:
+            dialog = DiscoveryDialog(self.config, self)
+        except Exception as exc:
+            QMessageBox.warning(self, "Auto Discover unavailable", str(exc))
+            return
+        self._discovery_dialog = dialog
+        try:
+            accepted = dialog.exec() == DiscoveryDialog.Accepted
+            selected = dialog.selected_settings() if accepted else None
+        finally:
+            self._discovery_dialog = None
+        if selected is None:
+            return
+
+        previous = copy.deepcopy(self.config.data)
+        try:
+            self.config.set("source.type", "live")
+            self.config.set("source.live", selected)
+            self.config.save()
+        except Exception as exc:
+            self.config.replace(previous)
+            QMessageBox.warning(self, "Configuration not saved", str(exc))
+            return
+        self._apply_config_to_widgets()
+        self._update_source_chip()
+        self._update_bus_overview()
+        self.status_message.setText(
+            "Discovered {}:{} at {:,} bit/s — press Start to capture".format(
+                selected["interface"], selected["channel"], selected["bitrate"]))
+
     def apply_fonts(self) -> None:
         """Re-apply typography in place after a settings change."""
         base = float(self.config.get("ui.font_size", 9) or 9)
@@ -1566,6 +2940,8 @@ class MainWindow(QMainWindow):
         worker = self._worker
         self.metric_ids.set_value("{:,}".format(self.id_model.id_count))
         self._update_match_count()
+        if self._bus_overview is not None and self._bus_overview.isVisible():
+            self._update_bus_overview()
         if worker is None:
             self.metric_rate.set_value("—", "muted")
             return
@@ -1614,6 +2990,7 @@ class MainWindow(QMainWindow):
             )
 
     def showEvent(self, event) -> None:
+        fit_top_level_to_screen(self)
         super().showEvent(event)
         if getattr(self, "_sized", False):
             return
@@ -1627,6 +3004,24 @@ class MainWindow(QMainWindow):
             not self._selector_on[self._NAV_MESSAGES], remember=False)
 
     def closeEvent(self, event) -> None:
+        if not self._confirm_project_transition():
+            event.ignore()
+            return
+        self._protocol_closing = True
+        self._cancel_protocol_survey(wait=True)
+        self._compare_closing = True
+        self._cancel_compare_workers(wait=True)
+        self._profile_match_closing = True
+        self._cancel_profile_matching(wait=True)
+        if self._discovery_dialog is not None:
+            self._discovery_dialog.close()
+            self._discovery_dialog = None
+        if self._bus_overview is not None:
+            self._bus_overview.close()
+            self._bus_overview = None
+        if self._investigation_window is not None:
+            self._investigation_window.close()
+            self._investigation_window = None
         self.config.set("ui.window", {"width": self.width(), "height": self.height()})
         if self.browser_panel.isVisible():
             self._remember_width()
@@ -1646,11 +3041,7 @@ class MainWindow(QMainWindow):
             self.config.save()
         except Exception:
             pass
-        if self._worker is not None:
-            self._worker.request_stop()
-        if self._thread is not None:
-            self._thread.quit()
-            self._thread.wait(3000)
+        self._teardown_thread()
         super().closeEvent(event)
 
 

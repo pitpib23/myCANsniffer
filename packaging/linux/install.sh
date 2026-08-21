@@ -32,11 +32,14 @@ Installed.
 If `cansniff` is not found, ~/.local/bin is not on your PATH:
     export PATH="$HOME/.local/bin:$PATH"
 
-Live capture on Linux uses SocketCAN and requires listen-only mode, which the
-application verifies and refuses to run without:
+Live capture on Linux uses SocketCAN. Listen-only mode is strongly recommended:
 
     sudo ip link set can0 down
     sudo ip link set can0 type can bitrate 500000 listen-only on
     sudo ip link set can0 up
+
+By default the application verifies this and refuses an unverified interface.
+Settings can explicitly allow unverified receive-only operation, which may
+still acknowledge frames or otherwise affect the physical CAN bus.
 
 EOF

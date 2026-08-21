@@ -10,7 +10,9 @@ from __future__ import annotations
 import os
 import sys
 import time
+import types
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -149,6 +151,22 @@ class AscParserSyntheticTests(unittest.TestCase):
         self.assertEqual(frames[0].arb_id, 0x200)
         self.assertEqual(frames[0].data, bytes(range(8)))
 
+    def test_fd_esi_is_not_an_error_frame(self):
+        path = self._write(
+            "base hex  timestamps absolute\n"
+            "  0.100000 CANFD 1 Rx 200 EngineData 1 1 2 2 AA BB\n"
+        )
+        frame = parse_asc(path).frames[0]
+        self.assertTrue(frame.is_error_state_indicator)
+        self.assertFalse(frame.is_error_frame)
+
+    def test_fd_explicit_clear_esi_is_preserved(self):
+        path = self._write(
+            "base hex  timestamps absolute\n"
+            "  0.100000 CANFD 1 Rx 200 0 0 2 2 AA BB\n"
+        )
+        self.assertIs(parse_asc(path).frames[0].is_error_state_indicator, False)
+
     def test_classic_frame_dlc_still_matches_its_payload(self):
         path = self._write("   0.6 1  100             Rx   d 3 01 00 01\n")
         frame = parse_asc(path).frames[0]
@@ -219,6 +237,13 @@ class CandumpParserTests(unittest.TestCase):
         self.assertTrue(frame.is_bitrate_switch)
         self.assertEqual(len(frame.data), 20)
         self.assertEqual(frame.dlc, 20)
+
+    def test_canfd_esi_flag_is_independent_of_error_frame(self):
+        path = self._write("(0.0) can0 300##3AABB\n")
+        frame = parse_candump(path).frames[0]
+        self.assertTrue(frame.is_bitrate_switch)
+        self.assertTrue(frame.is_error_state_indicator)
+        self.assertFalse(frame.is_error_frame)
 
     def test_a_trailing_rx_tx_flag_is_tolerated(self):
         """The one trailing case python-can's own reader already handles —
@@ -686,11 +711,46 @@ class LiveSourceSafetyTests(unittest.TestCase):
             source.open()
         self.assertIn("listen-only", str(ctx.exception))
 
-    def test_override_flag_allows_but_marks_unverified(self):
+    def test_explicit_opt_out_allows_unknown_interface_with_warning(self):
         source = LiveSource({
             "interface": "vector", "channel": "0", "require_listen_only": False,
         })
         note = source._preflight()
+        self.assertTrue(note.startswith("NOT VERIFIED"))
+        source.passive_note = note
+        self.assertFalse(source.passive_verified)
+
+    def test_explicit_opt_out_opens_unknown_receive_only_backend(self):
+        calls = []
+
+        class FakeBus:
+            def __init__(self, **kwargs):
+                calls.append(kwargs)
+
+            def shutdown(self):
+                pass
+
+        source = LiveSource({
+            "interface": "vector", "channel": "0", "bitrate": 500000,
+            "require_listen_only": False,
+        })
+        with mock.patch.dict(sys.modules, {
+                "can": types.SimpleNamespace(Bus=FakeBus)}):
+            source.open()
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["interface"], "vector")
+        self.assertFalse(calls[0]["receive_own_messages"])
+        self.assertFalse(source.passive_verified)
+        source.close()
+
+    def test_socketcan_opt_out_allows_unverified_link(self):
+        source = LiveSource({
+            "interface": "socketcan", "channel": "can0",
+            "require_listen_only": False,
+        })
+        with mock.patch("cansniff.sources.live._socketcan_is_listen_only",
+                        return_value=False):
+            note = source._preflight()
         self.assertTrue(note.startswith("NOT VERIFIED"))
 
     def test_socketcan_requires_confirmed_listen_only(self):
@@ -709,6 +769,92 @@ class LiveSourceSafetyTests(unittest.TestCase):
         self.assertEqual(listen_only_support("pcan"), "enforced-after-init")
         self.assertEqual(listen_only_support("socketcan"), "external-configuration")
         self.assertEqual(listen_only_support("made-up"), "unsupported")
+
+    def test_protected_extra_kwargs_are_rejected(self):
+        protected = ("interface", "bustype", "channel", "bitrate",
+                     "data_bitrate", "fd", "receive_own_messages",
+                     "driver_mode", "ignore_config", "state", "listen_only",
+                     "silent", "passive", "local_loopback")
+        for name in protected:
+            with self.subTest(name=name):
+                source = LiveSource({"interface": "virtual",
+                                     "extra_kwargs": {name: True}})
+                with self.assertRaises(SourceError) as ctx:
+                    source.open()
+                self.assertIn(name, str(ctx.exception))
+
+    def test_harmless_extra_kwarg_reaches_the_single_bus_construction(self):
+        calls = []
+
+        class FakeBus:
+            def __init__(self, **kwargs):
+                calls.append(kwargs)
+
+            def shutdown(self):
+                pass
+
+        fake_can = types.SimpleNamespace(Bus=FakeBus)
+        source = LiveSource({"interface": "virtual", "channel": "safe",
+                             "extra_kwargs": {"preserve_timestamps": True}})
+        with mock.patch.dict(sys.modules, {"can": fake_can}):
+            source.open()
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0], source._bus_kwargs())
+        self.assertFalse(calls[0]["receive_own_messages"])
+        source.close()
+
+    def test_pcan_passive_setup_failure_has_no_active_fallback(self):
+        calls = []
+
+        class FakeBus:
+            def __init__(self, **kwargs):
+                calls.append(kwargs)
+                self.closed = False
+
+            def shutdown(self):
+                self.closed = True
+
+        source = LiveSource({"interface": "pcan", "channel": "PCAN_USBBUS1"})
+
+        def reject_listen_only():
+            source.close()
+            raise SourceError("listen-only rejected")
+
+        with mock.patch.dict(sys.modules, {"can": types.SimpleNamespace(Bus=FakeBus)}), \
+                mock.patch.object(source, "_apply_pcan_listen_only",
+                                  side_effect=reject_listen_only):
+            with self.assertRaises(SourceError):
+                source.open()
+        self.assertEqual(len(calls), 1)
+
+    def test_pcan_opt_out_keeps_open_bus_when_listen_only_is_rejected(self):
+        class FakeBus:
+            def shutdown(self):
+                pass
+
+        source = LiveSource({
+            "interface": "pcan", "channel": "PCAN_USBBUS1",
+            "require_listen_only": False,
+        })
+        source._bus = FakeBus()
+        with mock.patch.dict(sys.modules, {
+                "can.interfaces.pcan.basic": types.SimpleNamespace()}):
+            source._apply_pcan_listen_only()
+        self.assertIsNotNone(source._bus)
+        self.assertFalse(source.passive_verified)
+
+    def test_live_fd_message_preserves_esi(self):
+        message = types.SimpleNamespace(
+            timestamp=1.0, arbitration_id=0x123, data=b"\x01", dlc=1,
+            is_extended_id=False, is_fd=True, bitrate_switch=True,
+            error_state_indicator=True, is_error_frame=False,
+            is_remote_frame=False, channel="vcan0",
+        )
+        source = LiveSource({"interface": "virtual"})
+        source._bus = types.SimpleNamespace(recv=lambda timeout: message)
+        frame = source.receive()
+        self.assertTrue(frame.is_error_state_indicator)
+        self.assertFalse(frame.is_error_frame)
 
     def test_has_no_transmit_api(self):
         source = LiveSource({"interface": "virtual"})

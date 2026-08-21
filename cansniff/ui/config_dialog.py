@@ -12,13 +12,16 @@ from typing import Any, Dict
 
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog,
+    QCheckBox, QComboBox, QDialogButtonBox, QDoubleSpinBox, QFileDialog,
     QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
-    QPlainTextEdit, QPushButton, QSpinBox, QTabWidget, QVBoxLayout, QWidget,
+    QPlainTextEdit, QPushButton, QSizePolicy, QSpinBox, QTabWidget, QVBoxLayout, QWidget,
 )
 
 from ..config import Config
-from ..sources.live import LISTEN_ONLY_SUPPORT, UNSUPPORTED, listen_only_support
+from ..sources.live import (
+    AFTER_INIT, EXTERNAL, LISTEN_ONLY_SUPPORT, UNSUPPORTED, listen_only_support,
+)
+from .widgets import ResponsiveDialog, scrollable
 
 _LIVE_INTERFACES = [
     "virtual", "socketcan", "pcan", "kvaser", "vector", "slcan", "seeedstudio",
@@ -26,7 +29,7 @@ _LIVE_INTERFACES = [
 ]
 
 
-class ConfigDialog(QDialog):
+class ConfigDialog(ResponsiveDialog):
     def __init__(self, config: Config, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Settings")
@@ -36,8 +39,8 @@ class ConfigDialog(QDialog):
 
         layout = QVBoxLayout(self)
         self.tabs = QTabWidget()
-        self.tabs.addTab(self._build_source_tab(), "Source")
-        self.tabs.addTab(self._build_general_tab(), "Capture && Display")
+        self.tabs.addTab(scrollable(self._build_source_tab()), "Source")
+        self.tabs.addTab(scrollable(self._build_general_tab()), "Capture && Display")
         self.tabs.addTab(self._build_raw_tab(), "Raw JSON")
         layout.addWidget(self.tabs, 1)
 
@@ -126,10 +129,14 @@ class ConfigDialog(QDialog):
         live_form.addRow("FD data bitrate", self.live_data_bitrate)
 
         self.require_listen_only = QCheckBox(
-            "Require confirmed listen-only mode (recommended)"
+            "Require confirmed listen-only mode"
         )
-        self.require_listen_only.setChecked(
-            bool(self.config.get("source.live.require_listen_only", True))
+        self.require_listen_only.setChecked(bool(
+            self.config.get("source.live.require_listen_only", True)))
+        self.require_listen_only.setToolTip(
+            "Recommended. When disabled, unverified adapters may be opened "
+            "for receive-only application use, but the CAN controller may "
+            "still acknowledge frames or otherwise affect the physical bus."
         )
         self.require_listen_only.toggled.connect(self._on_require_toggled)
         live_form.addRow("", self.require_listen_only)
@@ -141,8 +148,13 @@ class ConfigDialog(QDialog):
         self.live_extra = QPlainTextEdit(
             json.dumps(self.config.get("source.live.extra_kwargs", {}) or {}, indent=2)
         )
-        self.live_extra.setFixedHeight(90)
-        self.live_extra.setToolTip("Extra keyword arguments passed to python-can, as JSON")
+        self.live_extra.setMinimumHeight(70)
+        self.live_extra.setMaximumHeight(140)
+        self.live_extra.setToolTip(
+            "Harmless backend-specific python-can keyword arguments, as JSON. "
+            "Interface, channel, bitrate/FD, receive-own-messages, driver mode, "
+            "and passive/listen-only settings cannot be overridden here."
+        )
         live_form.addRow("Extra kwargs", self.live_extra)
 
         layout.addWidget(self.live_box)
@@ -166,30 +178,47 @@ class ConfigDialog(QDialog):
         interface = self.live_interface.currentText().strip().lower()
         support = listen_only_support(interface)
         if support == UNSUPPORTED:
-            self.support_label.setText(
-                "<b style='color:#c04040'>Not supported.</b> This project cannot confirm "
-                "hardware listen-only mode for '{}', so it will refuse to open it. "
-                "Confirmed interfaces: {}.".format(
-                    interface, ", ".join(sorted(LISTEN_ONLY_SUPPORT))
+            if self.require_listen_only.isChecked():
+                self.support_label.setText(
+                    "<b style='color:#c04040'>Not supported.</b> Hardware "
+                    "listen-only mode cannot be confirmed for '{}', so Start "
+                    "will refuse it while confirmation is required. Confirmed "
+                    "interfaces: {}.".format(
+                        interface, ", ".join(sorted(LISTEN_ONLY_SUPPORT)))
                 )
-            )
+            else:
+                self.support_label.setText(
+                    "<b style='color:#c04040'>Unverified mode enabled.</b> '{}' "
+                    "may be opened, but its controller may acknowledge frames "
+                    "or otherwise affect the physical bus. The application "
+                    "still exposes receive operations only.".format(interface)
+                )
+        elif (not self.require_listen_only.isChecked()
+              and support in (AFTER_INIT, EXTERNAL)):
+            self.support_label.setText(
+                "<b style='color:#c08020'>{}</b> Listen-only will still be "
+                "attempted, but an unverified fallback is allowed because "
+                "confirmation is disabled.".format(support))
         else:
             self.support_label.setText("<b style='color:#3a8a3a'>{}</b>".format(support))
 
     def _on_require_toggled(self, checked: bool) -> None:
-        if checked:
-            return
-        answer = QMessageBox.warning(
-            self, "Passive operation not guaranteed",
-            "Turning this off lets the sniffer open an interface whose listen-only mode "
-            "cannot be confirmed.\n\nOn such an interface the CAN controller may "
-            "acknowledge frames electrically, which is not passive observation.\n\n"
-            "Only do this if you know the adapter is passive by other means.\n\n"
-            "Continue?",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
-        )
-        if answer != QMessageBox.Yes:
-            self.require_listen_only.setChecked(True)
+        if not checked:
+            answer = QMessageBox.warning(
+                self,
+                "Allow unverified CAN hardware?",
+                "Without confirmed listen-only mode, the adapter may acknowledge "
+                "CAN frames, emit controller/error traffic, or otherwise affect "
+                "the physical bus. The application will still never call a send "
+                "API, but receive-only software is not the same as electrically "
+                "passive hardware.\n\nAllow unverified hardware anyway?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if answer != QMessageBox.Yes:
+                self.require_listen_only.setChecked(True)
+                return
+        self._on_interface_changed()
 
     # -- general tab ----------------------------------------------------
 
@@ -201,7 +230,7 @@ class ConfigDialog(QDialog):
         self.queue_size.setRange(100, 1000000)
         self.queue_size.setSingleStep(1000)
         self.queue_size.setValue(int(self.config.get("capture.queue_size", 20000)))
-        form.addRow("Queue size (frames)", self.queue_size)
+        form.addRow("Batch sizing target (frames)", self.queue_size)
 
         self.refresh_ms = QSpinBox()
         self.refresh_ms.setRange(10, 2000)
@@ -250,12 +279,17 @@ class ConfigDialog(QDialog):
     def _build_raw_tab(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
-        layout.addWidget(QLabel(
+        note = QLabel(
             "Full configuration document. Edits here are applied on OK and override "
             "the widgets on the other tabs."
-        ))
+        )
+        note.setWordWrap(True)
+        note.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        layout.addWidget(note)
         self.raw_edit = QPlainTextEdit(self.config.as_json())
         self.raw_edit.setFont(QFont("Consolas", 10))
+        self.raw_edit.setMinimumWidth(0)
+        self.raw_edit.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
         layout.addWidget(self.raw_edit, 1)
         self._raw_original = self.raw_edit.toPlainText()
         return page

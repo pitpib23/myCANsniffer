@@ -42,6 +42,10 @@ class CanFrame:
     is_remote_frame: bool = False
     channel: str = ""
     raw_line: Optional[str] = None  # original text, when read from a log file
+    # Appended to preserve the positional constructor used by older callers.
+    # None means the source format did not report CAN FD ESI; it is independent
+    # of an actual CAN error frame.
+    is_error_state_indicator: Optional[bool] = None
 
     @property
     def id_hex(self) -> str:

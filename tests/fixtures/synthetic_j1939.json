@@ -1,0 +1,70 @@
+{
+  "schema_version": 1,
+  "metadata": {
+    "name": "myCANsniffer synthetic J1939 fixture",
+    "version": "1.0",
+    "license": "CC0-1.0; repository-authored synthetic test data"
+  },
+  "pgns": [
+    {
+      "pgn": 61184,
+      "name": "Synthetic Machine Status",
+      "description": "Synthetic proprietary-A payload for parser and TP tests",
+      "length": {"min": 8, "max": 32},
+      "transport": "either",
+      "spns": [
+        {
+          "spn": 1000,
+          "name": "Synthetic Mode",
+          "start_bit": 0,
+          "bit_length": 4,
+          "states": {"0": "Stopped", "1": "Running"}
+        },
+        {
+          "spn": 1001,
+          "name": "Synthetic Temperature",
+          "start_bit": 8,
+          "bit_length": 16,
+          "signed": true,
+          "scale": 0.1,
+          "offset": -40,
+          "unit": "degC",
+          "minimum": -40,
+          "maximum": 210
+        },
+        {
+          "spn": 1002,
+          "name": "Synthetic Counter",
+          "start_bit": 24,
+          "bit_length": 32
+        },
+        {
+          "spn": 1003,
+          "name": "Synthetic Availability",
+          "start_bit": 56,
+          "bit_length": 8,
+          "special_values": {
+            "254": {"label": "Error", "status": "ERROR"},
+            "255": {"label": "Not available", "status": "NOT_AVAILABLE"}
+          }
+        }
+      ]
+    },
+    {
+      "pgn": 65280,
+      "name": "Synthetic Compact Status",
+      "length": 8,
+      "transport": "single",
+      "spns": [
+        {
+          "spn": 2000,
+          "name": "Synthetic Voltage",
+          "start_bit": 0,
+          "bit_length": 16,
+          "scale": 0.01,
+          "unit": "V"
+        }
+      ]
+    }
+  ]
+}

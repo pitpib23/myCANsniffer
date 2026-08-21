@@ -21,9 +21,11 @@ PCAN caveat: PCAN-Basic has no initialise-time listen-only parameter, so the
 channel is briefly initialised before the flag is applied. That window is
 reported to the user rather than hidden.
 
-If passive operation cannot be guaranteed the source refuses to open. The
-only way past that is to set ``source.live.require_listen_only`` to ``false``
-in the configuration, which the UI reports prominently.
+Passive operation is required by default. An operator may explicitly disable
+``source.live.require_listen_only`` to open an unverified backend; that mode is
+labelled NOT VERIFIED in the source description and application banner. The
+application remains receive-API-only, but the hardware may acknowledge frames
+or otherwise affect the physical bus.
 """
 
 from __future__ import annotations
@@ -32,7 +34,7 @@ import subprocess
 from typing import Any, Dict, Optional
 
 from ..model import CanFrame
-from . import CanFrameSource, SourceError
+from . import CanFrameSource, PassiveSafetyError, SourceError
 
 # Confidence levels for passive operation.
 AT_INIT = "enforced-at-init"
@@ -47,6 +49,15 @@ LISTEN_ONLY_SUPPORT = {
     "pcan": AFTER_INIT,
     "socketcan": EXTERNAL,
 }
+
+# Bus construction fields owned by LiveSource. ``extra_kwargs`` exists for
+# harmless backend extensions, not as a second configuration path for the
+# interface that already passed passive preflight.
+PROTECTED_BUS_ARGUMENTS = frozenset({
+    "interface", "bustype", "channel", "bitrate", "data_bitrate", "fd",
+    "receive_own_messages", "driver_mode", "ignore_config", "state",
+    "listen_only", "silent", "passive", "local_loopback",
+})
 
 
 def listen_only_support(interface: str) -> str:
@@ -74,7 +85,7 @@ def _socketcan_is_listen_only(channel: str) -> Optional[bool]:
 
 
 class LiveSource(CanFrameSource):
-    """Receive-only python-can source with enforced passive configuration."""
+    """Receive-only python-can source with safe-by-default passive policy."""
 
     def __init__(self, settings: Dict[str, Any]):
         self.settings = dict(settings or {})
@@ -83,7 +94,8 @@ class LiveSource(CanFrameSource):
         self.bitrate = int(self.settings.get("bitrate", 500000) or 500000)
         self.data_bitrate = int(self.settings.get("data_bitrate", 2000000) or 2000000)
         self.fd = bool(self.settings.get("fd", False))
-        self.require_listen_only = bool(self.settings.get("require_listen_only", True))
+        self.require_listen_only = bool(
+            self.settings.get("require_listen_only", True))
         self.extra_kwargs = dict(self.settings.get("extra_kwargs", {}) or {})
 
         self.name = "live:{}:{}".format(self.interface, self.channel)
@@ -92,6 +104,21 @@ class LiveSource(CanFrameSource):
         self._bus = None  # kept private on purpose
 
     # -- safety ---------------------------------------------------------
+
+    def qualification_plan(self) -> Dict[str, Any]:
+        """Return the exact passive configuration that a later ``open`` rechecks.
+
+        This is inspection only: it does not import python-can, enumerate devices,
+        or create a bus.  Hardware qualification uses it for operator review and
+        then calls the same production ``open``/``receive``/``close`` path.
+        """
+        return {
+            "source": self.name,
+            "passive_policy": self._preflight(),
+            "bus_kwargs": self._bus_kwargs(),
+            "rechecked_on_open": True,
+            "opens_hardware": False,
+        }
 
     def _preflight(self) -> str:
         """Decide whether opening is allowed; returns a human-readable note."""
@@ -110,11 +137,14 @@ class LiveSource(CanFrameSource):
             verified = _socketcan_is_listen_only(self.channel)
             if verified is True:
                 return "passive: kernel reports listen-only on {}".format(self.channel)
-            if not self.require_listen_only:
-                return ("NOT VERIFIED: could not confirm listen-only on {}; "
-                        "opened because require_listen_only is false".format(self.channel))
             detail = "it is not enabled" if verified is False else "it could not be verified"
-            raise SourceError(
+            if not self.require_listen_only:
+                return (
+                    "NOT VERIFIED: socketcan '{}' listen-only {}; operator "
+                    "allowed unverified receive-only operation"
+                    .format(self.channel, detail)
+                )
+            raise PassiveSafetyError(
                 "Refusing to open socketcan '{ch}': listen-only mode is required but {detail}.\n"
                 "Enable it at OS level first, for example:\n"
                 "    sudo ip link set {ch} down\n"
@@ -125,31 +155,30 @@ class LiveSource(CanFrameSource):
             )
 
         if not self.require_listen_only:
-            return ("NOT VERIFIED: interface '{}' has no known listen-only control; "
-                    "opened because require_listen_only is false".format(self.interface))
-        raise SourceError(
+            return (
+                "NOT VERIFIED: '{}' has no confirmed listen-only policy; "
+                "operator allowed unverified receive-only operation"
+                .format(self.interface)
+            )
+        raise PassiveSafetyError(
             "Refusing to open interface '{}': this project cannot guarantee hardware "
             "listen-only operation for it.\nSupported passive interfaces: {}.\n"
-            "If your adapter is passive by other means you can set "
-            "source.live.require_listen_only to false in the configuration — the UI "
-            "will then show a persistent warning.".format(
-                self.interface, ", ".join(sorted(LISTEN_ONLY_SUPPORT))
-            )
-        )
+            "Disable 'Require confirmed listen-only mode' in Settings only if "
+            "you accept that the adapter may affect the physical bus.".format(
+                self.interface, ", ".join(sorted(LISTEN_ONLY_SUPPORT))))
 
     @property
     def passive_verified(self) -> bool:
         return not self.passive_note.startswith("NOT VERIFIED")
 
-    # -- lifecycle ------------------------------------------------------
-
-    def open(self) -> None:
-        self.passive_note = self._preflight()
-
-        try:
-            import can
-        except ImportError as exc:
-            raise SourceError("python-can is not installed; live capture unavailable") from exc
+    def _bus_kwargs(self) -> Dict[str, Any]:
+        """Return the exact, safety-checked arguments used to create the bus."""
+        protected = sorted(PROTECTED_BUS_ARGUMENTS.intersection(self.extra_kwargs))
+        if protected:
+            raise PassiveSafetyError(
+                "Refusing live source extra_kwargs that override protected bus "
+                "arguments: {}".format(", ".join(protected))
+            )
 
         kwargs: Dict[str, Any] = {
             "interface": self.interface,
@@ -165,6 +194,18 @@ class LiveSource(CanFrameSource):
             # python-can: driver_mode False == DRIVER_MODE_SILENT
             kwargs["driver_mode"] = False
         kwargs.update(self.extra_kwargs)
+        return kwargs
+
+    # -- lifecycle ------------------------------------------------------
+
+    def open(self) -> None:
+        self.passive_note = self._preflight()
+        kwargs = self._bus_kwargs()
+
+        try:
+            import can
+        except ImportError as exc:
+            raise SourceError("python-can is not installed; live capture unavailable") from exc
 
         try:
             self._bus = can.Bus(**kwargs)
@@ -189,15 +230,24 @@ class LiveSource(CanFrameSource):
             status = api.SetValue(handle, PCAN_LISTEN_ONLY, PCAN_PARAMETER_ON)
             ok = status == PCAN_ERROR_OK
         except Exception as exc:
+            if not self.require_listen_only:
+                self.passive_note = (
+                    "NOT VERIFIED: PCAN listen-only could not be applied ({}); "
+                    "operator allowed unverified receive-only operation".format(exc))
+                return
             self.close()
-            raise SourceError(
+            raise PassiveSafetyError(
                 "Could not apply PCAN listen-only mode ({}). Interface closed; "
-                "refusing to capture in active mode.".format(exc)
-            )
+                "refusing to capture in active mode.".format(exc))
 
         if not ok:
+            if not self.require_listen_only:
+                self.passive_note = (
+                    "NOT VERIFIED: PCAN rejected listen-only mode (status {}); "
+                    "operator allowed unverified receive-only operation".format(status))
+                return
             self.close()
-            raise SourceError(
+            raise PassiveSafetyError(
                 "PCAN rejected listen-only mode (status {}). Interface closed; "
                 "refusing to capture in active mode.".format(status)
             )
@@ -227,6 +277,10 @@ class LiveSource(CanFrameSource):
             is_extended=bool(message.is_extended_id),
             is_fd=bool(getattr(message, "is_fd", False)),
             is_bitrate_switch=bool(getattr(message, "bitrate_switch", False)),
+            is_error_state_indicator=(
+                bool(getattr(message, "error_state_indicator", False))
+                if bool(getattr(message, "is_fd", False)) else None
+            ),
             is_error_frame=bool(message.is_error_frame),
             is_remote_frame=bool(message.is_remote_frame),
             channel=str(message.channel) if message.channel is not None else self.channel,

@@ -1,0 +1,118 @@
+{
+  "schema_version": 1,
+  "manifest_id": "software-baseline-v1",
+  "title": "Repository-authored synthetic offline qualification baseline",
+  "created_at": "2026-08-21T00:00:00Z",
+  "notes": "Every artifact is synthetic and CC0-1.0. Passing this manifest establishes SOFTWARE_TESTED only.",
+  "entries": [
+    {
+      "id": "synthetic-protocols",
+      "artifact_kind": "CAPTURE",
+      "category": "POSITIVE",
+      "path": "../../tests/qualification/fixtures/synthetic_protocols.log",
+      "sha256": "9a859f77347be97e652c0a73afecfe8f7465aadce5e8fb4bf999e0d3ffeb8b53",
+      "source": "Repository-authored deterministic synthetic CAN frames",
+      "license_or_permission": "CC0-1.0; repository-authored synthetic test data",
+      "anonymization": "NOT_REQUIRED",
+      "synthetic": true,
+      "redistributed": true,
+      "protocols": ["CANopen", "ISO-TP", "UDS"],
+      "expected_features": ["CANopen node 1", "paired UDS 0x10 and 0x22"],
+      "expected_non_features": ["J1939"],
+      "expectations": [
+        {"fact": "frames.total", "mode": "EXACT", "expected": 13},
+        {"fact": "protocol.CANopen.level", "mode": "MINIMUM", "expected": "Strong"},
+        {"fact": "protocol.UDS.level", "mode": "MINIMUM", "expected": "Strong"},
+        {"fact": "protocol.J1939.level", "mode": "ABSENT", "expected": "Weak"},
+        {"fact": "canopen.node_ids", "mode": "CONTAINS", "expected": [1]},
+        {"fact": "diagnostics.services", "mode": "CONTAINS", "expected": [16, 34]},
+        {"fact": "diagnostics.dids", "mode": "CONTAINS", "expected": [61840]},
+        {"fact": "diagnostics.pairs", "mode": "EXACT", "expected": 1},
+        {"fact": "diagnostics.conversations.total", "mode": "EXACT", "expected": 2}
+      ],
+      "notes": "Functional baseline only; not captured from a physical bus."
+    },
+    {
+      "id": "synthetic-negative",
+      "artifact_kind": "CAPTURE",
+      "category": "NEGATIVE",
+      "path": "../../tests/qualification/fixtures/synthetic_negative.log",
+      "sha256": "7de69936454bd06a9f588a72a8e114628bdbe2f3a510f53ffe445818da29de67",
+      "source": "Repository-authored proprietary-shaped negative traffic",
+      "license_or_permission": "CC0-1.0; repository-authored synthetic test data",
+      "anonymization": "NOT_REQUIRED",
+      "synthetic": true,
+      "redistributed": true,
+      "protocols": [],
+      "expected_features": ["unknown/proprietary evidence"],
+      "expected_non_features": ["CANopen", "J1939", "ISO-TP", "UDS"],
+      "expectations": [
+        {"fact": "frames.total", "mode": "EXACT", "expected": 10},
+        {"fact": "protocol.CANopen.level", "mode": "ABSENT", "expected": "Possible", "note": "Weak syntax alone is not treated as a positive classification."},
+        {"fact": "protocol.J1939.level", "mode": "ABSENT", "expected": "Possible"},
+        {"fact": "protocol.ISO-TP.level", "mode": "ABSENT", "expected": "Possible"},
+        {"fact": "protocol.UDS.level", "mode": "ABSENT", "expected": "Possible"},
+        {"fact": "protocol.Unknown / proprietary.level", "mode": "MINIMUM", "expected": "Possible"}
+      ],
+      "notes": "False-positive baseline."
+    },
+    {
+      "id": "synthetic-eds",
+      "artifact_kind": "EDS",
+      "category": "POSITIVE",
+      "path": "../../tests/fixtures/synthetic_drive.eds",
+      "sha256": "f9eecf3303801f05ce8681d0ea55960f9e5fc7e244cfa96dd625b5b59a7ec549",
+      "source": "Repository-authored CiA 306 subset fixture",
+      "license_or_permission": "CC0-1.0; repository-authored synthetic test data",
+      "anonymization": "NOT_REQUIRED",
+      "synthetic": true,
+      "redistributed": true,
+      "protocols": ["CANopen definitions"],
+      "expected_features": ["object dictionary", "PDO mapping"],
+      "expected_non_features": [],
+      "expectations": [
+        {"fact": "definition.kind", "mode": "EXACT", "expected": "EDS"},
+        {"fact": "definition.objects", "mode": "MINIMUM", "expected": 4}
+      ]
+    },
+    {
+      "id": "synthetic-dcf",
+      "artifact_kind": "DCF",
+      "category": "POSITIVE",
+      "path": "../../tests/fixtures/synthetic_machine.dcf",
+      "sha256": "585fee368a8bcbd49e82ac0b13653ca620201e6c17ee28c7647fb23d1761452b",
+      "source": "Repository-authored CiA 306 subset fixture",
+      "license_or_permission": "CC0-1.0; repository-authored synthetic test data",
+      "anonymization": "NOT_REQUIRED",
+      "synthetic": true,
+      "redistributed": true,
+      "protocols": ["CANopen definitions"],
+      "expected_features": ["commissioned node ID", "parameter value"],
+      "expected_non_features": [],
+      "expectations": [
+        {"fact": "definition.kind", "mode": "EXACT", "expected": "DCF"},
+        {"fact": "definition.objects", "mode": "MINIMUM", "expected": 1}
+      ]
+    },
+    {
+      "id": "synthetic-j1939-definition",
+      "artifact_kind": "J1939_DEFINITION",
+      "category": "POSITIVE",
+      "path": "../../tests/fixtures/synthetic_j1939.json",
+      "sha256": "ed692c87cd70b7bd937fa79c402b94dfbf60fe1764a6b6e0762f563deb973fd3",
+      "source": "Repository-authored J1939 definition fixture",
+      "license_or_permission": "CC0-1.0; repository-authored synthetic test data",
+      "anonymization": "NOT_REQUIRED",
+      "synthetic": true,
+      "redistributed": true,
+      "protocols": ["J1939 definitions"],
+      "expected_features": ["PGN and SPN definitions"],
+      "expected_non_features": [],
+      "expectations": [
+        {"fact": "definition.kind", "mode": "EXACT", "expected": "J1939"},
+        {"fact": "definition.pgns", "mode": "MINIMUM", "expected": 1},
+        {"fact": "definition.spns", "mode": "MINIMUM", "expected": 2}
+      ]
+    }
+  ]
+}

@@ -1,9 +1,10 @@
 """Capture worker.
 
-Runs the receive loop off the UI thread so that slow rendering, filtering or
-logging can never stall reception. Frames are handed to the UI in batches
-through a bounded pipeline; when the UI cannot keep up, batches are dropped
-and counted rather than allowed to grow without limit.
+Runs the receive loop off the UI thread so that slow UI rendering cannot stall
+reception. Filtering and synchronous logging remain on the worker thread.
+Frames are handed to the UI in batches through a bounded pipeline; when the UI
+cannot keep up, the incoming batch is dropped and counted rather than allowed
+to grow without limit.
 """
 
 from __future__ import annotations
@@ -36,7 +37,8 @@ class FrameLogger:
         if self.format != "jsonl":
             self._writer = csv.writer(self._fh)
             self._writer.writerow(
-                ["timestamp", "channel", "id_hex", "extended", "dlc", "fd", "error", "data_hex"]
+                ["timestamp", "channel", "id_hex", "extended", "dlc", "fd",
+                 "brs", "esi", "error", "data_hex"]
             )
 
     def write(self, frames: List[CanFrame]) -> None:
@@ -47,6 +49,9 @@ class FrameLogger:
                 self._writer.writerow([
                     "{:.6f}".format(frame.timestamp), frame.channel, frame.id_hex,
                     int(frame.is_extended), frame.dlc, int(frame.is_fd),
+                    int(frame.is_bitrate_switch),
+                    "" if frame.is_error_state_indicator is None
+                    else int(frame.is_error_state_indicator),
                     int(frame.is_error_frame), frame.data_hex,
                 ])
         else:
@@ -58,6 +63,8 @@ class FrameLogger:
                     "extended": frame.is_extended,
                     "dlc": frame.dlc,
                     "fd": frame.is_fd,
+                    "brs": frame.is_bitrate_switch,
+                    "esi": frame.is_error_state_indicator,
                     "error": frame.is_error_frame,
                     "data": frame.data_hex,
                 }) + "\n")
@@ -95,6 +102,8 @@ class CaptureWorker(QObject):
         self._logger = logger
 
         self._running = False
+        self._stop_requested = threading.Event()
+        self._finished = False
         self._paused = False
         self._pending = 0
         # Incremented on this worker's thread and decremented on the UI thread,
@@ -106,10 +115,18 @@ class CaptureWorker(QObject):
         self.dropped = 0
         #: Frames kept and logged but not shown, because the display was paused.
         self.display_skipped = 0
+        #: Source/backend exceptions observed by this worker.  This is an
+        #: application-visible source error count; it is not a CAN-controller
+        #: hardware overrun counter.
+        self.source_errors = 0
+        self.logger_failures = 0
+        #: One of stopped / end-of-source / error once the worker completes.
+        self.completion_reason = ""
 
     # -- control (called from the UI thread) ----------------------------
 
     def request_stop(self) -> None:
+        self._stop_requested.set()
         self._running = False
 
     def set_paused(self, paused: bool) -> None:
@@ -131,6 +148,8 @@ class CaptureWorker(QObject):
         self.accepted = 0
         self.dropped = 0
         self.display_skipped = 0
+        self.source_errors = 0
+        self.logger_failures = 0
 
     @property
     def pending(self) -> int:
@@ -165,16 +184,23 @@ class CaptureWorker(QObject):
         # state (which disables Start, Stop, and Pause alike) would never
         # clear and Start would never re-enable. Setting it here first
         # means a stop requested mid-open() simply sticks.
-        self._running = True
+        self._running = not self._stop_requested.is_set()
+        if not self._running:
+            self._finish()
+            return
         try:
             self._source.open()
         except SourceError as exc:
+            self.source_errors += 1
+            self.completion_reason = "error"
             self.errorOccurred.emit(str(exc))
-            self.sourceFinished.emit()
+            self._finish()
             return
         except Exception as exc:  # unexpected driver failure
+            self.source_errors += 1
+            self.completion_reason = "error"
             self.errorOccurred.emit("Failed to open source: {}".format(exc))
-            self.sourceFinished.emit()
+            self._finish()
             return
 
         # A stop requested while still inside open() above must stick: skip
@@ -182,17 +208,19 @@ class CaptureWorker(QObject):
         # ever received anything. The `while` below then simply does not
         # run, and the existing `finally` handles cleanup and
         # sourceFinished exactly as it would for any other stop.
-        if self._running:
+        if self._running and not self._stop_requested.is_set():
             self.started.emit(self._source.describe())
 
         batch: List[CanFrame] = []
         last_emit = time.monotonic()
 
         try:
-            while self._running:
+            while self._running and not self._stop_requested.is_set():
                 try:
                     frame = self._source.receive(timeout=0.05)
                 except Exception as exc:
+                    self.source_errors += 1
+                    self.completion_reason = "error"
                     self.errorOccurred.emit("Receive failed: {}".format(exc))
                     break
 
@@ -213,6 +241,7 @@ class CaptureWorker(QObject):
                     if batch:
                         self._emit(batch)
                         batch = []
+                    self.completion_reason = "end-of-source"
                     self.statusChanged.emit("End of capture file reached")
                     break
 
@@ -223,19 +252,36 @@ class CaptureWorker(QObject):
         finally:
             if batch:
                 self._emit(batch)
+            self._finish()
+
+    def _finish(self) -> None:
+        """Close resources and announce completion exactly once."""
+        if self._finished:
+            return
+        self._finished = True
+        self._running = False
+        if not self.completion_reason:
+            self.completion_reason = "stopped"
+        try:
+            self._source.close()
+        except Exception as exc:
+            self.source_errors += 1
+            self.completion_reason = "error"
+            self.errorOccurred.emit("Source close failed: {}".format(exc))
+        if self._logger is not None:
             try:
-                self._source.close()
-            except Exception:
-                pass
-            if self._logger is not None:
                 self._logger.close()
-            self.sourceFinished.emit()
+            except Exception as exc:
+                self.logger_failures += 1
+                self.errorOccurred.emit("Logging close failed: {}".format(exc))
+        self.sourceFinished.emit()
 
     def _emit(self, batch: List[CanFrame]) -> None:
         if self._logger is not None:
             try:
                 self._logger.write(batch)
             except Exception as exc:
+                self.logger_failures += 1
                 self._logger = None
                 self.errorOccurred.emit("Logging stopped: {}".format(exc))
 

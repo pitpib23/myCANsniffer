@@ -1,0 +1,21 @@
+[FileInfo]
+FileName=synthetic_machine.dcf
+FileVersion=1
+EDSVersion=4.0
+
+[DeviceCommissioning]
+NodeID=4
+Baudrate=500
+
+[MandatoryObjects]
+SupportedObjects=1
+1=0x6041
+
+[6041]
+ParameterName=Configured Statusword
+ObjectType=0x7
+DataType=0x0006
+AccessType=ro
+DefaultValue=0
+ParameterValue=0x1234
+PDOMapping=1

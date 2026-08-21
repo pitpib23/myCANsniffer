@@ -1333,6 +1333,8 @@ class InterpretView(QWidget):
         marks = ["29-bit" if frame.is_extended else "11-bit"]
         if frame.is_fd:
             marks.append("CAN FD")
+        if frame.is_error_state_indicator:
+            marks.append("ESI")
         if frame.is_error_frame:
             marks.append("error")
         if frame.is_remote_frame:

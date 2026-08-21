@@ -17,6 +17,10 @@ class SourceError(RuntimeError):
     """Raised when a source cannot be opened or read safely."""
 
 
+class PassiveSafetyError(SourceError):
+    """Opening was refused because passive operation was not guaranteed."""
+
+
 class CanFrameSource(abc.ABC):
     """Narrow receive-only abstraction over a stream of CAN frames."""
 

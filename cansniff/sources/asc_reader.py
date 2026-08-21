@@ -138,7 +138,7 @@ def _parse_fd(tokens: List[str], base: str, raw_line: str) -> Optional[CanFrame]
     return CanFrame(
         timestamp=timestamp, arb_id=arb_id, data=payload, dlc=length,
         is_extended=extended, is_fd=True, is_bitrate_switch=brs,
-        is_error_frame=esi, channel=channel, raw_line=raw_line,
+        is_error_state_indicator=esi, channel=channel, raw_line=raw_line,
     )
 
 

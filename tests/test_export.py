@@ -22,10 +22,11 @@ from cansniff.sources.asc_reader import parse_asc  # noqa: E402
 
 
 def _frame(t=0.0, arb=0x123, data=b"\x01\x02\x03", ext=False, ch="1",
-           fd=False, brs=False, error=False, remote=False, dlc=None):
+           fd=False, brs=False, esi=None, error=False, remote=False, dlc=None):
     return CanFrame(timestamp=t, arb_id=arb, data=bytes(data),
                     dlc=len(data) if dlc is None else dlc, channel=ch,
                     is_extended=ext, is_fd=fd, is_bitrate_switch=brs,
+                    is_error_state_indicator=esi,
                     is_error_frame=error, is_remote_frame=remote)
 
 
@@ -113,13 +114,15 @@ class AscRoundTripTests(_TempDir):
         self.assertEqual(result.frames[0].data, b"")
 
     def test_can_fd_payload_survives(self):
-        frames = [_frame(data=bytes(range(64)), fd=True, brs=True, dlc=64)]
+        frames = [_frame(data=bytes(range(64)), fd=True, brs=True, esi=True, dlc=64)]
         result = self._round_trip(frames)
         self.assertEqual(len(result.frames), 1)
         got = result.frames[0]
         self.assertTrue(got.is_fd)
         self.assertEqual(len(got.data), 64)
         self.assertEqual(got.dlc, 64, "dlc is a byte count on both sides")
+        self.assertTrue(got.is_error_state_indicator)
+        self.assertFalse(got.is_error_frame)
 
     def test_timestamps_keep_their_ordering_and_spacing(self):
         frames = [_frame(t=i * 0.25) for i in range(6)]
@@ -185,6 +188,13 @@ class CandumpRoundTripTests(_TempDir):
         back = self._read_back(self._export(frames)[0])
         self.assertEqual(str(back[0].channel), "vcan0")
 
+    def test_can_fd_esi_survives(self):
+        frame = _frame(ch="vcan0", data=b"\xAA\xBB", fd=True, brs=True, esi=True)
+        back = self._read_back(self._export([frame])[0])
+        self.assertTrue(back[0].is_fd)
+        self.assertTrue(back[0].error_state_indicator)
+        self.assertFalse(back[0].is_error_frame)
+
     def test_numeric_channel_becomes_an_interface_name(self):
         """candump records interface names, not bare channel numbers."""
         back = self._read_back(self._export([_frame(ch="1", data=b"\x01")])[0])
@@ -220,6 +230,21 @@ class InHouseFormatTests(_TempDir):
         self.assertEqual(len(records), 3)
         self.assertEqual(records[0]["id"], "200")
         self.assertFalse(records[0]["extended"])
+
+    def test_csv_and_jsonl_preserve_known_and_unknown_esi(self):
+        import csv
+        import json
+        frames = [_frame(fd=True, esi=True), _frame(t=0.1, fd=True, esi=None)]
+        csv_path = self._path("esi.csv")
+        jsonl_path = self._path("esi.jsonl")
+        export(frames, csv_path)
+        export(frames, jsonl_path)
+        with open(csv_path, encoding="utf-8", newline="") as fh:
+            rows = list(csv.DictReader(fh))
+        with open(jsonl_path, encoding="utf-8") as fh:
+            records = [json.loads(line) for line in fh]
+        self.assertEqual([row["esi"] for row in rows], ["1", ""])
+        self.assertEqual([record["esi"] for record in records], [True, None])
 
     def test_empty_capture_writes_a_valid_file(self):
         for name in ("empty.csv", "empty.jsonl", "empty.asc", "empty.log"):
@@ -258,6 +283,12 @@ class LossReportingTests(unittest.TestCase):
 
     def test_asc_reports_nothing_for_an_ordinary_capture(self):
         self.assertEqual(describe_losses(FORMATS["asc"], [_frame()]), "")
+
+    def test_file_formats_report_unknown_fd_esi(self):
+        frames = [_frame(fd=True, esi=None)]
+        self.assertIn("unknown CAN FD ESI", describe_losses(FORMATS["asc"], frames))
+        self.assertIn("unknown CAN FD ESI",
+                      describe_losses(FORMATS["candump"], frames))
 
 
 if __name__ == "__main__":

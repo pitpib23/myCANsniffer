@@ -31,6 +31,7 @@ _CAN_ID_MASK = 0x1FFFFFFF
 
 #: FD flag nibble following the second '#' in an FD line's id##flags+data.
 _CANFD_BRS = 0x01
+_CANFD_ESI = 0x02
 
 
 class CandumpParseResult:
@@ -75,10 +76,10 @@ def _parse_line(stripped: str) -> Optional[CanFrame]:
 
     is_fd = False
     brs = False
+    esi = None
     if data.startswith("#"):
         # CAN FD: a one-hex-digit flags nibble follows the second '#'
-        # (bit 0 is BRS; bit 1 is ESI, which this project's CanFrame has no
-        # field for and so is not tracked — see model.py).
+        # (bit 0 is BRS; bit 1 is ESI).
         if len(data) < 2:
             return None
         try:
@@ -87,6 +88,7 @@ def _parse_line(stripped: str) -> Optional[CanFrame]:
             return None
         is_fd = True
         brs = bool(fd_flags & _CANFD_BRS)
+        esi = bool(fd_flags & _CANFD_ESI)
         data = data[2:]
 
     if data[:1].lower() == "r":
@@ -98,7 +100,8 @@ def _parse_line(stripped: str) -> Optional[CanFrame]:
         return CanFrame(
             timestamp=timestamp, arb_id=can_id & _CAN_ID_MASK, data=b"", dlc=dlc,
             is_extended=is_extended, is_remote_frame=True, is_fd=is_fd,
-            is_bitrate_switch=brs, channel=channel, raw_line=stripped,
+            is_bitrate_switch=brs, is_error_state_indicator=esi,
+            channel=channel, raw_line=stripped,
         )
 
     if len(data) % 2 != 0:
@@ -111,7 +114,8 @@ def _parse_line(stripped: str) -> Optional[CanFrame]:
     return CanFrame(
         timestamp=timestamp, arb_id=can_id & _CAN_ID_MASK, data=payload,
         dlc=len(payload), is_extended=is_extended, is_fd=is_fd,
-        is_bitrate_switch=brs, channel=channel, raw_line=stripped,
+        is_bitrate_switch=brs, is_error_state_indicator=esi,
+        channel=channel, raw_line=stripped,
     )
 
 

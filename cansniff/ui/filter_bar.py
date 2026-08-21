@@ -18,7 +18,7 @@ from typing import List, Optional
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
-    QPushButton, QSpinBox, QVBoxLayout, QWidget,
+    QPushButton, QSizePolicy, QSpinBox, QVBoxLayout, QWidget,
 )
 
 from ..filters import FRAME_TYPES, DisplayFilter, parse_int
@@ -76,8 +76,9 @@ class FilterBar(QWidget):
         )
         self.search_box.setAccessibleName("Search CAN ID or payload")
         self.search_box.setClearButtonEnabled(True)
-        self.search_box.setMinimumWidth(240)
+        self.search_box.setMinimumWidth(120)
         self.search_box.setMaximumWidth(340)
+        self.search_box.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.search_box.textChanged.connect(self._on_search_typed)
         row.addWidget(self.search_box)
 
@@ -213,6 +214,34 @@ class FilterBar(QWidget):
     @property
     def filter(self) -> DisplayFilter:
         return self._filter
+
+    def project_state(self):
+        """JSON-safe display-only state; never capture-filter configuration."""
+        value = self._filter
+        return {
+            "text": value.text,
+            "id_min": "" if value.id_min is None else str(value.id_min),
+            "id_max": "" if value.id_max is None else str(value.id_max),
+            "channel": value.channel, "frame_type": value.frame_type,
+            "len_min": "" if value.len_min is None else str(value.len_min),
+            "len_max": "" if value.len_max is None else str(value.len_max),
+        }
+
+    def apply_project_state(self, raw) -> None:
+        value = dict(raw or {})
+        def optional_int(name):
+            text = str(value.get(name, "") or "")
+            try:
+                return int(text) if text else None
+            except ValueError:
+                return None
+        self.known_channels([str(value.get("channel", "") or "")])
+        self._apply(DisplayFilter(
+            text=str(value.get("text", "") or ""),
+            id_min=optional_int("id_min"), id_max=optional_int("id_max"),
+            channel=str(value.get("channel", "") or ""),
+            frame_type=str(value.get("frame_type", "any") or "any"),
+            len_min=optional_int("len_min"), len_max=optional_int("len_max")))
 
     def known_channels(self, channels: List[str]) -> None:
         """Keep the channel choices in step with what has actually arrived."""

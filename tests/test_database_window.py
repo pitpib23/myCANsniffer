@@ -1013,9 +1013,12 @@ class ScreenFitTests(WindowTestCase):
         win._sized = False
         win.showEvent(QShowEvent())
         sizes = win._splitter.sizes()
-        self.assertGreaterEqual(sizes[0], 180)
-        self.assertGreaterEqual(sizes[1], 360)
-        self.assertGreaterEqual(sizes[2], 420)
+        # These are usability floors, not desktop-sized reservations.  The
+        # tables scroll horizontally and the splitter expands them
+        # proportionally once real geometry is available.
+        self.assertGreaterEqual(sizes[0], 140)
+        self.assertGreaterEqual(sizes[1], 220)
+        self.assertGreaterEqual(sizes[2], 280)
 
 
 if __name__ == "__main__":

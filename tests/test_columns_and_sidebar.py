@@ -501,6 +501,12 @@ class NavToggleTests(QtCase):
         self.assertFalse(self.config.get("ui.sidebar_collapsed"))
 
     def test_reopening_restores_the_remembered_width(self):
+        # Initial normal geometry is now clamped to the offscreen platform's
+        # tiny 800px screen.  Resize after showing so this test exercises the
+        # original case: the remembered width genuinely fits the current
+        # workspace and therefore should be restored exactly.
+        self.window.resize(1400, 900)
+        self.app.processEvents()
         self.window.set_sidebar_collapsed(False)
         self.window._sidebar_width = 640
         self._click(0)                      # close
