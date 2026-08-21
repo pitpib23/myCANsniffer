@@ -22,6 +22,13 @@ class PassiveCapability(str, Enum):
     UNKNOWN = "unknown"
 
 
+class DiscoverySafetyMode(str, Enum):
+    """Authorization boundary for one bitrate-discovery operation."""
+
+    PASSIVE_REQUIRED = "passive-required"
+    USER_CONFIRMED_NON_PASSIVE = "user-confirmed-non-passive"
+
+
 class EnumerationStatus(str, Enum):
     FOUND = "found"
     EMPTY = "no-adapters-found"
@@ -66,7 +73,9 @@ class AdapterDescriptor:
     hardware_timestamp: Optional[bool] = None
     max_bitrate: Optional[int] = None
     max_data_bitrate: Optional[int] = None
+    supported_bitrates: Tuple[int, ...] = field(default_factory=tuple)
     implementation_supported: bool = False
+    scan_unavailable_reason: str = ""
     hardware_qualified: bool = False
     electrically_verified: bool = False
     metadata: Tuple[Tuple[str, str], ...] = field(default_factory=tuple)
@@ -115,6 +124,7 @@ class DiscoveryResult:
     reasons: Tuple[str, ...] = field(default_factory=tuple)
     warnings: Tuple[str, ...] = field(default_factory=tuple)
     mode: str = "classic"
+    safety_mode: DiscoverySafetyMode = DiscoverySafetyMode.PASSIVE_REQUIRED
 
 
 @dataclass(frozen=True)

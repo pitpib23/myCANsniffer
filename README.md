@@ -671,19 +671,41 @@ hardware-verified as part of this implementation.
 
 ### Auto Discover (Classic CAN only)
 
-**Auto Discover** enumerates supported interfaces without opening them, then
-offers passive Classic CAN bitrate testing only when the backend can apply the
-candidate bitrate and silent mode together. Manual live configuration remains
-available in Settings and is never overwritten by a failed or cancelled scan.
+**Auto Discover** asks python-can to enumerate every installed backend without
+constructing a CAN bus. It shows every concrete device returned by that public
+detection API, independently of listen-only capability. Generic serial-port
+enumeration is used only to find channel names: each port is shown in the device
+list as a clearly labelled, protocol-unverified SLCAN candidate, while the
+generic `serial` backend itself is omitted because it cannot configure CAN
+bitrate candidates. This is not a claim that the port was electrically
+identified as an SLCAN adapter. Manual live configuration remains available in
+Settings.
 
-| Backend | Enumeration | Passive capture policy | Auto bitrate |
-| --- | --- | --- | --- |
-| Kvaser | python-can CANlib detection | silent driver mode at construction; software-tested policy, no physical record | implemented and software-tested; hardware unqualified |
-| PCAN | python-can PCAN-Basic detection | listen-only immediately after initialization; software-tested policy, no physical record | intentionally unavailable because the initialization window is not hidden |
-| SocketCAN | operating-system interface detection | existing link must already report listen-only; software-tested policy, no physical record | intentionally unavailable; the application does not run privileged `ip link` reconfiguration |
-| Virtual | stable synthetic test entry | nonphysical; software-tested | not applicable to physical bitrate discovery |
-| UDP multicast | not adapter-enumerated | nonphysical network transport | not applicable to physical bitrate discovery |
-| Other backends | not qualified | refused by the existing passive policy | not qualified / refused |
+| Backend/device class | Enumeration | Auto Discover safety |
+| --- | --- | --- |
+| Kvaser | concrete python-can CANlib results | passive confirmation; driver silent mode is requested at construction |
+| PCAN | concrete python-can PCAN-Basic results | strong non-passive warning because listen-only cannot be guaranteed during initialization |
+| SocketCAN | concrete operating-system results | passive confirmation only when current kernel state verifies listen-only; otherwise the strong warning |
+| SLCAN | concrete detector results plus clearly labelled candidates derived from enumerated serial ports | strong warning; python-can 4.6.1 does not identify which serial ports actually speak SLCAN, so protocol remains unverified until opened |
+| Other installed backends | only concrete results returned by their python-can detector | passive confirmation when the policy can guarantee it; otherwise the strong warning |
+| Virtual/nonphysical | clearly labelled synthetic or detected entry | no physical bitrate scan is offered |
+
+Every scan opens a confirmation dialog. Passive-capable devices offer **Start
+Passive Scan** and state that no frames are intentionally transmitted and that
+the result is not automatically applied. Unsupported, unknown, PCAN, or
+externally unverified devices instead show **WARNING — NON-PASSIVE AUTO
+DISCOVERY**. The user must check **I understand this scan is not guaranteed
+passive** before **Start Non-Passive Scan** is enabled. There is no remember
+choice. This authorization is held only by that worker operation and is
+discarded on completion, cancellation, or error.
+
+The non-passive authorization relaxes only the discovery operation's
+listen-only requirement. The application still calls only the receive API: it
+does not send, probe, replay, issue diagnostics, or generate ISO-TP Flow
+Control. A non-listen-only controller can nevertheless acknowledge traffic or
+participate in error handling, so the UI labels its evidence **NON-PASSIVE —
+user authorized**. The normal capture setting is neither changed nor saved by
+Auto Discover.
 
 The default candidate list is 10, 20, 33.333, 50, 83.333, 100, 125, 250,
 500, 800, and 1000 kbit/s. A candidate needs multiple valid Classic data
@@ -694,10 +716,18 @@ result is **No traffic**; if multiple candidates appear stable the result is
 **Ambiguous**, and the user must use manual configuration or gather better
 evidence.
 
-Enumeration results and backend capability declarations are software evidence,
-not electrical qualification. No physical adapter was tested for this feature,
-and Auto Discover never transmits, actively probes nodes, changes SocketCAN
-links, or falls back to an active CAN mode.
+Each candidate uses a new source and is closed before the next candidate.
+Device-declared unsupported rates are skipped and reported. Open failures,
+disconnects, passive-safety failures, and cancellation remain distinct from no
+traffic. Enumeration results and backend capability declarations are software
+evidence, not electrical qualification. No physical adapter was tested for this
+feature. Auto Discover never changes SocketCAN links.
+
+A single stable candidate is only a suggestion. Multiple stable candidates are
+reported as **Ambiguous**, and insufficient evidence is reported without
+selecting the first rate. Even a successful suggestion changes nothing until
+the user explicitly chooses **Use detected configuration**; it never starts
+capture automatically.
 
 ### BUS overview and traffic-profile horizons
 

@@ -1,4 +1,4 @@
-"""Conservative, passive-only Classic CAN bitrate discovery."""
+"""Conservative Classic CAN bitrate discovery with an explicit safety mode."""
 
 from __future__ import annotations
 
@@ -14,7 +14,8 @@ from ..sources import PassiveSafetyError, SourceError
 from ..sources.live import LiveSource
 from .model import (
     AdapterDescriptor, BitrateCandidateResult, CandidateStatus,
-    DiscoveryProgress, DiscoveryResult, DiscoveryStatus,
+    DiscoveryProgress, DiscoveryResult, DiscoverySafetyMode, DiscoveryStatus,
+    PassiveCapability,
 )
 
 log = logging.getLogger(__name__)
@@ -174,6 +175,32 @@ def _failure_candidate(bitrate: int, status: CandidateStatus,
     return BitrateCandidateResult(bitrate, status, reasons=(reason,))
 
 
+def _default_external_verifier(adapter: AdapterDescriptor) -> Optional[bool]:
+    if adapter.interface.lower() != "socketcan":
+        return None
+    # This is a read-only OS query. It neither opens nor reconfigures the bus.
+    from ..sources.live import _socketcan_is_listen_only
+    return _socketcan_is_listen_only(adapter.channel)
+
+
+def passive_scan_available(
+    adapter: AdapterDescriptor,
+    external_verifier: Optional[Callable[[AdapterDescriptor], Optional[bool]]] = None,
+) -> bool:
+    """Return whether passive operation can be guaranteed for this scan now."""
+    if adapter.passive_capability in (
+            PassiveCapability.SUPPORTED_BY_BACKEND_POLICY,
+            PassiveCapability.NOT_APPLICABLE):
+        return True
+    if adapter.passive_capability == PassiveCapability.EXTERNAL_VERIFICATION_REQUIRED:
+        verifier = external_verifier or _default_external_verifier
+        try:
+            return verifier(adapter) is True
+        except Exception:
+            return False
+    return False
+
+
 def discover_bitrate(
     adapter: AdapterDescriptor,
     candidates: Iterable[int] = DEFAULT_BITRATES,
@@ -183,21 +210,45 @@ def discover_bitrate(
     progress: Optional[Callable[[DiscoveryProgress], None]] = None,
     source_factory: Optional[Callable[[Dict[str, object]], object]] = None,
     clock: Callable[[], float] = time.monotonic,
+    safety_mode: DiscoverySafetyMode = DiscoverySafetyMode.PASSIVE_REQUIRED,
+    passive_verifier: Optional[
+        Callable[[AdapterDescriptor], Optional[bool]]] = None,
 ) -> DiscoveryResult:
-    """Observe each bitrate through a fresh, strictly passive LiveSource.
+    """Observe each bitrate through a fresh source under one explicit policy.
 
     A result is selected only when exactly one candidate is ``STABLE``.
     Multiple stable candidates are deliberately ambiguous rather than ranked
     by a fabricated confidence percentage.
     """
-    if not adapter.auto_bitrate_supported:
+    safety_mode = DiscoverySafetyMode(safety_mode)
+    if not adapter.implementation_supported or not adapter.auto_bitrate_supported:
+        reason = adapter.scan_unavailable_reason or (
+            "{} is visible but does not have a usable automatic bitrate path"
+            .format(adapter.interface))
         return DiscoveryResult(
             adapter, DiscoveryStatus.UNSUPPORTED, None, (),
-            reasons=("{} does not support safe automatic bitrate switching"
-                     .format(adapter.interface),),
+            reasons=(reason,), safety_mode=safety_mode,
+        )
+
+    if (safety_mode == DiscoverySafetyMode.PASSIVE_REQUIRED
+            and not passive_scan_available(adapter, passive_verifier)):
+        return DiscoveryResult(
+            adapter, DiscoveryStatus.SAFETY_REJECTED, None, (),
+            reasons=(
+                "Passive/listen-only operation is not guaranteed for {}:{}; "
+                "explicit per-scan non-passive authorization is required"
+                .format(adapter.interface, adapter.channel),
+            ),
+            safety_mode=safety_mode,
         )
 
     rates = tuple(dict.fromkeys(int(rate) for rate in candidates if int(rate) > 0))
+    if adapter.supported_bitrates:
+        # Backend capability data is more specific than the global defaults.
+        # Keep requested rates so unsupported skips remain visible, then add
+        # supported backend-specific rates (for example SLCAN 83.3/750 kbit/s).
+        rates += tuple(rate for rate in adapter.supported_bitrates
+                       if rate not in rates)
     factory = source_factory or LiveSource
     stop = cancel_event or threading.Event()
     results: List[BitrateCandidateResult] = []
@@ -208,7 +259,24 @@ def discover_bitrate(
             return DiscoveryResult(
                 adapter, DiscoveryStatus.CANCELLED, None, tuple(results),
                 reasons=("Discovery was cancelled",),
+                safety_mode=safety_mode,
             )
+        unsupported_reason = ""
+        if adapter.supported_bitrates and bitrate not in adapter.supported_bitrates:
+            unsupported_reason = "Backend/device capability list excludes this bitrate"
+        elif adapter.max_bitrate is not None and bitrate > adapter.max_bitrate:
+            unsupported_reason = "Bitrate exceeds device maximum of {} bit/s".format(
+                adapter.max_bitrate)
+        if unsupported_reason:
+            candidate = _failure_candidate(
+                bitrate, CandidateStatus.UNSUPPORTED, unsupported_reason)
+            results.append(candidate)
+            if progress is not None:
+                progress(DiscoveryProgress(
+                    "candidate-complete",
+                    "{} bit/s: unsupported (skipped)".format(bitrate),
+                    index + 1, total_candidates, candidate))
+            continue
         if progress is not None:
             progress(DiscoveryProgress(
                 "candidate-start", "Testing {} bit/s".format(bitrate),
@@ -220,12 +288,14 @@ def discover_bitrate(
             "channel": adapter.channel,
             "bitrate": bitrate,
             "fd": False,
-            "require_listen_only": True,
+            "require_listen_only": (
+                safety_mode == DiscoverySafetyMode.PASSIVE_REQUIRED),
         })
-        source = factory(settings)
+        source = None
         observations: List[Tuple[float, CanFrame]] = []
         candidate: Optional[BitrateCandidateResult] = None
         try:
+            source = factory(settings)
             # LiveSource.open is the Phase 1 source of truth: preflight and the
             # exact protected kwargs used for can.Bus construction are one path.
             source.open()
@@ -267,17 +337,19 @@ def discover_bitrate(
                 bitrate, CandidateStatus.ERROR,
                 "Backend observation failed: {}".format(exc))
         finally:
-            try:
-                source.close()
-            except Exception as exc:
-                candidate = _failure_candidate(
-                    bitrate, CandidateStatus.ERROR,
-                    "Source close failed: {}".format(exc))
+            if source is not None:
+                try:
+                    source.close()
+                except Exception as exc:
+                    candidate = _failure_candidate(
+                        bitrate, CandidateStatus.ERROR,
+                        "Source close failed: {}".format(exc))
 
         assert candidate is not None
         results.append(candidate)
         log.info(
-            "Passive discovery %s:%s bitrate=%s status=%s frames=%s valid=%s errors=%s",
+            "Discovery %s %s:%s bitrate=%s status=%s frames=%s valid=%s errors=%s",
+            safety_mode.value,
             adapter.interface, adapter.channel, bitrate, candidate.status.value,
             candidate.frames, candidate.valid_frames, candidate.error_frames,
         )
@@ -292,24 +364,32 @@ def discover_bitrate(
                 adapter, DiscoveryStatus.SAFETY_REJECTED, None, tuple(results),
                 reasons=("Passive safety could not be guaranteed; remaining candidates "
                          "were not opened",),
+                safety_mode=safety_mode,
             )
         if candidate.status == CandidateStatus.CANCELLED:
             return DiscoveryResult(
                 adapter, DiscoveryStatus.CANCELLED, None, tuple(results),
                 reasons=("Discovery was cancelled",),
+                safety_mode=safety_mode,
             )
 
     stable = [item for item in results if item.status == CandidateStatus.STABLE]
     if len(stable) == 1:
         selected = stable[0]
-        log.info("Selected passive Classic bitrate %s for %s:%s",
-                 selected.bitrate, adapter.interface, adapter.channel)
+        log.info("Selected Classic bitrate %s for %s:%s (%s)",
+                 selected.bitrate, adapter.interface, adapter.channel,
+                 safety_mode.value)
+        warnings = [
+            "Software-supported only; this adapter has not been electrically qualified"
+        ]
+        if safety_mode == DiscoverySafetyMode.USER_CONFIRMED_NON_PASSIVE:
+            warnings.insert(0,
+                "NON-PASSIVE observation — explicitly authorized for this scan only")
         return DiscoveryResult(
             adapter, DiscoveryStatus.DETECTED, selected.bitrate, tuple(results),
             reasons=("Exactly one candidate produced stable, sustained traffic",
                      "{} bit/s was selected".format(selected.bitrate)),
-            warnings=(("Software-supported only; this adapter has not been "
-                       "electrically qualified"),),
+            warnings=tuple(warnings), safety_mode=safety_mode,
         )
     if len(stable) > 1:
         log.info("Passive Classic bitrate result ambiguous for %s:%s",
@@ -318,13 +398,19 @@ def discover_bitrate(
             adapter, DiscoveryStatus.AMBIGUOUS, None, tuple(results),
             reasons=("Multiple candidates produced stable evidence: {}".format(
                 ", ".join(str(item.bitrate) for item in stable)),),
+            warnings=(("NON-PASSIVE observation — explicitly authorized for this scan only",)
+                      if safety_mode == DiscoverySafetyMode.USER_CONFIRMED_NON_PASSIVE
+                      else ()),
+            safety_mode=safety_mode,
         )
     if results and all(item.status == CandidateStatus.NO_TRAFFIC for item in results):
         return DiscoveryResult(
             adapter, DiscoveryStatus.NO_TRAFFIC, None, tuple(results),
             reasons=("No usable traffic was observed at any candidate bitrate",),
+            safety_mode=safety_mode,
         )
     return DiscoveryResult(
         adapter, DiscoveryStatus.INCONCLUSIVE, None, tuple(results),
         reasons=("No candidate produced sustained stable traffic",),
+        safety_mode=safety_mode,
     )

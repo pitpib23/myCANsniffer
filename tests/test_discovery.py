@@ -9,24 +9,27 @@ import tempfile
 import unittest
 from dataclasses import FrozenInstanceError
 
-from cansniff.discovery.adapters import enumerate_adapters
+from cansniff.discovery.adapters import enumerate_adapters, installed_backends
 from cansniff.discovery.bitrate import DiscoveryThresholds, discover_bitrate
 from cansniff.discovery.model import (
-    AdapterDescriptor, CandidateStatus, DiscoveryStatus, EnumerationStatus,
-    PassiveCapability, Provenance,
+    AdapterDescriptor, CandidateStatus, DiscoverySafetyMode, DiscoveryStatus,
+    EnumerationStatus, PassiveCapability, Provenance,
 )
 from cansniff.model import CanFrame
 from cansniff.config import Config
 from cansniff.sources import PassiveSafetyError, SourceError
+from cansniff.sources.live import LiveSource
 
 
-def _adapter(interface="kvaser", auto=True):
+def _adapter(interface="kvaser", auto=True,
+             passive=PassiveCapability.SUPPORTED_BY_BACKEND_POLICY, **kwargs):
     return AdapterDescriptor(
         display_name="Test adapter", interface=interface, channel="0",
-        passive_capability=PassiveCapability.SUPPORTED_BY_BACKEND_POLICY,
+        passive_capability=passive,
         enumeration_source=Provenance.DETECTED,
         auto_bitrate_supported=auto,
         implementation_supported=True,
+        **kwargs,
     )
 
 
@@ -72,7 +75,7 @@ class AdapterEnumerationTests(unittest.TestCase):
                 raise OSError("driver missing")
             raise RuntimeError("backend exploded")
 
-        with self.assertLogs("cansniff.discovery.adapters", level="WARNING"):
+        with self.assertLogs("cansniff.discovery.adapters", level="INFO"):
             result = enumerate_adapters(
                 interfaces=("kvaser", "pcan"), detector=detector,
                 include_virtual=False)
@@ -80,11 +83,16 @@ class AdapterEnumerationTests(unittest.TestCase):
             [item.status for item in result.backends],
             [EnumerationStatus.BACKEND_UNAVAILABLE, EnumerationStatus.ERROR])
 
-    def test_unsupported_enumeration_is_explicit(self):
+    def test_unknown_backend_is_not_filtered_when_detector_finds_device(self):
         result = enumerate_adapters(
-            interfaces=("vector",), detector=lambda _n, _t: [],
+            interfaces=("vendor_future",),
+            detector=lambda _n, _t: [{"channel": "device-7"}],
             include_virtual=False)
-        self.assertEqual(result.backends[0].status, EnumerationStatus.UNSUPPORTED)
+        self.assertEqual(result.backends[0].status, EnumerationStatus.FOUND)
+        self.assertEqual(result.adapters[0].interface, "vendor_future")
+        self.assertTrue(result.adapters[0].auto_bitrate_supported)
+        self.assertEqual(result.adapters[0].passive_capability,
+                         PassiveCapability.UNKNOWN)
 
     def test_virtual_is_clearly_non_physical(self):
         result = enumerate_adapters(interfaces=(), include_virtual=True)
@@ -94,13 +102,73 @@ class AdapterEnumerationTests(unittest.TestCase):
         self.assertEqual(adapter.passive_capability, PassiveCapability.NOT_APPLICABLE)
         self.assertFalse(adapter.auto_bitrate_supported)
 
-    def test_pcan_and_socketcan_are_not_claimed_as_auto_bitrate_capable(self):
+    def test_pcan_and_socketcan_remain_visible_and_scannable_with_confirmation(self):
         result = enumerate_adapters(
             interfaces=("pcan", "socketcan"),
             detector=lambda name, _timeout: [{"channel": name + "0"}],
             include_virtual=False)
         self.assertTrue(result.adapters)
-        self.assertTrue(all(not item.auto_bitrate_supported for item in result.adapters))
+        self.assertTrue(all(item.auto_bitrate_supported for item in result.adapters))
+        capabilities = {item.interface: item.passive_capability
+                        for item in result.adapters}
+        self.assertEqual(capabilities["pcan"], PassiveCapability.UNSUPPORTED)
+        self.assertEqual(capabilities["socketcan"],
+                         PassiveCapability.EXTERNAL_VERIFICATION_REQUIRED)
+
+    def test_slcan_is_visible_only_when_backend_detector_returns_channel(self):
+        found = enumerate_adapters(
+            interfaces=("slcan",),
+            detector=lambda _n, _t: [{"interface": "slcan", "channel": "COM7"}],
+            include_virtual=False)
+        self.assertEqual(found.adapters[0].channel, "COM7")
+        self.assertTrue(found.adapters[0].auto_bitrate_supported)
+        self.assertEqual(found.adapters[0].passive_capability,
+                         PassiveCapability.UNSUPPORTED)
+        empty = enumerate_adapters(
+            interfaces=("slcan",), detector=lambda _n, _t: [],
+            include_virtual=False)
+        self.assertEqual(empty.adapters, ())
+        self.assertIn("manual channel", empty.backends[0].message)
+
+    def test_enumerated_serial_port_becomes_only_unverified_slcan_candidate(self):
+        result = enumerate_adapters(
+            interfaces=("serial", "slcan"),
+            detector=lambda name, _timeout: (
+                [{"interface": "serial", "channel": "COM7"}]
+                if name == "serial" else []),
+            include_virtual=False)
+        by_key = {item.key: item for item in result.adapters}
+        self.assertNotIn(("serial", "COM7"), by_key)
+        self.assertIn(("slcan", "COM7"), by_key)
+        slcan = by_key[("slcan", "COM7")]
+        self.assertEqual(slcan.display_name, "SLCAN candidate COM7")
+        self.assertEqual(slcan.enumeration_source, Provenance.BACKEND_KNOWN)
+        self.assertTrue(slcan.auto_bitrate_supported)
+        self.assertIn(750000, slcan.supported_bitrates)
+        backend = next(item for item in result.backends
+                       if item.interface == "slcan")
+        self.assertEqual(backend.status, EnumerationStatus.FOUND)
+        self.assertIn("unverified", backend.message)
+        serial_backend = next(item for item in result.backends
+                              if item.interface == "serial")
+        self.assertEqual(serial_backend.adapters, ())
+        self.assertIn("not offered", serial_backend.message)
+
+    def test_default_backend_set_comes_from_installed_python_can_registry(self):
+        names = installed_backends()
+        self.assertIn("slcan", names)
+        self.assertIn("kvaser", names)
+
+    def test_mixed_backends_are_deduplicated_and_stably_ordered(self):
+        def detector(name, _timeout):
+            return [{"channel": "2"}, {"channel": "1"}, {"channel": "2"}]
+        result = enumerate_adapters(
+            interfaces=("slcan", "kvaser", "pcan"), detector=detector,
+            include_virtual=False)
+        self.assertEqual(
+            [(item.interface, item.channel) for item in result.adapters],
+            [("kvaser", "1"), ("kvaser", "2"), ("pcan", "1"),
+             ("pcan", "2"), ("slcan", "1"), ("slcan", "2")])
 
     def test_cancellation_prevents_the_next_backend(self):
         event = threading.Event()
@@ -343,6 +411,70 @@ class BitrateDiscoveryTests(unittest.TestCase):
             source_factory=factory, clock=clock)
         self.assertEqual(result.status, DiscoveryStatus.UNSUPPORTED)
         self.assertEqual(factory.settings, [])
+
+    def test_unsupported_passive_adapter_default_is_refused_before_open(self):
+        clock = _Clock()
+        factory = _Factory(clock, {})
+        result = discover_bitrate(
+            _adapter(interface="slcan", passive=PassiveCapability.UNSUPPORTED),
+            candidates=(500000,), source_factory=factory, clock=clock)
+        self.assertEqual(result.status, DiscoveryStatus.SAFETY_REJECTED)
+        self.assertEqual(factory.settings, [])
+
+    def test_explicit_non_passive_mode_allows_one_scan_without_mutating_settings(self):
+        clock = _Clock()
+        factory = _Factory(clock, {500000: _stable_frames()})
+        base = {"require_listen_only": True, "vendor_option": 4}
+        result = discover_bitrate(
+            _adapter(interface="slcan", passive=PassiveCapability.UNSUPPORTED),
+            candidates=(500000,), base_settings=base, thresholds=THRESHOLDS,
+            source_factory=factory, clock=clock,
+            safety_mode=DiscoverySafetyMode.USER_CONFIRMED_NON_PASSIVE)
+        self.assertEqual(result.status, DiscoveryStatus.DETECTED)
+        self.assertEqual(result.safety_mode,
+                         DiscoverySafetyMode.USER_CONFIRMED_NON_PASSIVE)
+        self.assertFalse(factory.settings[0]["require_listen_only"])
+        self.assertEqual(base["require_listen_only"], True)
+        self.assertTrue(any("NON-PASSIVE" in warning for warning in result.warnings))
+
+        # The one-scan authorization did not alter the production default.
+        ordinary = LiveSource({"interface": "slcan", "channel": "COM7",
+                               "bitrate": 500000,
+                               "require_listen_only": True})
+        with self.assertRaises(PassiveSafetyError):
+            ordinary.qualification_plan()
+
+    def test_external_passive_requires_current_verification(self):
+        adapter = _adapter(
+            interface="socketcan",
+            passive=PassiveCapability.EXTERNAL_VERIFICATION_REQUIRED)
+        clock = _Clock()
+        refused_factory = _Factory(clock, {})
+        refused = discover_bitrate(
+            adapter, candidates=(500000,), source_factory=refused_factory,
+            clock=clock, passive_verifier=lambda _adapter: False)
+        self.assertEqual(refused.status, DiscoveryStatus.SAFETY_REJECTED)
+        self.assertEqual(refused_factory.settings, [])
+
+        allowed_factory = _Factory(clock, {})
+        allowed = discover_bitrate(
+            adapter, candidates=(500000,), source_factory=allowed_factory,
+            clock=clock, passive_verifier=lambda _adapter: True)
+        self.assertEqual(allowed.status, DiscoveryStatus.NO_TRAFFIC)
+        self.assertTrue(allowed_factory.settings[0]["require_listen_only"])
+
+    def test_capability_rates_are_skipped_without_constructing_source(self):
+        clock = _Clock()
+        factory = _Factory(clock, {250000: _stable_frames()})
+        adapter = _adapter(supported_bitrates=(250000,))
+        result = discover_bitrate(
+            adapter, candidates=(125000, 250000, 500000), thresholds=THRESHOLDS,
+            source_factory=factory, clock=clock)
+        self.assertEqual([item["bitrate"] for item in factory.settings], [250000])
+        self.assertEqual(
+            [item.status for item in result.candidate_results],
+            [CandidateStatus.UNSUPPORTED, CandidateStatus.STABLE,
+             CandidateStatus.UNSUPPORTED])
 
 
 if __name__ == "__main__":
