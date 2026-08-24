@@ -4,13 +4,16 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cansniff"
-version = "1.3.0"
-description = "Passive, receive-only CAN bus sniffer and reverse-engineering aid"
+version = "1.4.0"
+description = "Passive, receive-only CAN bus sniffer for Raspberry Pi + CAN HAT (SocketCAN), and reverse-engineering aid"
 readme = "README.md"
 # 3.9 is the floor the code targets: no PEP 604 unions, no dict merge operator.
 requires-python = ">=3.9"
 license = { text = "Proprietary" }
-keywords = ["can", "canbus", "sniffer", "passive", "reverse-engineering", "dbc"]
+keywords = [
+    "can", "canbus", "sniffer", "passive", "reverse-engineering", "dbc",
+    "socketcan", "raspberry-pi",
+]
 classifiers = [
     "Environment :: X11 Applications :: Qt",
     "Intended Audience :: Developers",
@@ -22,9 +25,8 @@ classifiers = [
 
 dependencies = [
     "PySide6>=6.6,<6.9",      # Qt UI; PySide6-Addons supplies QtCharts
-    "python-can>=4.2,<5",     # receive layer + ASC/candump readers and writers
+    "python-can>=4.2,<5",     # receive layer (SocketCAN) + ASC/candump readers and writers
     "cantools>=39,<41",       # read-only DBC parsing and decoding
-    "pyserial>=3.5,<4",       # transport for python-can's slcan backend (recv only)
 ]
 
 [project.optional-dependencies]

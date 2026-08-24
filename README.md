@@ -1,6 +1,10 @@
 # CAN Sniffer
 
-A passive, **receive-only** CAN bus sniffer with a PySide6 UI.
+A passive, **receive-only** CAN bus sniffer with a PySide6 UI, built for a
+**Raspberry Pi with a CAN HAT** running **SocketCAN** — plug in `can0`, press
+Start, and it passively figures out the Classic CAN bitrate itself. It also
+runs on any other Linux SocketCAN host, and offline capture-file analysis
+works anywhere PySide6 does, including Windows.
 
 Its purpose is reverse-engineering unknown payloads: it takes the *data bytes*
 of a frame — no header, no CRC, no checksum — splits them into blocks, and
@@ -8,30 +12,44 @@ shows every byte order and decoding side by side so you can decide for yourself
 which one is the real signal. It presents the data; it does not recommend.
 
 **This program never transmits.** There is no send, inject, replay-to-bus,
-probe, scan or fuzz path anywhere in it. See `CLAUDE.md` for the full safety
-contract.
+probe, scan or fuzz path anywhere in it. Automatic bitrate detection is the one
+feature that reaches outside the process — it runs `ip link` to bring `can0`
+up at each candidate rate — and even that never sends a CAN frame; see
+[SocketCAN live capture](#socketcan-live-capture-raspberry-pi--can-hat) below.
 
 ---
 
 ## Install
 
-```powershell
-python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+**Raspberry Pi / Linux** (the target platform):
+
+```bash
+sudo apt install python3-venv python3-pip iproute2   # iproute2 supplies `ip`
+python3 -m venv venv
+./venv/bin/python -m pip install -r requirements.txt
 ```
 
-Python 3.9+ is required (developed against 3.9.5).
+**Windows** (offline capture-file analysis, or UI development):
+
+```powershell
+python -m venv venv
+.\venv\Scripts\python.exe -m pip install -r requirements.txt
+```
+
+Python 3.9+ is required (developed against 3.9.5). `packaging/linux/install.sh`
+also installs a desktop entry for a normal Raspberry Pi desktop session.
 
 ## Run
 
-```powershell
-.\.venv\Scripts\python.exe main.py                      # uses sniffer_config.json
-.\.venv\Scripts\python.exe main.py --capture baseline.asc
-.\.venv\Scripts\python.exe main.py --monitor            # configured live interface
-.\.venv\Scripts\python.exe main.py --reset-config       # restore defaults
+```bash
+./venv/bin/python main.py                      # uses sniffer_config.json
+./venv/bin/python main.py --capture baseline.asc
+./venv/bin/python main.py --monitor             # configured live interface (can0 by default)
+./venv/bin/python main.py --reset-config        # restore defaults
 ```
 
-On first run `sniffer_config.json` is created next to `main.py`.
+(`.\venv\Scripts\python.exe` on Windows.) On first run `sniffer_config.json` is
+created next to `main.py`.
 
 ---
 
@@ -591,12 +609,17 @@ without touching the code.
 
 | Key | Purpose |
 | --- | --- |
-| `source.type` | `file` (offline playback) or `live` (listen-only hardware) |
+| `source.type` | `file` (offline playback) or `live` (listen-only SocketCAN) |
 | `source.file.path` / `.speed` / `.loop` | capture to replay; speed `0` = as fast as possible, `1.0` = original timing |
-| `source.live.*` | interface, channel, bitrate, CAN FD, safe-by-default listen-only enforcement, extra python-can kwargs |
+| `source.live.channel` | the SocketCAN interface name, e.g. `can0` (default) or `can1` |
+| `source.live.auto_bitrate` | `true` (default) = passively detect the Classic CAN bitrate on Start; `false` = use `.bitrate` as-is against an already-configured link |
+| `source.live.bitrate` | fallback/last-detected Classic CAN bitrate |
+| `source.live.fd` / `.data_bitrate` | manual CAN FD capture against an externally-configured link (auto detection is Classic CAN only) |
+| `source.live.require_listen_only` | safe-by-default listen-only enforcement |
+| `source.live.interface` | always `socketcan` in the production UI; `virtual` only appears in tests |
 | `capture.queue_size` | compatibility name for the batch-sizing target; each emitted batch is capped at `queue_size // 10` frames |
 | `capture.ui_refresh_ms` / `.max_frames_retained` | display cadence and scrollback sizing |
-| `discovery.*` | Classic CAN candidate rates, observation window, and centralized evidence thresholds |
+| `discovery.*` | Classic CAN candidate rates, observation window, and centralized evidence thresholds — see [SocketCAN live capture](#socketcan-live-capture-raspberry-pi--can-hat) |
 | `interpret.*` | block size, byte range, decoder columns |
 | `interpret.bit_window` | frames the bit activity matrix averages over; `0` turns per-bit tracking off |
 | `filters` | capture (receive-side) filter rules |
@@ -630,104 +653,122 @@ evicted. Pause similarly skips display delivery while reception, filtering,
 and logging continue. Logging is synchronous on the capture worker and can
 therefore limit receive throughput if its destination is slow.
 
-### How passive operation is enforced
+### SocketCAN live capture (Raspberry Pi + CAN HAT)
 
-The interface is checked *before* frames are read:
+```
+Raspberry Pi → CAN HAT → Linux SocketCAN → can0 → automatic passive
+bitrate detection → normal CAN capture → this UI
+```
+
+The live backend is **SocketCAN only** — there is no choice of hardware
+backend anywhere in the UI. `source.live.channel` names the interface
+(`can0` by default; set it to `can1` etc. if that is what your HAT enumerates
+as), and interface state is checked *before* frames are ever read:
 
 | Interface | Listen-only mechanism |
 | --- | --- |
-| `virtual`, `udp_multicast` | no physical bus exists |
-| `kvaser` | driver silent mode selected at initialisation |
-| `pcan` | `PCAN_LISTEN_ONLY` applied immediately after initialisation — see caveat |
-| `socketcan` | must be set at OS level; the sniffer verifies it and refuses to open otherwise |
-| anything else | not verifiable → refused by default; explicit unverified opt-out available |
+| `virtual` | no physical bus exists (test/development use only — never offered in the production UI) |
+| `socketcan` | must be set at OS level; the sniffer verifies it with `ip -details link show` and refuses to open otherwise |
+| anything else | not verifiable → refused by default; explicit unverified opt-out available, same as before |
 
-For socketcan, configure it first:
-
-```bash
-sudo ip link set can0 down
-sudo ip link set can0 type can bitrate 500000 listen-only on
-sudo ip link set can0 up
-```
-
-**PCAN caveat.** PCAN-Basic has no initialise-time listen-only parameter, so
-the channel is briefly initialised before the flag is applied. That window is
-reported rather than hidden. If the flag cannot be set, the interface is closed
-and capture refuses to start by default. If the operator explicitly disables
-confirmed listen-only mode, a failed flag application instead continues with a
-red **NOT VERIFIED** warning.
-
-**Known limitation.** Listen-only is enforced where the driver exposes it and
-verified where the OS reports it. On adapters with no such control the sniffer
-refuses to open by default. An operator can uncheck **Require confirmed
+**Known limitation.** Listen-only is verified where the OS reports it and the
+sniffer refuses to open otherwise. An operator can uncheck **Require confirmed
 listen-only mode** (or set `source.live.require_listen_only` to `false`) after
 acknowledging that receive-only software does not guarantee electrically
-passive hardware. That mode is marked **NOT VERIFIED** in the UI. `extra_kwargs`
-still cannot override
-interface, channel, bitrate/FD settings, receive-own-messages, driver mode, or
-listen-only/passive-related bus arguments. These guarantees are covered by
-software tests; no physical adapter's electrical listen-only behavior was
-hardware-verified as part of this implementation.
+passive hardware — that mode is marked **NOT VERIFIED** in the UI.
+`extra_kwargs` still cannot override interface, channel, bitrate/FD settings,
+receive-own-messages, or listen-only/passive-related bus arguments. These
+guarantees are covered by software tests; no physical adapter's electrical
+listen-only behavior was hardware-verified as part of this implementation.
 
-### Auto Discover (Classic CAN only)
+#### Automatic bitrate detection
 
-**Auto Discover** asks python-can to enumerate every installed backend without
-constructing a CAN bus. It shows every concrete device returned by that public
-detection API, independently of listen-only capability. Generic serial-port
-enumeration is used only to find channel names: each port is shown in the device
-list as a clearly labelled, protocol-unverified SLCAN candidate, while the
-generic `serial` backend itself is omitted because it cannot configure CAN
-bitrate candidates. This is not a claim that the port was electrically
-identified as an SLCAN adapter. Manual live configuration remains available in
-Settings.
+With **Automatically detect bitrate on Start** enabled (the default —
+`source.live.auto_bitrate`), pressing **Start** on a live, non-FD source runs
+a passive scan before capture begins:
 
-| Backend/device class | Enumeration | Auto Discover safety |
-| --- | --- | --- |
-| Kvaser | concrete python-can CANlib results | passive confirmation; driver silent mode is requested at construction |
-| PCAN | concrete python-can PCAN-Basic results | strong non-passive warning because listen-only cannot be guaranteed during initialization |
-| SocketCAN | concrete operating-system results | passive confirmation only when current kernel state verifies listen-only; otherwise the strong warning |
-| SLCAN | concrete detector results plus clearly labelled candidates derived from enumerated serial ports | strong warning; python-can 4.6.1 does not identify which serial ports actually speak SLCAN, so protocol remains unverified until opened |
-| Other installed backends | only concrete results returned by their python-can detector | passive confirmation when the policy can guarantee it; otherwise the strong warning |
-| Virtual/nonphysical | clearly labelled synthetic or detected entry | no physical bitrate scan is offered |
+```
+Checking can0…
+Testing 125 kbit/s…
+Testing 250 kbit/s…
+Testing 500 kbit/s…
+Detected 500 kbit/s — listening on can0
+```
 
-Every scan opens a confirmation dialog. Passive-capable devices offer **Start
-Passive Scan** and state that no frames are intentionally transmitted and that
-the result is not automatically applied. Unsupported, unknown, PCAN, or
-externally unverified devices instead show **WARNING — NON-PASSIVE AUTO
-DISCOVERY**. The user must check **I understand this scan is not guaranteed
-passive** before **Start Non-Passive Scan** is enabled. There is no remember
-choice. This authorization is held only by that worker operation and is
-discarded on completion, cancellation, or error.
+For each candidate rate, `cansniff/socketcan.py` runs the exact equivalent of:
 
-The non-passive authorization relaxes only the discovery operation's
-listen-only requirement. The application still calls only the receive API: it
-does not send, probe, replay, issue diagnostics, or generate ISO-TP Flow
-Control. A non-listen-only controller can nevertheless acknowledge traffic or
-participate in error handling, so the UI labels its evidence **NON-PASSIVE —
-user authorized**. The normal capture setting is neither changed nor saved by
-Auto Discover.
+```bash
+ip link set can0 down
+ip link set can0 type can bitrate <candidate> listen-only on
+ip link set can0 up
+```
+
+as three separate, structured `subprocess.run([...])` calls — never a shell
+string, so nothing about a config value or interface name can be interpreted
+as a second command. The sniffer then opens `can0` through the same
+`LiveSource` normal capture uses (which independently re-verifies listen-only
+at the OS level) and passively listens for `discovery.observation_window`
+seconds before closing it and moving to the next rate. **No CAN frame is ever
+sent** during this — every step above is network-interface configuration, not
+bus traffic, and the receive step is the ordinary `Bus.recv()` path.
 
 The default candidate list is 10, 20, 33.333, 50, 83.333, 100, 125, 250,
-500, 800, and 1000 kbit/s. A candidate needs multiple valid Classic data
-frames, a repeated identifier, an acceptable error ratio, and traffic spread
-across a meaningful part of the observation window. One frame, error-only
-traffic, or a short startup burst cannot win. If no traffic is present the
-result is **No traffic**; if multiple candidates appear stable the result is
-**Ambiguous**, and the user must use manual configuration or gather better
-evidence.
+500, 800, and 1000 kbit/s (`discovery.classic_bitrates`). A candidate needs
+multiple valid Classic CAN data frames, a repeated identifier, an acceptable
+error ratio, and traffic spread across a meaningful part of the observation
+window — one frame, error-only traffic, or a short startup burst cannot win.
+Evidence also names the strongest/stablest identifier observed at that rate
+(observation count and time span) purely as a diagnostic, never as the
+selection criterion by itself. Outcomes:
 
-Each candidate uses a new source and is closed before the next candidate.
-Device-declared unsupported rates are skipped and reported. Open failures,
-disconnects, passive-safety failures, and cancellation remain distinct from no
-traffic. Enumeration results and backend capability declarations are software
-evidence, not electrical qualification. No physical adapter was tested for this
-feature. Auto Discover never changes SocketCAN links.
+| Result | Meaning |
+| --- | --- |
+| **Detected** | exactly one candidate produced stable, sustained evidence; `can0` is left configured at that bitrate, listen-only, up, and capture starts automatically |
+| **No traffic** | no candidate produced any usable frames |
+| **Ambiguous** | more than one candidate looked stable; the sniffer will not guess — configure manually instead |
+| **Configuration error** | `ip` is unavailable, `can0` doesn't exist, or the operation was not permitted (see below) — the scan stops rather than repeating the same failure for every candidate |
 
-A single stable candidate is only a suggestion. Multiple stable candidates are
-reported as **Ambiguous**, and insufficient evidence is reported without
-selecting the first rate. Even a successful suggestion changes nothing until
-the user explicitly chooses **Use detected configuration**; it never starts
-capture automatically.
+Every non-Detected outcome brings the interface back down (a single
+deterministic resting state) and capture does **not** start; the status bar
+and a dialog explain why. **Stop** cancels a scan in progress, closes whatever
+temporary receive handle is open, and leaves the interface down — capture
+never starts from a cancelled scan either.
+
+#### Privileges
+
+Configuring `can0` needs `CAP_NET_ADMIN`, same as running `ip link` by hand.
+The application never embeds a password or shells out through anything but a
+structured argument list. Pick one:
+
+- Run under `sudo` (simplest on a dedicated Pi kiosk, but the whole GUI runs
+  as root).
+- Grant the capability to just this virtualenv's interpreter, not the whole
+  system:
+  ```bash
+  sudo setcap cap_net_admin+ep "$(readlink -f venv/bin/python3)"
+  ```
+- Bring `can0` up once at boot as root (a `systemd-networkd` `.network` unit
+  with `[CAN] BitRate=`, or a small oneshot systemd service running the same
+  three `ip link` commands above) and turn **Automatically detect bitrate on
+  Start** off — the application then never needs elevated privileges at all,
+  and manual configuration is exactly the three-line `sudo ip link` recipe
+  above.
+
+Failures are distinguished, never hidden: `ip` not installed, `can0` missing,
+"operation not permitted", the driver rejecting a candidate bitrate, and a
+SocketCAN receive-open failure are all reported as what they are, both in the
+discovery result and — for capture-open failures — the same **Cannot start
+capture** dialog manual live capture already used.
+
+#### Software-tested vs. hardware-qualified
+
+The detection algorithm, its false-positive rejection rules, and the `ip
+link` command construction are covered by mocked unit tests (`tests/
+test_socketcan.py`, `tests/test_discovery.py`, `tests/test_discovery_ui.py`).
+No physical Raspberry Pi, CAN HAT, or real CAN bus was used to validate this
+feature — see [qualification/README.md](qualification/README.md) for what
+`SOFTWARE_TESTED` does and does not claim, and the opt-in
+`tests.hardware.qualify` harness for an actual physical run.
 
 ### BUS overview and traffic-profile horizons
 
@@ -1392,6 +1433,10 @@ cansniff/
   interpret.py                 word splitting, decoders, scale/offset rules
   filters.py                   receive-side filter rules
   capture.py                   worker thread, bounded pipeline, frame logging
+  socketcan.py                 structured `ip link` SocketCAN configuration (no shell)
+  discovery/
+    bitrate.py                 passive Classic CAN bitrate scan over SocketCAN
+    model.py                   immutable candidate/result/progress dataclasses
   analysis/
     definitions.py             shared provenance, validation, conflict, and J1939 interfaces
     canopen_definitions.py     safe EDS/DCF parser, Object Dictionary, passive PDO/SDO enrichment
@@ -1425,11 +1470,12 @@ cansniff/
     __init__.py                CanFrameSource: open / receive / close
     asc_reader.py              Vector ASC parser
     file_source.py             offline playback
-    live.py                    listen-only python-can capture
+    live.py                    listen-only python-can capture (SocketCAN + virtual)
   ui/
     theme.py                   design tokens and the stylesheet
     widgets.py                 nav rail, chips, payload strip, delegates
     filter_bar.py              display filters, chips, clear-all
+    discovery_worker.py        QThread wrapper around the passive bitrate scan
     main_window.py             window, top bar, capture lifecycle
     bus_overview.py            factual BUS and capture-integrity dialog
     protocols_view.py          non-blocking Protocol Survey and detail tables
@@ -1454,9 +1500,11 @@ rather than queued without limit.
 
 ## Tests
 
-```powershell
-.\.venv\Scripts\python.exe -m unittest discover -s tests -t .
+```bash
+./venv/bin/python -m unittest discover -s tests -t .
 ```
+
+(`.\venv\Scripts\python.exe` on Windows.)
 
 The test suite covers payload splitting and decoding, capture-filter evaluation,
 display filtering, ASC parsing, offline playback, the listen-only refusal
@@ -1468,9 +1516,26 @@ clearing filters restores the complete dataset. The UI tests run headless
 against Qt's offscreen platform. Phase 10 fixtures also cover positive and
 negative conversations, ambiguity, overlapping DIDs, validated DTC layouts,
 malformed/truncated payloads, integrity caveats, logical bookmarks, project
-restoration, and a 100,000-transfer/2,000-peer cache/performance shape. Every
-fixture is constructed in-process or
+restoration, and a 100,000-transfer/2,000-peer cache/performance shape.
+
+`tests/test_socketcan.py` covers `ip link` command construction, no shell
+execution, and every structured failure kind (missing `ip`, missing
+interface, permission denied, rejected bitrate, timeout). `tests/
+test_discovery.py` covers the bitrate-scan algorithm itself: false-positive
+rejection (single frame, error-heavy, startup burst, duplicates), ambiguous/
+no-traffic outcomes, forced listen-only per candidate, systemic vs.
+per-candidate configuration failure, cancellation leaving the interface down,
+the winning bitrate being explicitly reapplied at the end, and legacy config
+migration away from removed backends. `tests/test_discovery_ui.py` covers the
+Start → discover → capture Qt lifecycle, including that capture never starts
+after a failed or cancelled scan and that Stop cancels an in-progress one. All
+of this mocks the OS (`ip`) and CAN traffic — no test in the ordinary suite
+opens a real CAN interface, and none transmits.
+
+Every fixture is constructed in-process or
 read from a file — no ordinary test opens a CAN interface, and none transmits.
 Qualification and hardware harness tests are separated under
 `tests/qualification` and `tests/hardware`; the physical harness remains a
-manual command with an exact opt-in confirmation token.
+manual command with an exact opt-in confirmation token. No Raspberry Pi or
+physical CAN HAT validation has been performed as part of this work — see
+[qualification/README.md](qualification/README.md).

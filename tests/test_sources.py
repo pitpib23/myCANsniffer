@@ -765,10 +765,15 @@ class LiveSourceSafetyTests(unittest.TestCase):
         self.assertTrue(source.passive_verified)
 
     def test_support_table(self):
-        self.assertEqual(listen_only_support("kvaser"), "enforced-at-init")
-        self.assertEqual(listen_only_support("pcan"), "enforced-after-init")
+        self.assertEqual(listen_only_support("virtual"), "enforced-at-init")
         self.assertEqual(listen_only_support("socketcan"), "external-configuration")
         self.assertEqual(listen_only_support("made-up"), "unsupported")
+        # Removed live backends are simply unsupported now, refused the same
+        # way any other unrecognized interface name is -- see
+        # test_unknown_interface_is_refused_by_default.
+        for removed in ("kvaser", "pcan", "slcan", "udp_multicast"):
+            with self.subTest(interface=removed):
+                self.assertEqual(listen_only_support(removed), "unsupported")
 
     def test_protected_extra_kwargs_are_rejected(self):
         protected = ("interface", "bustype", "channel", "bitrate",
@@ -802,46 +807,6 @@ class LiveSourceSafetyTests(unittest.TestCase):
         self.assertEqual(calls[0], source._bus_kwargs())
         self.assertFalse(calls[0]["receive_own_messages"])
         source.close()
-
-    def test_pcan_passive_setup_failure_has_no_active_fallback(self):
-        calls = []
-
-        class FakeBus:
-            def __init__(self, **kwargs):
-                calls.append(kwargs)
-                self.closed = False
-
-            def shutdown(self):
-                self.closed = True
-
-        source = LiveSource({"interface": "pcan", "channel": "PCAN_USBBUS1"})
-
-        def reject_listen_only():
-            source.close()
-            raise SourceError("listen-only rejected")
-
-        with mock.patch.dict(sys.modules, {"can": types.SimpleNamespace(Bus=FakeBus)}), \
-                mock.patch.object(source, "_apply_pcan_listen_only",
-                                  side_effect=reject_listen_only):
-            with self.assertRaises(SourceError):
-                source.open()
-        self.assertEqual(len(calls), 1)
-
-    def test_pcan_opt_out_keeps_open_bus_when_listen_only_is_rejected(self):
-        class FakeBus:
-            def shutdown(self):
-                pass
-
-        source = LiveSource({
-            "interface": "pcan", "channel": "PCAN_USBBUS1",
-            "require_listen_only": False,
-        })
-        source._bus = FakeBus()
-        with mock.patch.dict(sys.modules, {
-                "can.interfaces.pcan.basic": types.SimpleNamespace()}):
-            source._apply_pcan_listen_only()
-        self.assertIsNotNone(source._bus)
-        self.assertFalse(source.passive_verified)
 
     def test_live_fd_message_preserves_esi(self):
         message = types.SimpleNamespace(

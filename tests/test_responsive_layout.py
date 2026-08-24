@@ -25,7 +25,6 @@ if HAVE_QT:
     from cansniff.ui.bus_overview import BusOverviewDialog
     from cansniff.ui.config_dialog import ConfigDialog
     from cansniff.ui.database_window import AddMessageDialog, DatabaseWindow
-    from cansniff.ui.discovery_dialog import DiscoveryDialog
     from cansniff.ui.filter_dialog import FilterDialog
     from cansniff.ui.investigation_window import InvestigationWindow
     from cansniff.ui.main_window import MainWindow
@@ -125,7 +124,7 @@ class ResponsiveLayoutTests(unittest.TestCase):
         self.app.processEvents()
         for button in (
                 window.start_button, window.stop_button, window.pause_button,
-                window.clear_button, window.discover_button):
+                window.clear_button):
             parent = button.parentWidget()
             self.assertTrue(parent.rect().contains(button.geometry()), button.text())
             self.assertTrue(button.isVisibleTo(window), button.text())
@@ -157,7 +156,7 @@ class ResponsiveLayoutTests(unittest.TestCase):
 
     def test_all_secondary_dialog_types_use_screen_bounds_policy(self):
         for dialog_type in (
-                BusOverviewDialog, ConfigDialog, DiscoveryDialog, FilterDialog,
+                BusOverviewDialog, ConfigDialog, FilterDialog,
                 AddMessageDialog, DatabaseWindow, ObjectDictionaryDialog,
                 InvestigationWindow, SignalEditDialog):
             self.assertTrue(issubclass(dialog_type, ResponsiveDialog), dialog_type)
@@ -186,30 +185,16 @@ class ResponsiveLayoutTests(unittest.TestCase):
             self.assertTrue(dialog.isEnabled())
             dialog.hide()
 
-        # Keep this geometry-only test independent of adapter enumeration.
-        with patch("cansniff.ui.discovery_dialog.QTimer.singleShot"):
-            discovery = DiscoveryDialog(self.config)
-        self.addCleanup(discovery.deleteLater)
-        discovery.resize(5000, 5000)
-        discovery.move(5000, 5000)
-        discovery.show()
-        self.app.processEvents()
-        available = discovery.screen().availableGeometry().adjusted(
-            20, 20, -20, -20)
-        self.assertLessEqual(discovery.width(), available.width())
-        self.assertLessEqual(discovery.height(), available.height())
-
     def test_settings_can_enable_explicit_unverified_hardware_mode(self):
         dialog = ConfigDialog(self.config)
         self.addCleanup(dialog.deleteLater)
         self.assertTrue(dialog.require_listen_only.isEnabled())
         self.assertTrue(dialog.require_listen_only.isChecked())
-        dialog.live_interface.setCurrentText("vector")
         with patch("cansniff.ui.config_dialog.QMessageBox.warning",
                    return_value=QMessageBox.Yes):
             dialog.require_listen_only.setChecked(False)
         self.assertFalse(dialog.require_listen_only.isChecked())
-        self.assertIn("Unverified mode enabled", dialog.support_label.text())
+        self.assertIn("unverified fallback is allowed", dialog.support_label.text())
         dialog._on_accept()
         self.assertFalse(
             dialog.updated_config()["source"]["live"]["require_listen_only"])

@@ -31,11 +31,16 @@ class HardwareHarnessTests(unittest.TestCase):
         self.assertEqual(record.level, QualificationLevel.SOFTWARE_TESTED)
 
     def test_physical_receive_error_still_closes(self):
-        with patch("cansniff.qualification.hardware.LiveSource.open"), \
+        # qualification_plan()/open() are mocked below, but qualify() still
+        # calls the real _preflight() first to build the recorded plan --
+        # verify listen-only so this stays hermetic (no real `ip` call).
+        with patch("cansniff.sources.live._socketcan_is_listen_only",
+                   return_value=True), \
+             patch("cansniff.qualification.hardware.LiveSource.open"), \
              patch("cansniff.qualification.hardware.LiveSource.receive",
                    side_effect=RuntimeError("receive failed")), \
              patch("cansniff.qualification.hardware.LiveSource.close") as closed:
-            record = qualify({"interface": "kvaser", "channel": "0"}, 0.01,
+            record = qualify({"interface": "socketcan", "channel": "can0"}, 0.01,
                              execute=True, confirmation=EXECUTE_CONFIRMATION)
         closed.assert_called_once()
         self.assertEqual(record.status, QualificationStatus.FAIL)

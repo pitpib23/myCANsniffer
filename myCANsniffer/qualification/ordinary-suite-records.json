@@ -1,0 +1,1253 @@
+{
+  "records": [
+    {
+      "adapter": "",
+      "backend": "",
+      "bitrate": null,
+      "capability": "repository.no_transmit_guard",
+      "channel": "",
+      "driver_version": "",
+      "duration_seconds": 172.76,
+      "environment": {
+        "application_commit": "ee561ee7eba8b0cd286e8369ca023a757cbb6c77",
+        "application_version": "1.3.0",
+        "cantools": "40.7.1",
+        "cpu_count": 4,
+        "os": "Windows-10-10.0.19045-SP0",
+        "pyside6": "6.8.3",
+        "python": "3.9.5",
+        "python_can": "4.6.1"
+      },
+      "evidence": [
+        {
+          "kind": "ordinary-unittest-suite",
+          "notes": "1283 tests passed in 172.760s",
+          "reference": ".\\\\.venv\\\\Scripts\\\\python.exe -m unittest discover -s tests -t .",
+          "sha256": ""
+        }
+      ],
+      "fd": null,
+      "firmware_version": "",
+      "frame_count": null,
+      "hardware_revision": "",
+      "level": "SOFTWARE_TESTED",
+      "limitations": [
+        "Software/synthetic/mocked evidence only; no real capture or physical adapter qualification is implied."
+      ],
+      "provenance": {
+        "test_count": "1283"
+      },
+      "record_id": "ordinary-suite-repository-no_transmit_guard",
+      "schema_version": 1,
+      "status": "PASS",
+      "test_id": "ordinary-full-unittest-discovery",
+      "timestamp": "2026-08-21T03:33:39.333176+00:00"
+    },
+    {
+      "adapter": "",
+      "backend": "",
+      "bitrate": null,
+      "capability": "qualification.framework",
+      "channel": "",
+      "driver_version": "",
+      "duration_seconds": 172.76,
+      "environment": {
+        "application_commit": "ee561ee7eba8b0cd286e8369ca023a757cbb6c77",
+        "application_version": "1.3.0",
+        "cantools": "40.7.1",
+        "cpu_count": 4,
+        "os": "Windows-10-10.0.19045-SP0",
+        "pyside6": "6.8.3",
+        "python": "3.9.5",
+        "python_can": "4.6.1"
+      },
+      "evidence": [
+        {
+          "kind": "ordinary-unittest-suite",
+          "notes": "1283 tests passed in 172.760s",
+          "reference": ".\\\\.venv\\\\Scripts\\\\python.exe -m unittest discover -s tests -t .",
+          "sha256": ""
+        }
+      ],
+      "fd": null,
+      "firmware_version": "",
+      "frame_count": null,
+      "hardware_revision": "",
+      "level": "SOFTWARE_TESTED",
+      "limitations": [
+        "Software/synthetic/mocked evidence only; no real capture or physical adapter qualification is implied."
+      ],
+      "provenance": {
+        "test_count": "1283"
+      },
+      "record_id": "ordinary-suite-qualification-framework",
+      "schema_version": 1,
+      "status": "PASS",
+      "test_id": "ordinary-full-unittest-discovery",
+      "timestamp": "2026-08-21T03:33:39.333176+00:00"
+    },
+    {
+      "adapter": "",
+      "backend": "",
+      "bitrate": null,
+      "capability": "backend.kvaser.enumeration",
+      "channel": "",
+      "driver_version": "",
+      "duration_seconds": 172.76,
+      "environment": {
+        "application_commit": "ee561ee7eba8b0cd286e8369ca023a757cbb6c77",
+        "application_version": "1.3.0",
+        "cantools": "40.7.1",
+        "cpu_count": 4,
+        "os": "Windows-10-10.0.19045-SP0",
+        "pyside6": "6.8.3",
+        "python": "3.9.5",
+        "python_can": "4.6.1"
+      },
+      "evidence": [
+        {
+          "kind": "ordinary-unittest-suite",
+          "notes": "1283 tests passed in 172.760s",
+          "reference": ".\\\\.venv\\\\Scripts\\\\python.exe -m unittest discover -s tests -t .",
+          "sha256": ""
+        }
+      ],
+      "fd": null,
+      "firmware_version": "",
+      "frame_count": null,
+      "hardware_revision": "",
+      "level": "SOFTWARE_TESTED",
+      "limitations": [
+        "Software/synthetic/mocked evidence only; no real capture or physical adapter qualification is implied."
+      ],
+      "provenance": {
+        "test_count": "1283"
+      },
+      "record_id": "ordinary-suite-backend-kvaser-enumeration",
+      "schema_version": 1,
+      "status": "PASS",
+      "test_id": "ordinary-full-unittest-discovery",
+      "timestamp": "2026-08-21T03:33:39.333176+00:00"
+    },
+    {
+      "adapter": "",
+      "backend": "",
+      "bitrate": null,
+      "capability": "backend.kvaser.passive_policy",
+      "channel": "",
+      "driver_version": "",
+      "duration_seconds": 172.76,
+      "environment": {
+        "application_commit": "ee561ee7eba8b0cd286e8369ca023a757cbb6c77",
+        "application_version": "1.3.0",
+        "cantools": "40.7.1",
+        "cpu_count": 4,
+        "os": "Windows-10-10.0.19045-SP0",
+        "pyside6": "6.8.3",
+        "python": "3.9.5",
+        "python_can": "4.6.1"
+      },
+      "evidence": [
+        {
+          "kind": "ordinary-unittest-suite",
+          "notes": "1283 tests passed in 172.760s",
+          "reference": ".\\\\.venv\\\\Scripts\\\\python.exe -m unittest discover -s tests -t .",
+          "sha256": ""
+        }
+      ],
+      "fd": null,
+      "firmware_version": "",
+      "frame_count": null,
+      "hardware_revision": "",
+      "level": "SOFTWARE_TESTED",
+      "limitations": [
+        "Software/synthetic/mocked evidence only; no real capture or physical adapter qualification is implied."
+      ],
+      "provenance": {
+        "test_count": "1283"
+      },
+      "record_id": "ordinary-suite-backend-kvaser-passive_policy",
+      "schema_version": 1,
+      "status": "PASS",
+      "test_id": "ordinary-full-unittest-discovery",
+      "timestamp": "2026-08-21T03:33:39.333176+00:00"
+    },
+    {
+      "adapter": "",
+      "backend": "",
+      "bitrate": null,
+      "capability": "backend.kvaser.passive_bitrate_discovery",
+      "channel": "",
+      "driver_version": "",
+      "duration_seconds": 172.76,
+      "environment": {
+        "application_commit": "ee561ee7eba8b0cd286e8369ca023a757cbb6c77",
+        "application_version": "1.3.0",
+        "cantools": "40.7.1",
+        "cpu_count": 4,
+        "os": "Windows-10-10.0.19045-SP0",
+        "pyside6": "6.8.3",
+        "python": "3.9.5",
+        "python_can": "4.6.1"
+      },
+      "evidence": [
+        {
+          "kind": "ordinary-unittest-suite",
+          "notes": "1283 tests passed in 172.760s",
+          "reference": ".\\\\.venv\\\\Scripts\\\\python.exe -m unittest discover -s tests -t .",
+          "sha256": ""
+        }
+      ],
+      "fd": null,
+      "firmware_version": "",
+      "frame_count": null,
+      "hardware_revision": "",
+      "level": "SOFTWARE_TESTED",
+      "limitations": [
+        "Software/synthetic/mocked evidence only; no real capture or physical adapter qualification is implied."
+      ],
+      "provenance": {
+        "test_count": "1283"
+      },
+      "record_id": "ordinary-suite-backend-kvaser-passive_bitrate_discovery",
+      "schema_version": 1,
+      "status": "PASS",
+      "test_id": "ordinary-full-unittest-discovery",
+      "timestamp": "2026-08-21T03:33:39.333176+00:00"
+    },
+    {
+      "adapter": "",
+      "backend": "",
+      "bitrate": null,
+      "capability": "backend.pcan.enumeration",
+      "channel": "",
+      "driver_version": "",
+      "duration_seconds": 172.76,
+      "environment": {
+        "application_commit": "ee561ee7eba8b0cd286e8369ca023a757cbb6c77",
+        "application_version": "1.3.0",
+        "cantools": "40.7.1",
+        "cpu_count": 4,
+        "os": "Windows-10-10.0.19045-SP0",
+        "pyside6": "6.8.3",
+        "python": "3.9.5",
+        "python_can": "4.6.1"
+      },
+      "evidence": [
+        {
+          "kind": "ordinary-unittest-suite",
+          "notes": "1283 tests passed in 172.760s",
+          "reference": ".\\\\.venv\\\\Scripts\\\\python.exe -m unittest discover -s tests -t .",
+          "sha256": ""
+        }
+      ],
+      "fd": null,
+      "firmware_version": "",
+      "frame_count": null,
+      "hardware_revision": "",
+      "level": "SOFTWARE_TESTED",
+      "limitations": [
+        "Software/synthetic/mocked evidence only; no real capture or physical adapter qualification is implied."
+      ],
+      "provenance": {
+        "test_count": "1283"
+      },
+      "record_id": "ordinary-suite-backend-pcan-enumeration",
+      "schema_version": 1,
+      "status": "PASS",
+      "test_id": "ordinary-full-unittest-discovery",
+      "timestamp": "2026-08-21T03:33:39.333176+00:00"
+    },
+    {
+      "adapter": "",
+      "backend": "",
+      "bitrate": null,
+      "capability": "backend.pcan.passive_policy",
+      "channel": "",
+      "driver_version": "",
+      "duration_seconds": 172.76,
+      "environment": {
+        "application_commit": "ee561ee7eba8b0cd286e8369ca023a757cbb6c77",
+        "application_version": "1.3.0",
+        "cantools": "40.7.1",
+        "cpu_count": 4,
+        "os": "Windows-10-10.0.19045-SP0",
+        "pyside6": "6.8.3",
+        "python": "3.9.5",
+        "python_can": "4.6.1"
+      },
+      "evidence": [
+        {
+          "kind": "ordinary-unittest-suite",
+          "notes": "1283 tests passed in 172.760s",
+          "reference": ".\\\\.venv\\\\Scripts\\\\python.exe -m unittest discover -s tests -t .",
+          "sha256": ""
+        }
+      ],
+      "fd": null,
+      "firmware_version": "",
+      "frame_count": null,
+      "hardware_revision": "",
+      "level": "SOFTWARE_TESTED",
+      "limitations": [
+        "Software/synthetic/mocked evidence only; no real capture or physical adapter qualification is implied."
+      ],
+      "provenance": {
+        "test_count": "1283"
+      },
+      "record_id": "ordinary-suite-backend-pcan-passive_policy",
+      "schema_version": 1,
+      "status": "PASS",
+      "test_id": "ordinary-full-unittest-discovery",
+      "timestamp": "2026-08-21T03:33:39.333176+00:00"
+    },
+    {
+      "adapter": "",
+      "backend": "",
+      "bitrate": null,
+      "capability": "backend.socketcan.enumeration",
+      "channel": "",
+      "driver_version": "",
+      "duration_seconds": 172.76,
+      "environment": {
+        "application_commit": "ee561ee7eba8b0cd286e8369ca023a757cbb6c77",
+        "application_version": "1.3.0",
+        "cantools": "40.7.1",
+        "cpu_count": 4,
+        "os": "Windows-10-10.0.19045-SP0",
+        "pyside6": "6.8.3",
+        "python": "3.9.5",
+        "python_can": "4.6.1"
+      },
+      "evidence": [
+        {
+          "kind": "ordinary-unittest-suite",
+          "notes": "1283 tests passed in 172.760s",
+          "reference": ".\\\\.venv\\\\Scripts\\\\python.exe -m unittest discover -s tests -t .",
+          "sha256": ""
+        }
+      ],
+      "fd": null,
+      "firmware_version": "",
+      "frame_count": null,
+      "hardware_revision": "",
+      "level": "SOFTWARE_TESTED",
+      "limitations": [
+        "Software/synthetic/mocked evidence only; no real capture or physical adapter qualification is implied."
+      ],
+      "provenance": {
+        "test_count": "1283"
+      },
+      "record_id": "ordinary-suite-backend-socketcan-enumeration",
+      "schema_version": 1,
+      "status": "PASS",
+      "test_id": "ordinary-full-unittest-discovery",
+      "timestamp": "2026-08-21T03:33:39.333176+00:00"
+    },
+    {
+      "adapter": "",
+      "backend": "",
+      "bitrate": null,
+      "capability": "backend.socketcan.passive_policy",
+      "channel": "",
+      "driver_version": "",
+      "duration_seconds": 172.76,
+      "environment": {
+        "application_commit": "ee561ee7eba8b0cd286e8369ca023a757cbb6c77",
+        "application_version": "1.3.0",
+        "cantools": "40.7.1",
+        "cpu_count": 4,
+        "os": "Windows-10-10.0.19045-SP0",
+        "pyside6": "6.8.3",
+        "python": "3.9.5",
+        "python_can": "4.6.1"
+      },
+      "evidence": [
+        {
+          "kind": "ordinary-unittest-suite",
+          "notes": "1283 tests passed in 172.760s",
+          "reference": ".\\\\.venv\\\\Scripts\\\\python.exe -m unittest discover -s tests -t .",
+          "sha256": ""
+        }
+      ],
+      "fd": null,
+      "firmware_version": "",
+      "frame_count": null,
+      "hardware_revision": "",
+      "level": "SOFTWARE_TESTED",
+      "limitations": [
+        "Software/synthetic/mocked evidence only; no real capture or physical adapter qualification is implied."
+      ],
+      "provenance": {
+        "test_count": "1283"
+      },
+      "record_id": "ordinary-suite-backend-socketcan-passive_policy",
+      "schema_version": 1,
+      "status": "PASS",
+      "test_id": "ordinary-full-unittest-discovery",
+      "timestamp": "2026-08-21T03:33:39.333176+00:00"
+    },
+    {
+      "adapter": "",
+      "backend": "",
+      "bitrate": null,
+      "capability": "backend.virtual.passive_open",
+      "channel": "",
+      "driver_version": "",
+      "duration_seconds": 172.76,
+      "environment": {
+        "application_commit": "ee561ee7eba8b0cd286e8369ca023a757cbb6c77",
+        "application_version": "1.3.0",
+        "cantools": "40.7.1",
+        "cpu_count": 4,
+        "os": "Windows-10-10.0.19045-SP0",
+        "pyside6": "6.8.3",
+        "python": "3.9.5",
+        "python_can": "4.6.1"
+      },
+      "evidence": [
+        {
+          "kind": "ordinary-unittest-suite",
+          "notes": "1283 tests passed in 172.760s",
+          "reference": ".\\\\.venv\\\\Scripts\\\\python.exe -m unittest discover -s tests -t .",
+          "sha256": ""
+        }
+      ],
+      "fd": null,
+      "firmware_version": "",
+      "frame_count": null,
+      "hardware_revision": "",
+      "level": "SOFTWARE_TESTED",
+      "limitations": [
+        "Software/synthetic/mocked evidence only; no real capture or physical adapter qualification is implied."
+      ],
+      "provenance": {
+        "test_count": "1283"
+      },
+      "record_id": "ordinary-suite-backend-virtual-passive_open",
+      "schema_version": 1,
+      "status": "PASS",
+      "test_id": "ordinary-full-unittest-discovery",
+      "timestamp": "2026-08-21T03:33:39.333176+00:00"
+    },
+    {
+      "adapter": "",
+      "backend": "",
+      "bitrate": null,
+      "capability": "backend.virtual.passive_policy",
+      "channel": "",
+      "driver_version": "",
+      "duration_seconds": 172.76,
+      "environment": {
+        "application_commit": "ee561ee7eba8b0cd286e8369ca023a757cbb6c77",
+        "application_version": "1.3.0",
+        "cantools": "40.7.1",
+        "cpu_count": 4,
+        "os": "Windows-10-10.0.19045-SP0",
+        "pyside6": "6.8.3",
+        "python": "3.9.5",
+        "python_can": "4.6.1"
+      },
+      "evidence": [
+        {
+          "kind": "ordinary-unittest-suite",
+          "notes": "1283 tests passed in 172.760s",
+          "reference": ".\\\\.venv\\\\Scripts\\\\python.exe -m unittest discover -s tests -t .",
+          "sha256": ""
+        }
+      ],
+      "fd": null,
+      "firmware_version": "",
+      "frame_count": null,
+      "hardware_revision": "",
+      "level": "SOFTWARE_TESTED",
+      "limitations": [
+        "Software/synthetic/mocked evidence only; no real capture or physical adapter qualification is implied."
+      ],
+      "provenance": {
+        "test_count": "1283"
+      },
+      "record_id": "ordinary-suite-backend-virtual-passive_policy",
+      "schema_version": 1,
+      "status": "PASS",
+      "test_id": "ordinary-full-unittest-discovery",
+      "timestamp": "2026-08-21T03:33:39.333176+00:00"
+    },
+    {
+      "adapter": "",
+      "backend": "",
+      "bitrate": null,
+      "capability": "backend.virtual.classic_capture",
+      "channel": "",
+      "driver_version": "",
+      "duration_seconds": 172.76,
+      "environment": {
+        "application_commit": "ee561ee7eba8b0cd286e8369ca023a757cbb6c77",
+        "application_version": "1.3.0",
+        "cantools": "40.7.1",
+        "cpu_count": 4,
+        "os": "Windows-10-10.0.19045-SP0",
+        "pyside6": "6.8.3",
+        "python": "3.9.5",
+        "python_can": "4.6.1"
+      },
+      "evidence": [
+        {
+          "kind": "ordinary-unittest-suite",
+          "notes": "1283 tests passed in 172.760s",
+          "reference": ".\\\\.venv\\\\Scripts\\\\python.exe -m unittest discover -s tests -t .",
+          "sha256": ""
+        }
+      ],
+      "fd": null,
+      "firmware_version": "",
+      "frame_count": null,
+      "hardware_revision": "",
+      "level": "SOFTWARE_TESTED",
+      "limitations": [
+        "Software/synthetic/mocked evidence only; no real capture or physical adapter qualification is implied."
+      ],
+      "provenance": {
+        "test_count": "1283"
+      },
+      "record_id": "ordinary-suite-backend-virtual-classic_capture",
+      "schema_version": 1,
+      "status": "PASS",
+      "test_id": "ordinary-full-unittest-discovery",
+      "timestamp": "2026-08-21T03:33:39.333176+00:00"
+    },
+    {
+      "adapter": "",
+      "backend": "",
+      "bitrate": null,
+      "capability": "capture.timestamps",
+      "channel": "",
+      "driver_version": "",
+      "duration_seconds": 172.76,
+      "environment": {
+        "application_commit": "ee561ee7eba8b0cd286e8369ca023a757cbb6c77",
+        "application_version": "1.3.0",
+        "cantools": "40.7.1",
+        "cpu_count": 4,
+        "os": "Windows-10-10.0.19045-SP0",
+        "pyside6": "6.8.3",
+        "python": "3.9.5",
+        "python_can": "4.6.1"
+      },
+      "evidence": [
+        {
+          "kind": "ordinary-unittest-suite",
+          "notes": "1283 tests passed in 172.760s",
+          "reference": ".\\\\.venv\\\\Scripts\\\\python.exe -m unittest discover -s tests -t .",
+          "sha256": ""
+        }
+      ],
+      "fd": null,
+      "firmware_version": "",
+      "frame_count": null,
+      "hardware_revision": "",
+      "level": "SOFTWARE_TESTED",
+      "limitations": [
+        "Software/synthetic/mocked evidence only; no real capture or physical adapter qualification is implied."
+      ],
+      "provenance": {
+        "test_count": "1283"
+      },
+      "record_id": "ordinary-suite-capture-timestamps",
+      "schema_version": 1,
+      "status": "PASS",
+      "test_id": "ordinary-full-unittest-discovery",
+      "timestamp": "2026-08-21T03:33:39.333176+00:00"
+    },
+    {
+      "adapter": "",
+      "backend": "",
+      "bitrate": null,
+      "capability": "capture.esi_brs",
+      "channel": "",
+      "driver_version": "",
+      "duration_seconds": 172.76,
+      "environment": {
+        "application_commit": "ee561ee7eba8b0cd286e8369ca023a757cbb6c77",
+        "application_version": "1.3.0",
+        "cantools": "40.7.1",
+        "cpu_count": 4,
+        "os": "Windows-10-10.0.19045-SP0",
+        "pyside6": "6.8.3",
+        "python": "3.9.5",
+        "python_can": "4.6.1"
+      },
+      "evidence": [
+        {
+          "kind": "ordinary-unittest-suite",
+          "notes": "1283 tests passed in 172.760s",
+          "reference": ".\\\\.venv\\\\Scripts\\\\python.exe -m unittest discover -s tests -t .",
+          "sha256": ""
+        }
+      ],
+      "fd": null,
+      "firmware_version": "",
+      "frame_count": null,
+      "hardware_revision": "",
+      "level": "SOFTWARE_TESTED",
+      "limitations": [
+        "Software/synthetic/mocked evidence only; no real capture or physical adapter qualification is implied."
+      ],
+      "provenance": {
+        "test_count": "1283"
+      },
+      "record_id": "ordinary-suite-capture-esi_brs",
+      "schema_version": 1,
+      "status": "PASS",
+      "test_id": "ordinary-full-unittest-discovery",
+      "timestamp": "2026-08-21T03:33:39.333176+00:00"
+    },
+    {
+      "adapter": "",
+      "backend": "",
+      "bitrate": null,
+      "capability": "capture.error_frames",
+      "channel": "",
+      "driver_version": "",
+      "duration_seconds": 172.76,
+      "environment": {
+        "application_commit": "ee561ee7eba8b0cd286e8369ca023a757cbb6c77",
+        "application_version": "1.3.0",
+        "cantools": "40.7.1",
+        "cpu_count": 4,
+        "os": "Windows-10-10.0.19045-SP0",
+        "pyside6": "6.8.3",
+        "python": "3.9.5",
+        "python_can": "4.6.1"
+      },
+      "evidence": [
+        {
+          "kind": "ordinary-unittest-suite",
+          "notes": "1283 tests passed in 172.760s",
+          "reference": ".\\\\.venv\\\\Scripts\\\\python.exe -m unittest discover -s tests -t .",
+          "sha256": ""
+        }
+      ],
+      "fd": null,
+      "firmware_version": "",
+      "frame_count": null,
+      "hardware_revision": "",
+      "level": "SOFTWARE_TESTED",
+      "limitations": [
+        "Software/synthetic/mocked evidence only; no real capture or physical adapter qualification is implied."
+      ],
+      "provenance": {
+        "test_count": "1283"
+      },
+      "record_id": "ordinary-suite-capture-error_frames",
+      "schema_version": 1,
+      "status": "PASS",
+      "test_id": "ordinary-full-unittest-discovery",
+      "timestamp": "2026-08-21T03:33:39.333176+00:00"
+    },
+    {
+      "adapter": "",
+      "backend": "",
+      "bitrate": null,
+      "capability": "capture.shutdown_restart",
+      "channel": "",
+      "driver_version": "",
+      "duration_seconds": 172.76,
+      "environment": {
+        "application_commit": "ee561ee7eba8b0cd286e8369ca023a757cbb6c77",
+        "application_version": "1.3.0",
+        "cantools": "40.7.1",
+        "cpu_count": 4,
+        "os": "Windows-10-10.0.19045-SP0",
+        "pyside6": "6.8.3",
+        "python": "3.9.5",
+        "python_can": "4.6.1"
+      },
+      "evidence": [
+        {
+          "kind": "ordinary-unittest-suite",
+          "notes": "1283 tests passed in 172.760s",
+          "reference": ".\\\\.venv\\\\Scripts\\\\python.exe -m unittest discover -s tests -t .",
+          "sha256": ""
+        }
+      ],
+      "fd": null,
+      "firmware_version": "",
+      "frame_count": null,
+      "hardware_revision": "",
+      "level": "SOFTWARE_TESTED",
+      "limitations": [
+        "Software/synthetic/mocked evidence only; no real capture or physical adapter qualification is implied."
+      ],
+      "provenance": {
+        "test_count": "1283"
+      },
+      "record_id": "ordinary-suite-capture-shutdown_restart",
+      "schema_version": 1,
+      "status": "PASS",
+      "test_id": "ordinary-full-unittest-discovery",
+      "timestamp": "2026-08-21T03:33:39.333176+00:00"
+    },
+    {
+      "adapter": "",
+      "backend": "",
+      "bitrate": null,
+      "capability": "protocol.canopen.detection",
+      "channel": "",
+      "driver_version": "",
+      "duration_seconds": 172.76,
+      "environment": {
+        "application_commit": "ee561ee7eba8b0cd286e8369ca023a757cbb6c77",
+        "application_version": "1.3.0",
+        "cantools": "40.7.1",
+        "cpu_count": 4,
+        "os": "Windows-10-10.0.19045-SP0",
+        "pyside6": "6.8.3",
+        "python": "3.9.5",
+        "python_can": "4.6.1"
+      },
+      "evidence": [
+        {
+          "kind": "ordinary-unittest-suite",
+          "notes": "1283 tests passed in 172.760s",
+          "reference": ".\\\\.venv\\\\Scripts\\\\python.exe -m unittest discover -s tests -t .",
+          "sha256": ""
+        }
+      ],
+      "fd": null,
+      "firmware_version": "",
+      "frame_count": null,
+      "hardware_revision": "",
+      "level": "SOFTWARE_TESTED",
+      "limitations": [
+        "Software/synthetic/mocked evidence only; no real capture or physical adapter qualification is implied."
+      ],
+      "provenance": {
+        "test_count": "1283"
+      },
+      "record_id": "ordinary-suite-protocol-canopen-detection",
+      "schema_version": 1,
+      "status": "PASS",
+      "test_id": "ordinary-full-unittest-discovery",
+      "timestamp": "2026-08-21T03:33:39.333176+00:00"
+    },
+    {
+      "adapter": "",
+      "backend": "",
+      "bitrate": null,
+      "capability": "protocol.canopen.sdo_pdo",
+      "channel": "",
+      "driver_version": "",
+      "duration_seconds": 172.76,
+      "environment": {
+        "application_commit": "ee561ee7eba8b0cd286e8369ca023a757cbb6c77",
+        "application_version": "1.3.0",
+        "cantools": "40.7.1",
+        "cpu_count": 4,
+        "os": "Windows-10-10.0.19045-SP0",
+        "pyside6": "6.8.3",
+        "python": "3.9.5",
+        "python_can": "4.6.1"
+      },
+      "evidence": [
+        {
+          "kind": "ordinary-unittest-suite",
+          "notes": "1283 tests passed in 172.760s",
+          "reference": ".\\\\.venv\\\\Scripts\\\\python.exe -m unittest discover -s tests -t .",
+          "sha256": ""
+        }
+      ],
+      "fd": null,
+      "firmware_version": "",
+      "frame_count": null,
+      "hardware_revision": "",
+      "level": "SOFTWARE_TESTED",
+      "limitations": [
+        "Software/synthetic/mocked evidence only; no real capture or physical adapter qualification is implied."
+      ],
+      "provenance": {
+        "test_count": "1283"
+      },
+      "record_id": "ordinary-suite-protocol-canopen-sdo_pdo",
+      "schema_version": 1,
+      "status": "PASS",
+      "test_id": "ordinary-full-unittest-discovery",
+      "timestamp": "2026-08-21T03:33:39.333176+00:00"
+    },
+    {
+      "adapter": "",
+      "backend": "",
+      "bitrate": null,
+      "capability": "protocol.j1939.detection",
+      "channel": "",
+      "driver_version": "",
+      "duration_seconds": 172.76,
+      "environment": {
+        "application_commit": "ee561ee7eba8b0cd286e8369ca023a757cbb6c77",
+        "application_version": "1.3.0",
+        "cantools": "40.7.1",
+        "cpu_count": 4,
+        "os": "Windows-10-10.0.19045-SP0",
+        "pyside6": "6.8.3",
+        "python": "3.9.5",
+        "python_can": "4.6.1"
+      },
+      "evidence": [
+        {
+          "kind": "ordinary-unittest-suite",
+          "notes": "1283 tests passed in 172.760s",
+          "reference": ".\\\\.venv\\\\Scripts\\\\python.exe -m unittest discover -s tests -t .",
+          "sha256": ""
+        }
+      ],
+      "fd": null,
+      "firmware_version": "",
+      "frame_count": null,
+      "hardware_revision": "",
+      "level": "SOFTWARE_TESTED",
+      "limitations": [
+        "Software/synthetic/mocked evidence only; no real capture or physical adapter qualification is implied."
+      ],
+      "provenance": {
+        "test_count": "1283"
+      },
+      "record_id": "ordinary-suite-protocol-j1939-detection",
+      "schema_version": 1,
+      "status": "PASS",
+      "test_id": "ordinary-full-unittest-discovery",
+      "timestamp": "2026-08-21T03:33:39.333176+00:00"
+    },
+    {
+      "adapter": "",
+      "backend": "",
+      "bitrate": null,
+      "capability": "protocol.j1939.bam",
+      "channel": "",
+      "driver_version": "",
+      "duration_seconds": 172.76,
+      "environment": {
+        "application_commit": "ee561ee7eba8b0cd286e8369ca023a757cbb6c77",
+        "application_version": "1.3.0",
+        "cantools": "40.7.1",
+        "cpu_count": 4,
+        "os": "Windows-10-10.0.19045-SP0",
+        "pyside6": "6.8.3",
+        "python": "3.9.5",
+        "python_can": "4.6.1"
+      },
+      "evidence": [
+        {
+          "kind": "ordinary-unittest-suite",
+          "notes": "1283 tests passed in 172.760s",
+          "reference": ".\\\\.venv\\\\Scripts\\\\python.exe -m unittest discover -s tests -t .",
+          "sha256": ""
+        }
+      ],
+      "fd": null,
+      "firmware_version": "",
+      "frame_count": null,
+      "hardware_revision": "",
+      "level": "SOFTWARE_TESTED",
+      "limitations": [
+        "Software/synthetic/mocked evidence only; no real capture or physical adapter qualification is implied."
+      ],
+      "provenance": {
+        "test_count": "1283"
+      },
+      "record_id": "ordinary-suite-protocol-j1939-bam",
+      "schema_version": 1,
+      "status": "PASS",
+      "test_id": "ordinary-full-unittest-discovery",
+      "timestamp": "2026-08-21T03:33:39.333176+00:00"
+    },
+    {
+      "adapter": "",
+      "backend": "",
+      "bitrate": null,
+      "capability": "protocol.j1939.rts_cts",
+      "channel": "",
+      "driver_version": "",
+      "duration_seconds": 172.76,
+      "environment": {
+        "application_commit": "ee561ee7eba8b0cd286e8369ca023a757cbb6c77",
+        "application_version": "1.3.0",
+        "cantools": "40.7.1",
+        "cpu_count": 4,
+        "os": "Windows-10-10.0.19045-SP0",
+        "pyside6": "6.8.3",
+        "python": "3.9.5",
+        "python_can": "4.6.1"
+      },
+      "evidence": [
+        {
+          "kind": "ordinary-unittest-suite",
+          "notes": "1283 tests passed in 172.760s",
+          "reference": ".\\\\.venv\\\\Scripts\\\\python.exe -m unittest discover -s tests -t .",
+          "sha256": ""
+        }
+      ],
+      "fd": null,
+      "firmware_version": "",
+      "frame_count": null,
+      "hardware_revision": "",
+      "level": "SOFTWARE_TESTED",
+      "limitations": [
+        "Software/synthetic/mocked evidence only; no real capture or physical adapter qualification is implied."
+      ],
+      "provenance": {
+        "test_count": "1283"
+      },
+      "record_id": "ordinary-suite-protocol-j1939-rts_cts",
+      "schema_version": 1,
+      "status": "PASS",
+      "test_id": "ordinary-full-unittest-discovery",
+      "timestamp": "2026-08-21T03:33:39.333176+00:00"
+    },
+    {
+      "adapter": "",
+      "backend": "",
+      "bitrate": null,
+      "capability": "protocol.isotp.reassembly",
+      "channel": "",
+      "driver_version": "",
+      "duration_seconds": 172.76,
+      "environment": {
+        "application_commit": "ee561ee7eba8b0cd286e8369ca023a757cbb6c77",
+        "application_version": "1.3.0",
+        "cantools": "40.7.1",
+        "cpu_count": 4,
+        "os": "Windows-10-10.0.19045-SP0",
+        "pyside6": "6.8.3",
+        "python": "3.9.5",
+        "python_can": "4.6.1"
+      },
+      "evidence": [
+        {
+          "kind": "ordinary-unittest-suite",
+          "notes": "1283 tests passed in 172.760s",
+          "reference": ".\\\\.venv\\\\Scripts\\\\python.exe -m unittest discover -s tests -t .",
+          "sha256": ""
+        }
+      ],
+      "fd": null,
+      "firmware_version": "",
+      "frame_count": null,
+      "hardware_revision": "",
+      "level": "SOFTWARE_TESTED",
+      "limitations": [
+        "Software/synthetic/mocked evidence only; no real capture or physical adapter qualification is implied."
+      ],
+      "provenance": {
+        "test_count": "1283"
+      },
+      "record_id": "ordinary-suite-protocol-isotp-reassembly",
+      "schema_version": 1,
+      "status": "PASS",
+      "test_id": "ordinary-full-unittest-discovery",
+      "timestamp": "2026-08-21T03:33:39.333176+00:00"
+    },
+    {
+      "adapter": "",
+      "backend": "",
+      "bitrate": null,
+      "capability": "protocol.uds.conversations",
+      "channel": "",
+      "driver_version": "",
+      "duration_seconds": 172.76,
+      "environment": {
+        "application_commit": "ee561ee7eba8b0cd286e8369ca023a757cbb6c77",
+        "application_version": "1.3.0",
+        "cantools": "40.7.1",
+        "cpu_count": 4,
+        "os": "Windows-10-10.0.19045-SP0",
+        "pyside6": "6.8.3",
+        "python": "3.9.5",
+        "python_can": "4.6.1"
+      },
+      "evidence": [
+        {
+          "kind": "ordinary-unittest-suite",
+          "notes": "1283 tests passed in 172.760s",
+          "reference": ".\\\\.venv\\\\Scripts\\\\python.exe -m unittest discover -s tests -t .",
+          "sha256": ""
+        }
+      ],
+      "fd": null,
+      "firmware_version": "",
+      "frame_count": null,
+      "hardware_revision": "",
+      "level": "SOFTWARE_TESTED",
+      "limitations": [
+        "Software/synthetic/mocked evidence only; no real capture or physical adapter qualification is implied."
+      ],
+      "provenance": {
+        "test_count": "1283"
+      },
+      "record_id": "ordinary-suite-protocol-uds-conversations",
+      "schema_version": 1,
+      "status": "PASS",
+      "test_id": "ordinary-full-unittest-discovery",
+      "timestamp": "2026-08-21T03:33:39.333176+00:00"
+    },
+    {
+      "adapter": "",
+      "backend": "",
+      "bitrate": null,
+      "capability": "definition.dbc",
+      "channel": "",
+      "driver_version": "",
+      "duration_seconds": 172.76,
+      "environment": {
+        "application_commit": "ee561ee7eba8b0cd286e8369ca023a757cbb6c77",
+        "application_version": "1.3.0",
+        "cantools": "40.7.1",
+        "cpu_count": 4,
+        "os": "Windows-10-10.0.19045-SP0",
+        "pyside6": "6.8.3",
+        "python": "3.9.5",
+        "python_can": "4.6.1"
+      },
+      "evidence": [
+        {
+          "kind": "ordinary-unittest-suite",
+          "notes": "1283 tests passed in 172.760s",
+          "reference": ".\\\\.venv\\\\Scripts\\\\python.exe -m unittest discover -s tests -t .",
+          "sha256": ""
+        }
+      ],
+      "fd": null,
+      "firmware_version": "",
+      "frame_count": null,
+      "hardware_revision": "",
+      "level": "SOFTWARE_TESTED",
+      "limitations": [
+        "Software/synthetic/mocked evidence only; no real capture or physical adapter qualification is implied."
+      ],
+      "provenance": {
+        "test_count": "1283"
+      },
+      "record_id": "ordinary-suite-definition-dbc",
+      "schema_version": 1,
+      "status": "PASS",
+      "test_id": "ordinary-full-unittest-discovery",
+      "timestamp": "2026-08-21T03:33:39.333176+00:00"
+    },
+    {
+      "adapter": "",
+      "backend": "",
+      "bitrate": null,
+      "capability": "definition.eds",
+      "channel": "",
+      "driver_version": "",
+      "duration_seconds": 172.76,
+      "environment": {
+        "application_commit": "ee561ee7eba8b0cd286e8369ca023a757cbb6c77",
+        "application_version": "1.3.0",
+        "cantools": "40.7.1",
+        "cpu_count": 4,
+        "os": "Windows-10-10.0.19045-SP0",
+        "pyside6": "6.8.3",
+        "python": "3.9.5",
+        "python_can": "4.6.1"
+      },
+      "evidence": [
+        {
+          "kind": "ordinary-unittest-suite",
+          "notes": "1283 tests passed in 172.760s",
+          "reference": ".\\\\.venv\\\\Scripts\\\\python.exe -m unittest discover -s tests -t .",
+          "sha256": ""
+        }
+      ],
+      "fd": null,
+      "firmware_version": "",
+      "frame_count": null,
+      "hardware_revision": "",
+      "level": "SOFTWARE_TESTED",
+      "limitations": [
+        "Software/synthetic/mocked evidence only; no real capture or physical adapter qualification is implied."
+      ],
+      "provenance": {
+        "test_count": "1283"
+      },
+      "record_id": "ordinary-suite-definition-eds",
+      "schema_version": 1,
+      "status": "PASS",
+      "test_id": "ordinary-full-unittest-discovery",
+      "timestamp": "2026-08-21T03:33:39.333176+00:00"
+    },
+    {
+      "adapter": "",
+      "backend": "",
+      "bitrate": null,
+      "capability": "definition.dcf",
+      "channel": "",
+      "driver_version": "",
+      "duration_seconds": 172.76,
+      "environment": {
+        "application_commit": "ee561ee7eba8b0cd286e8369ca023a757cbb6c77",
+        "application_version": "1.3.0",
+        "cantools": "40.7.1",
+        "cpu_count": 4,
+        "os": "Windows-10-10.0.19045-SP0",
+        "pyside6": "6.8.3",
+        "python": "3.9.5",
+        "python_can": "4.6.1"
+      },
+      "evidence": [
+        {
+          "kind": "ordinary-unittest-suite",
+          "notes": "1283 tests passed in 172.760s",
+          "reference": ".\\\\.venv\\\\Scripts\\\\python.exe -m unittest discover -s tests -t .",
+          "sha256": ""
+        }
+      ],
+      "fd": null,
+      "firmware_version": "",
+      "frame_count": null,
+      "hardware_revision": "",
+      "level": "SOFTWARE_TESTED",
+      "limitations": [
+        "Software/synthetic/mocked evidence only; no real capture or physical adapter qualification is implied."
+      ],
+      "provenance": {
+        "test_count": "1283"
+      },
+      "record_id": "ordinary-suite-definition-dcf",
+      "schema_version": 1,
+      "status": "PASS",
+      "test_id": "ordinary-full-unittest-discovery",
+      "timestamp": "2026-08-21T03:33:39.333176+00:00"
+    },
+    {
+      "adapter": "",
+      "backend": "",
+      "bitrate": null,
+      "capability": "definition.j1939_json",
+      "channel": "",
+      "driver_version": "",
+      "duration_seconds": 172.76,
+      "environment": {
+        "application_commit": "ee561ee7eba8b0cd286e8369ca023a757cbb6c77",
+        "application_version": "1.3.0",
+        "cantools": "40.7.1",
+        "cpu_count": 4,
+        "os": "Windows-10-10.0.19045-SP0",
+        "pyside6": "6.8.3",
+        "python": "3.9.5",
+        "python_can": "4.6.1"
+      },
+      "evidence": [
+        {
+          "kind": "ordinary-unittest-suite",
+          "notes": "1283 tests passed in 172.760s",
+          "reference": ".\\\\.venv\\\\Scripts\\\\python.exe -m unittest discover -s tests -t .",
+          "sha256": ""
+        }
+      ],
+      "fd": null,
+      "firmware_version": "",
+      "frame_count": null,
+      "hardware_revision": "",
+      "level": "SOFTWARE_TESTED",
+      "limitations": [
+        "Software/synthetic/mocked evidence only; no real capture or physical adapter qualification is implied."
+      ],
+      "provenance": {
+        "test_count": "1283"
+      },
+      "record_id": "ordinary-suite-definition-j1939_json",
+      "schema_version": 1,
+      "status": "PASS",
+      "test_id": "ordinary-full-unittest-discovery",
+      "timestamp": "2026-08-21T03:33:39.333176+00:00"
+    },
+    {
+      "adapter": "",
+      "backend": "",
+      "bitrate": null,
+      "capability": "profile.matching",
+      "channel": "",
+      "driver_version": "",
+      "duration_seconds": 172.76,
+      "environment": {
+        "application_commit": "ee561ee7eba8b0cd286e8369ca023a757cbb6c77",
+        "application_version": "1.3.0",
+        "cantools": "40.7.1",
+        "cpu_count": 4,
+        "os": "Windows-10-10.0.19045-SP0",
+        "pyside6": "6.8.3",
+        "python": "3.9.5",
+        "python_can": "4.6.1"
+      },
+      "evidence": [
+        {
+          "kind": "ordinary-unittest-suite",
+          "notes": "1283 tests passed in 172.760s",
+          "reference": ".\\\\.venv\\\\Scripts\\\\python.exe -m unittest discover -s tests -t .",
+          "sha256": ""
+        }
+      ],
+      "fd": null,
+      "firmware_version": "",
+      "frame_count": null,
+      "hardware_revision": "",
+      "level": "SOFTWARE_TESTED",
+      "limitations": [
+        "Software/synthetic/mocked evidence only; no real capture or physical adapter qualification is implied."
+      ],
+      "provenance": {
+        "test_count": "1283"
+      },
+      "record_id": "ordinary-suite-profile-matching",
+      "schema_version": 1,
+      "status": "PASS",
+      "test_id": "ordinary-full-unittest-discovery",
+      "timestamp": "2026-08-21T03:33:39.333176+00:00"
+    },
+    {
+      "adapter": "",
+      "backend": "",
+      "bitrate": null,
+      "capability": "investigation.projects_reports",
+      "channel": "",
+      "driver_version": "",
+      "duration_seconds": 172.76,
+      "environment": {
+        "application_commit": "ee561ee7eba8b0cd286e8369ca023a757cbb6c77",
+        "application_version": "1.3.0",
+        "cantools": "40.7.1",
+        "cpu_count": 4,
+        "os": "Windows-10-10.0.19045-SP0",
+        "pyside6": "6.8.3",
+        "python": "3.9.5",
+        "python_can": "4.6.1"
+      },
+      "evidence": [
+        {
+          "kind": "ordinary-unittest-suite",
+          "notes": "1283 tests passed in 172.760s",
+          "reference": ".\\\\.venv\\\\Scripts\\\\python.exe -m unittest discover -s tests -t .",
+          "sha256": ""
+        }
+      ],
+      "fd": null,
+      "firmware_version": "",
+      "frame_count": null,
+      "hardware_revision": "",
+      "level": "SOFTWARE_TESTED",
+      "limitations": [
+        "Software/synthetic/mocked evidence only; no real capture or physical adapter qualification is implied."
+      ],
+      "provenance": {
+        "test_count": "1283"
+      },
+      "record_id": "ordinary-suite-investigation-projects_reports",
+      "schema_version": 1,
+      "status": "PASS",
+      "test_id": "ordinary-full-unittest-discovery",
+      "timestamp": "2026-08-21T03:33:39.333176+00:00"
+    }
+  ],
+  "schema_version": 1,
+  "source": "explicit completed ordinary suite"
+}

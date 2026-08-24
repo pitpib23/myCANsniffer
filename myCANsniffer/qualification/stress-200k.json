@@ -1,0 +1,36 @@
+{
+  "timestamp": "2026-08-21T03:21:07.036246+00:00",
+  "environment": {
+    "os": "Windows-10-10.0.19045-SP0",
+    "python": "3.9.5",
+    "application_version": "1.3.0",
+    "application_commit": "ee561ee7eba8b0cd286e8369ca023a757cbb6c77",
+    "pyside6": "6.8.3",
+    "python_can": "4.6.1",
+    "cantools": "40.7.1",
+    "cpu_count": 4
+  },
+  "frames": 200000,
+  "retained": 200000,
+  "bounded_to": 200000,
+  "processed": 200000,
+  "ingest_seconds": 9.6183579,
+  "profile_snapshot_seconds": 0.005454700000001367,
+  "frames_per_second": 20793.57017895955,
+  "analysis": {
+    "protocol_survey_seconds": 15.2765882,
+    "protocol_levels": {
+      "CANopen": "None",
+      "J1939": "None",
+      "ISO-TP": "Weak",
+      "UDS": "None",
+      "Unknown / proprietary": "Possible"
+    },
+    "compare_seconds": 12.881071200000001,
+    "compare_messages": 64,
+    "profile_matching_seconds": 0.047741699999996,
+    "profile_candidates": 64
+  },
+  "traced_current_bytes": 96131292,
+  "traced_peak_bytes": 108542644
+}
