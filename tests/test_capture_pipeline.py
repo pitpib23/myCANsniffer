@@ -398,5 +398,83 @@ class CounterTests(unittest.TestCase):
         self.assertEqual(worker.completion_reason, "end-of-source")
 
 
+class PrepareHookTests(unittest.TestCase):
+    """The optional `prepare` hook -- what cansniff/ui/main_window.py wires
+    a SocketCanSessionController's prepare_manual into (see
+    cansniff/session.py) so physical-link configuration runs on this
+    worker's own thread, before source.open(), never on the Qt UI thread.
+    CaptureWorker itself knows nothing about SocketCAN -- `prepare` is a
+    plain callable.
+    """
+
+    def test_prepare_runs_before_open(self):
+        order = []
+
+        class _Source(_OneFrameSource):
+            def open(self):
+                order.append("open")
+                super().open()
+
+        worker = CaptureWorker(
+            source=_Source(), filter_set=FilterSet.from_config([]),
+            prepare=lambda: order.append("prepare"))
+        worker.run()
+        self.assertEqual(order, ["prepare", "open"])
+
+    def test_prepare_failure_prevents_open_and_is_reported_as_a_source_error(self):
+        opened = []
+
+        class _Source(_OneFrameSource):
+            def open(self):
+                opened.append(True)
+                super().open()
+
+        def failing_prepare():
+            raise SourceError("SocketCAN interface 'can0' was not found.")
+
+        worker = CaptureWorker(
+            source=_Source(), filter_set=FilterSet.from_config([]),
+            prepare=failing_prepare)
+        errors = []
+        worker.errorOccurred.connect(errors.append)
+        worker.run()
+        self.assertEqual(opened, [], "open() must never run after prepare() failed")
+        self.assertEqual(worker.source_errors, 1)
+        self.assertEqual(worker.completion_reason, "error")
+        self.assertEqual(errors, ["SocketCAN interface 'can0' was not found."])
+
+    def test_unexpected_prepare_exception_is_also_reported_not_raised(self):
+        worker = CaptureWorker(
+            source=_EndlessSource(), filter_set=FilterSet.from_config([]),
+            prepare=lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+        worker.run()  # must not raise
+        self.assertEqual(worker.source_errors, 1)
+        self.assertEqual(worker.completion_reason, "error")
+
+    def test_no_prepare_hook_behaves_exactly_as_before(self):
+        worker = CaptureWorker(
+            source=_OneFrameSource(), filter_set=FilterSet.from_config([]))
+        worker.run()
+        self.assertEqual(worker.completion_reason, "end-of-source")
+
+    def test_stop_requested_during_prepare_is_honoured_without_opening(self):
+        opened = []
+
+        class _Source(_OneFrameSource):
+            def open(self):
+                opened.append(True)
+                super().open()
+
+        def prepare_then_stop():
+            worker.request_stop()
+
+        worker = CaptureWorker(
+            source=_Source(), filter_set=FilterSet.from_config([]),
+            prepare=prepare_then_stop)
+        worker.run()
+        self.assertEqual(opened, [])
+        self.assertEqual(worker.completion_reason, "stopped")
+
+
 if __name__ == "__main__":
     unittest.main()

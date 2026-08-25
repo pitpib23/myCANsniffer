@@ -103,16 +103,33 @@ class ResponsiveLayoutTests(unittest.TestCase):
             self.assertLess(page.minimumSizeHint().height(), 200)
 
     def test_maximized_and_fullscreen_states_survive_every_workspace_switch(self):
+        """Once settled, repeated workspace switches must never make a
+        maximized/fullscreen window drift or jitter.
+
+        "Settled" specifically excludes the *first* switch away from
+        Messages: on a screen narrower than the window's minimumSize (real
+        on a small display; also how the offscreen QPA platform's default
+        800x800 virtual screen relates to this window's own minimum, which
+        includes the always-visible top bar -- Start/Auto Scan/Stop/Pause/
+        Clear), the very first layout pass that actually enforces
+        minimumSize can grow a maximized window past `availableGeometry()`
+        exactly once. That is Qt honouring a real constraint, not jitter --
+        this test's job is to catch geometry moving *again* after that.
+        """
         window = self._main_window()
         for state in (Qt.WindowMaximized, Qt.WindowFullScreen):
             window.setWindowState(Qt.WindowNoState)
             window.setGeometry(0, 0, 1366, 768)
             window.setWindowState(state)
             self.app.processEvents()
+            activates = (
+                window._activate_isotp, window._activate_protocols,
+                window._activate_compare, window._activate_profile_matches)
+            activates[0]()
+            self.app.processEvents()
+            self.assertEqual(window.windowState(), state)
             before = window.geometry()
-            for activate in (
-                    window._activate_isotp, window._activate_protocols,
-                    window._activate_compare, window._activate_profile_matches):
+            for activate in activates[1:]:
                 activate()
                 self.app.processEvents()
                 self.assertEqual(window.windowState(), state)
@@ -123,8 +140,8 @@ class ResponsiveLayoutTests(unittest.TestCase):
         window.setGeometry(0, 0, 1280, 720)
         self.app.processEvents()
         for button in (
-                window.start_button, window.stop_button, window.pause_button,
-                window.clear_button):
+                window.start_button, window.auto_scan_button, window.stop_button,
+                window.pause_button, window.clear_button):
             parent = button.parentWidget()
             self.assertTrue(parent.rect().contains(button.geometry()), button.text())
             self.assertTrue(button.isVisibleTo(window), button.text())

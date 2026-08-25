@@ -3,20 +3,30 @@
 Only ``Bus.recv()`` is ever called. The bus object stays private to this
 module so no other part of the application can reach a transmit API.
 
-Passive operation is enforced per interface before frames are read:
+LiveSource owns exactly: python-can Bus construction, ``recv()``, and
+``shutdown()``/close. It does **not** own bringing the interface down/up,
+setting a bitrate, or any privileged-helper call -- that is
+``cansniff.session.SocketCanSessionController``'s job, always run *before*
+this source is even constructed (manual Start: ``ui/main_window.py`` via
+``cansniff.capture.CaptureWorker``'s ``prepare`` hook; Auto Scan:
+``cansniff/discovery/bitrate.py``, both per-candidate and for the winner).
+This module never imports ``cansniff.socketcan`` for anything but the
+read-only ``is_listen_only`` check below -- see ``_preflight`` -- so two
+components never race to reconfigure the same link.
+
+Passive operation is independently re-verified, read-only, per interface
+before frames are read:
 
   ================  =========================================================
-  interface         how listen-only is obtained
+  interface         how listen-only is confirmed
   ================  =========================================================
   virtual           no physical bus exists; nothing can reach a vehicle
                     (test/development use only -- never offered in the
                     production live-capture UI, see ui/config_dialog.py)
-  socketcan         actively configured through cansniff/socketcan.py
-                    (down -> bitrate + listen-only -> up -> verify) every
-                    time this source is opened -- see ``configure_link``
-                    below -- and then independently re-verified before
-                    frames are read. An interface already being UP is never
-                    assumed to already be configured correctly.
+  socketcan         the caller (SocketCanSessionController) has already
+                    configured it; this only re-reads the kernel's own
+                    report (``ip -details link show``) and refuses to open
+                    if listen-only is not confirmed there.
   anything else     not verifiable -> refused
   ================  =========================================================
 
@@ -29,16 +39,11 @@ or otherwise affect the physical bus.
 
 from __future__ import annotations
 
-import logging
 from typing import Any, Dict, Optional
 
 from ..model import CanFrame
-from ..socketcan import (
-    SocketCanError, SocketCanLink, is_listen_only as _is_socketcan_listen_only,
-)
+from ..socketcan import is_listen_only as _is_socketcan_listen_only
 from . import CanFrameSource, PassiveSafetyError, SourceError
-
-log = logging.getLogger(__name__)
 
 # Confidence levels for passive operation.
 AT_INIT = "enforced-at-init"
@@ -89,18 +94,6 @@ class LiveSource(CanFrameSource):
         self.require_listen_only = bool(
             self.settings.get("require_listen_only", True))
         self.extra_kwargs = dict(self.settings.get("extra_kwargs", {}) or {})
-        # Whether open() itself must reconfigure the SocketCAN link (down ->
-        # bitrate + listen-only -> up -> verify) before opening the bus.
-        # True by default -- see the module docstring -- so an ordinary
-        # manual or post-discovery Start always deterministically applies
-        # `bitrate`, never assumes the link is already configured. Set to
-        # False only by cansniff/discovery/bitrate.py's own temporary
-        # per-candidate sources: that scan already owns configuring the
-        # link itself (through its own SocketCanLink), immediately before
-        # constructing this source, so a second reconfiguration here would
-        # be redundant and would briefly bounce the link a second time
-        # right before the very observation it is about to make.
-        self.configure_link = bool(self.settings.get("configure_link", True))
 
         self.name = "live:{}:{}".format(self.interface, self.channel)
         self.passive_note = ""
@@ -193,42 +186,12 @@ class LiveSource(CanFrameSource):
 
     # -- lifecycle ------------------------------------------------------
 
-    def _configure_socketcan_link(self) -> None:
-        """Deterministically apply ``bitrate`` to the OS-level SocketCAN
-        link before this source opens a bus on it -- see the module
-        docstring and ``configure_link`` above. Raises ``SourceError`` with
-        an actionable, failure-specific message; the caller (``open``)
-        decides whether that is fatal (see ``require_listen_only`` there).
-        """
-        try:
-            link = SocketCanLink(self.channel)
-            if not link.exists():
-                raise SourceError(
-                    "SocketCAN interface '{}' was not found.".format(self.channel))
-            link.configure(self.bitrate, listen_only=True)
-        except SocketCanError as exc:
-            # cansniff.socketcan already builds an actionable, kind-specific
-            # message (missing interface, helper/sudo not configured,
-            # unsupported bitrate, listen-only not confirmed, ...) -- reuse
-            # it verbatim rather than re-deriving the same classification
-            # here.
-            raise SourceError(str(exc)) from exc
-
     def open(self) -> None:
-        if self.interface == "socketcan" and self.configure_link:
-            try:
-                self._configure_socketcan_link()
-            except SourceError:
-                if self.require_listen_only:
-                    raise
-                # Operator explicitly accepted unverified receive-only
-                # operation -- fall through to the read-only preflight
-                # below instead of blocking Start on a configure failure.
-                log.warning(
-                    "Could not configure %s; proceeding unverified because "
-                    "require_listen_only is disabled", self.channel,
-                    exc_info=False)
-
+        # No physical link mutation here -- see the module docstring. By
+        # the time this runs, cansniff.session.SocketCanSessionController
+        # has already brought the interface up at the requested bitrate
+        # with listen-only forced on (or this is `virtual`, which has no
+        # physical link at all). This only re-verifies that, read-only.
         self.passive_note = self._preflight()
         kwargs = self._bus_kwargs()
 

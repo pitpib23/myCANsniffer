@@ -1,10 +1,11 @@
 # CAN Sniffer
 
 A passive, **receive-only** CAN bus sniffer with a PySide6 UI, built for a
-**Raspberry Pi with a CAN HAT** running **SocketCAN** — plug in `can0`, press
-Start, and it passively figures out the Classic CAN bitrate itself. It also
-runs on any other Linux SocketCAN host, and offline capture-file analysis
-works anywhere PySide6 does, including Windows.
+**Raspberry Pi with a CAN HAT** running **SocketCAN** — plug in `can0`, and
+either press **Start** at a known bitrate or press **Auto Scan** to have it
+passively figure the Classic CAN bitrate out for itself and start capturing
+automatically. It also runs on any other Linux SocketCAN host, and offline
+capture-file analysis works anywhere PySide6 does, including Windows.
 
 Its purpose is reverse-engineering unknown payloads: it takes the *data bytes*
 of a frame — no header, no CRC, no checksum — splits them into blocks, and
@@ -12,9 +13,11 @@ shows every byte order and decoding side by side so you can decide for yourself
 which one is the real signal. It presents the data; it does not recommend.
 
 **This program never transmits.** There is no send, inject, replay-to-bus,
-probe, scan or fuzz path anywhere in it. Automatic bitrate detection is the one
-feature that reaches outside the process — it runs `ip link` to bring `can0`
-up at each candidate rate — and even that never sends a CAN frame; see
+probe, scan or fuzz path anywhere in it. Configuring `can0` (by Start or by
+Auto Scan) is the one thing that reaches outside the process — through a
+small, root-owned privileged helper, never the whole GUI running as root —
+and even that never sends a CAN frame, only local Linux network-interface
+configuration; see
 [SocketCAN live capture](#socketcan-live-capture-raspberry-pi--can-hat) below.
 
 ---
@@ -38,6 +41,14 @@ python -m venv venv
 
 Python 3.9+ is required (developed against 3.9.5). `packaging/linux/install.sh`
 also installs a desktop entry for a normal Raspberry Pi desktop session.
+
+For live capture on Linux, also run the one-time privileged-helper setup
+(as root; the GUI itself never runs as root) — see
+[Privileges](#privileges) below:
+
+```bash
+sudo sh packaging/linux/install-helper.sh
+```
 
 ## Run
 
@@ -258,6 +269,7 @@ values, not something the tool will assert.
 | Key | Action |
 | --- | --- |
 | `F5` / `F6` | Start / Stop capture |
+| `F8` | Auto Scan — passively detect the live bitrate, then start capture |
 | `F7` | Pause or resume the display |
 | `Ctrl+L` | Clear all views (also the **Clear** button) |
 | `Ctrl+F` | Focus the search box |
@@ -612,9 +624,8 @@ without touching the code.
 | `source.type` | `file` (offline playback) or `live` (listen-only SocketCAN) |
 | `source.file.path` / `.speed` / `.loop` | capture to replay; speed `0` = as fast as possible, `1.0` = original timing |
 | `source.live.channel` | the SocketCAN interface name, e.g. `can0` (default) or `can1` |
-| `source.live.auto_bitrate` | `true` (default) = passively detect the Classic CAN bitrate on Start; `false` = use `.bitrate` as-is against an already-configured link |
-| `source.live.bitrate` | fallback/last-detected Classic CAN bitrate |
-| `source.live.fd` / `.data_bitrate` | manual CAN FD capture against an externally-configured link (auto detection is Classic CAN only) |
+| `source.live.bitrate` | manual Classic CAN bitrate. **Start** deterministically applies this to the interface every time — down, set bitrate + listen-only, up, verify — never assuming an already-up link is already configured correctly. **Auto Scan** (a separate button, not a Settings toggle — see below) detects it instead and updates this value to match |
+| `source.live.fd` / `.data_bitrate` | manual CAN FD capture (Auto Scan is Classic CAN only) |
 | `source.live.require_listen_only` | safe-by-default listen-only enforcement |
 | `source.live.interface` | always `socketcan` in the production UI; `virtual` only appears in tests |
 | `capture.queue_size` | compatibility name for the batch-sizing target; each emitted batch is capped at `queue_size // 10` frames |
@@ -656,19 +667,37 @@ therefore limit receive throughput if its destination is slow.
 ### SocketCAN live capture (Raspberry Pi + CAN HAT)
 
 ```
-Raspberry Pi → CAN HAT → Linux SocketCAN → can0 → automatic passive
-bitrate detection → normal CAN capture → this UI
+Raspberry Pi → CAN HAT → Linux SocketCAN → can0 → myCANsniffer configures
+the link itself (down → bitrate + listen-only → up → verify) → normal
+CAN capture → this UI
 ```
 
 The live backend is **SocketCAN only** — there is no choice of hardware
 backend anywhere in the UI. `source.live.channel` names the interface
 (`can0` by default; set it to `can1` etc. if that is what your HAT enumerates
-as), and interface state is checked *before* frames are ever read:
+as).
+
+Two explicit, separate buttons in the main window drive live capture —
+neither implicitly triggers the other, and there is no Settings toggle that
+changes what either one does:
+
+| Button | What it does |
+| --- | --- |
+| **Start** (F5) | Deterministically applies `source.live.bitrate` to the interface, then opens it. Every press: down → bitrate + listen-only → up → verify. Never assumes an interface that happens to already be up is already configured correctly. |
+| **Auto Scan** (F8) | Opens a dedicated progress popup and passively scans candidate bitrates on `source.live.channel`. On a clear winner, it configures that bitrate (again, deterministically) and starts capture automatically — no second button press needed. Classic CAN only. |
+| **Stop** (F6) | Stops capture *or* cancels an in-progress Auto Scan (whichever is active) and always leaves the interface down. |
+
+`cansniff/session.py`'s `SocketCanSessionController` is the one place that
+ever decides *when* to mutate the physical link — both Start and Auto Scan
+go through it (Auto Scan by passing it to `discover_socketcan_bitrate`'s own
+`link=` parameter). `LiveSource` (`cansniff/sources/live.py`) never touches
+`ip`, `sudo`, or the privileged helper at all: it only opens a python-can
+`Bus` and independently re-verifies listen-only, read-only, before doing so.
 
 | Interface | Listen-only mechanism |
 | --- | --- |
 | `virtual` | no physical bus exists (test/development use only — never offered in the production UI) |
-| `socketcan` | must be set at OS level; the sniffer verifies it with `ip -details link show` and refuses to open otherwise |
+| `socketcan` | configured by `SocketCanSessionController` before every Start/Auto Scan, then independently re-verified with `ip -details link show` (read-only, no privilege needed) — refused if not confirmed |
 | anything else | not verifiable → refused by default; explicit unverified opt-out available, same as before |
 
 **Known limitation.** Listen-only is verified where the OS reports it and the
@@ -681,21 +710,32 @@ receive-own-messages, or listen-only/passive-related bus arguments. These
 guarantees are covered by software tests; no physical adapter's electrical
 listen-only behavior was hardware-verified as part of this implementation.
 
-#### Automatic bitrate detection
+#### Auto Scan
 
-With **Automatically detect bitrate on Start** enabled (the default —
-`source.live.auto_bitrate`), pressing **Start** on a live, non-FD source runs
-a passive scan before capture begins:
+Pressing **Auto Scan** opens a dedicated, non-blocking progress dialog and
+runs a passive scan before capture begins — the Qt main thread stays
+responsive throughout, and the dialog shows live progress:
 
 ```
-Checking can0…
-Testing 125 kbit/s…
-Testing 250 kbit/s…
-Testing 500 kbit/s…
-Detected 500 kbit/s — listening on can0
+Interface: can0
+Checking can0…                    [progress bar: candidate N of 11]
+
+Testing: 500 kbit/s
+Valid frames  386   Error frames  0   Unique IDs  17   Stable IDs  17
+Strongest ID  0x123   Observations  42
+
+ 10 kbit/s      No traffic
+ 20 kbit/s      No traffic
+ 33.333 kbit/s  Unsupported
+ 50 kbit/s      Weak
+ ...
+500 kbit/s      Stable — 386 frames — 17 IDs
+
+Detected 500 kbit/s — starting capture…
 ```
 
-For each candidate rate, `cansniff/socketcan.py` runs the exact equivalent of:
+For each candidate rate, `cansniff/socketcan.py`'s privileged helper (see
+**Privileges** below) runs the exact equivalent of:
 
 ```bash
 ip link set can0 down
@@ -703,14 +743,13 @@ ip link set can0 type can bitrate <candidate> listen-only on
 ip link set can0 up
 ```
 
-as three separate, structured `subprocess.run([...])` calls — never a shell
-string, so nothing about a config value or interface name can be interpreted
-as a second command. The sniffer then opens `can0` through the same
-`LiveSource` normal capture uses (which independently re-verifies listen-only
-at the OS level) and passively listens for `discovery.observation_window`
-seconds before closing it and moving to the next rate. **No CAN frame is ever
-sent** during this — every step above is network-interface configuration, not
-bus traffic, and the receive step is the ordinary `Bus.recv()` path.
+as one atomic, root-side operation — verified there too (interface up,
+listen-only confirmed) before it ever reports success. The sniffer then
+opens `can0` through the same `LiveSource` normal capture uses and
+passively listens for `discovery.observation_window` seconds before closing
+it and moving to the next rate. **No CAN frame is ever sent** during this —
+every step above is network-interface configuration, not bus traffic, and
+the receive step is the ordinary `Bus.recv()` path.
 
 The default candidate list is 10, 20, 33.333, 50, 83.333, 100, 125, 250,
 500, 800, and 1000 kbit/s (`discovery.classic_bitrates`). A candidate needs
@@ -719,54 +758,84 @@ error ratio, and traffic spread across a meaningful part of the observation
 window — one frame, error-only traffic, or a short startup burst cannot win.
 Evidence also names the strongest/stablest identifier observed at that rate
 (observation count and time span) purely as a diagnostic, never as the
-selection criterion by itself. Outcomes:
+selection criterion by itself. A rate an individual CAN controller rejects
+(some reject 33.333/83.333 kbit/s) is recorded **Unsupported** and scanning
+continues — only a systemic failure (interface disappeared, helper
+unavailable, permission denied) aborts the whole scan. Outcomes:
 
 | Result | Meaning |
 | --- | --- |
-| **Detected** | exactly one candidate produced stable, sustained evidence; `can0` is left configured at that bitrate, listen-only, up, and capture starts automatically |
-| **No traffic** | no candidate produced any usable frames |
-| **Ambiguous** | more than one candidate looked stable; the sniffer will not guess — configure manually instead |
-| **Configuration error** | `ip` is unavailable, `can0` doesn't exist, or the operation was not permitted (see below) — the scan stops rather than repeating the same failure for every candidate |
+| **Detected** | exactly one candidate produced stable, sustained evidence; `can0` is reconfigured at that bitrate (again, deterministically — never just reused from the scan), listen-only, up, and capture starts automatically. The popup closes once capture is live. |
+| **No traffic** | no candidate produced any usable frames. The popup stays open with the (empty) results table and a **Close** button. |
+| **Ambiguous** | more than one candidate looked stable; the sniffer will not guess — configure manually instead. Popup stays open with results. |
+| **Configuration error** | the helper is unavailable, `sudo` permission is not configured, or `can0` doesn't exist — the scan stops rather than repeating the same failure for every candidate. Popup stays open showing the specific error. |
 
 Every non-Detected outcome brings the interface back down (a single
-deterministic resting state) and capture does **not** start; the status bar
-and a dialog explain why. **Stop** cancels a scan in progress, closes whatever
-temporary receive handle is open, and leaves the interface down — capture
-never starts from a cancelled scan either.
+deterministic resting state) and capture does **not** start. **Stop**, the
+popup's own **Cancel**/**Close** button, and closing the popup window (the
+X) all cancel through exactly the same path: whatever temporary receive
+handle is open closes, the interface goes down, and the popup closes once
+cleanup finishes — a scan is never left running invisibly behind a closed
+window.
 
 #### Privileges
 
-Configuring `can0` needs `CAP_NET_ADMIN`, same as running `ip link` by hand.
-The application never embeds a password or shells out through anything but a
-structured argument list. Pick one:
+Configuring `can0` — by Start or by Auto Scan — needs `CAP_NET_ADMIN`, the
+same as running `ip link` by hand. myCANsniffer never runs as root and is
+never granted that capability itself. Instead it calls a small, root-owned,
+narrowly-scoped privileged helper (`packaging/linux/socketcan-helper`)
+through `sudo -n` — `-n` is load-bearing: a missing/misconfigured sudoers
+entry fails immediately with an actionable message rather than hanging
+waiting for terminal authentication. The helper accepts exactly three
+operations (`status`/`configure`/`down`), validates every argument itself
+(interface name, bitrate range), always invokes a fixed absolute `ip` path
+— never PATH, an environment variable, or a command-line argument — and has
+no passthrough to arbitrary `ip` arguments or any other command. See
+`cansniff/socketcan.py` and `packaging/linux/socketcan-helper`'s own
+docstrings for the full contract.
 
-- Run under `sudo` (simplest on a dedicated Pi kiosk, but the whole GUI runs
-  as root).
-- Grant the capability to just this virtualenv's interpreter, not the whole
-  system:
-  ```bash
-  sudo setcap cap_net_admin+ep "$(readlink -f venv/bin/python3)"
-  ```
-- Bring `can0` up once at boot as root (a `systemd-networkd` `.network` unit
-  with `[CAN] BitRate=`, or a small oneshot systemd service running the same
-  three `ip link` commands above) and turn **Automatically detect bitrate on
-  Start** off — the application then never needs elevated privileges at all,
-  and manual configuration is exactly the three-line `sudo ip link` recipe
-  above.
+One-time setup, as root:
 
-Failures are distinguished, never hidden: `ip` not installed, `can0` missing,
-"operation not permitted", the driver rejecting a candidate bitrate, and a
-SocketCAN receive-open failure are all reported as what they are, both in the
-discovery result and — for capture-open failures — the same **Cannot start
-capture** dialog manual live capture already used.
+```bash
+sudo sh packaging/linux/install-helper.sh
+```
+
+This installs the helper to `/usr/local/sbin/socketcan-helper` (root:root,
+mode 0755 — root can change it, nobody else can), creates a `cansniff`
+group, adds you to it, and installs a sudoers entry scoped to exactly that
+one executable (`/etc/sudoers.d/socketcan-helper`, validated with
+`visudo -c` before being put in place, mode 0440). Nothing else on the
+system is touched. Until this has been run, Start/Auto Scan report that
+permission has not been configured rather than hang or silently fail.
+Uninstall:
+
+```bash
+sudo rm -f /etc/sudoers.d/socketcan-helper /usr/local/sbin/socketcan-helper
+sudo groupdel cansniff   # optional
+```
+
+Reading interface state (`exists()`/`state()`, used for the popup's status
+checks) never needs root — that's a plain `ip link show`, called directly,
+no `sudo` involved.
+
+Failures are distinguished, never hidden: the helper not being installed,
+missing `sudo` permission, `can0` missing, the driver rejecting a candidate
+bitrate, listen-only not confirming after configuration, and a SocketCAN
+receive-open failure are all reported as what they are, both in the Auto
+Scan popup and — for Start's own failures — the same **Cannot start
+capture** dialog.
 
 #### Software-tested vs. hardware-qualified
 
-The detection algorithm, its false-positive rejection rules, and the `ip
-link` command construction are covered by mocked unit tests (`tests/
-test_socketcan.py`, `tests/test_discovery.py`, `tests/test_discovery_ui.py`).
-No physical Raspberry Pi, CAN HAT, or real CAN bus was used to validate this
-feature — see [qualification/README.md](qualification/README.md) for what
+The detection algorithm, its false-positive rejection rules, the privileged
+helper's own argument validation and `ip` command construction, and
+`cansniff/session.py`'s Start/Auto Scan link-configuration sequencing are
+covered by mocked unit tests (`tests/test_socketcan.py`, `tests/
+test_socketcan_helper.py`, `tests/test_session.py`, `tests/
+test_socketcan_lifecycle.py`, `tests/test_discovery.py`, `tests/
+test_discovery_ui.py`). No physical Raspberry Pi, CAN HAT, or real CAN bus
+was used to validate this feature — see
+[qualification/README.md](qualification/README.md) for what
 `SOFTWARE_TESTED` does and does not claim, and the opt-in
 `tests.hardware.qualify` harness for an actual physical run.
 
@@ -1433,7 +1502,8 @@ cansniff/
   interpret.py                 word splitting, decoders, scale/offset rules
   filters.py                   receive-side filter rules
   capture.py                   worker thread, bounded pipeline, frame logging
-  socketcan.py                 structured `ip link` SocketCAN configuration (no shell)
+  socketcan.py                 structured `ip link`/privileged-helper SocketCAN configuration (no shell)
+  session.py                   SocketCanSessionController: the one owner of physical link lifecycle
   discovery/
     bitrate.py                 passive Classic CAN bitrate scan over SocketCAN
     model.py                   immutable candidate/result/progress dataclasses
@@ -1476,7 +1546,8 @@ cansniff/
     widgets.py                 nav rail, chips, payload strip, delegates
     filter_bar.py              display filters, chips, clear-all
     discovery_worker.py        QThread wrapper around the passive bitrate scan
-    main_window.py             window, top bar, capture lifecycle
+    auto_scan_dialog.py        Auto Scan progress/result popup (view only)
+    main_window.py             window, top bar, Start/Auto Scan/Stop lifecycle
     bus_overview.py            factual BUS and capture-integrity dialog
     protocols_view.py          non-blocking Protocol Survey and detail tables
     isotp_view.py              transfers plus peer/conversation/DID/DTC investigation

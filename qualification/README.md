@@ -145,6 +145,45 @@ hardware record, retain photos/setup notes, and have a second reviewer sign
 the conclusion. Only then may a separate reviewed record use
 `ELECTRICALLY_PASSIVE_VERIFIED`. This procedure was not run in Phase 11.
 
+### SocketCAN link lifecycle validation (Start / Auto Scan / Stop)
+
+This is a separate, manual checklist for `cansniff/session.py`'s
+`SocketCanSessionController` and the privileged helper
+(`packaging/linux/socketcan-helper`) -- distinct from the harness above,
+which opens a `LiveSource` directly against an already-configured link. It
+requires a Raspberry Pi (or other Linux host) with a CAN HAT/SocketCAN
+interface and `packaging/linux/install-helper.sh` already run. **Not run as
+part of this repository's automated verification** -- record actual results
+here (with `ip -details link show` output) only after it has genuinely been
+executed on physical hardware; do not claim this status from mocked tests.
+
+**Manual Start:**
+
+1. `ip -details link show can0` -- note the current state.
+2. In Settings, set a known-correct manual bitrate; press **Start**.
+3. `ip -details link show can0` again -- confirm: `UP`, the configured
+   bitrate, `listen-only on`.
+4. Confirm frames arrive in Messages.
+5. Press **Stop**; confirm `ip -details link show can0` reports `DOWN`.
+
+**Auto Scan** (on a bus with known active traffic):
+
+1. Press **Auto Scan**; confirm the popup opens, candidate progress and
+   statistics visibly update, and the main window stays responsive.
+2. Confirm the correct bitrate is detected and capture starts automatically
+   (no second button press).
+3. `ip -details link show can0` -- confirm it matches the detected rate,
+   `UP`, `listen-only on`.
+4. Press **Stop**; confirm `can0` is `DOWN`.
+
+**Bitrate change:**
+
+1. Start at a known rate; Stop.
+2. Change the manual bitrate in Settings to a different, also-valid rate;
+   Start.
+3. `ip -details link show can0` -- confirm the *new* rate actually took
+   effect (not the previous one).
+
 ## Large capture and lifecycle qualification
 
 Large jobs are deliberately outside ordinary CI:

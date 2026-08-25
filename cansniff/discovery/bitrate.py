@@ -276,6 +276,10 @@ def discover_socketcan_bitrate(
     results: List[BitrateCandidateResult] = []
     total_candidates = len(rates)
 
+    if progress is not None:
+        progress(DiscoveryProgress(
+            "checking-interface", "Checking {}…".format(interface), 0, total_candidates))
+
     for index, bitrate in enumerate(rates):
         if stop.is_set():
             _best_effort_down(scan_link)
@@ -318,13 +322,6 @@ def discover_socketcan_bitrate(
             "bitrate": bitrate,
             "fd": False,
             "require_listen_only": True,
-            # This loop already just configured the link itself, above, via
-            # scan_link.configure() -- LiveSource must not redundantly
-            # reconfigure it again right before observing (see
-            # cansniff/sources/live.py's configure_link docstring). Only
-            # this per-candidate scan and the final winner reconfiguration
-            # below own link configuration during discovery.
-            "configure_link": False,
         }
         source = None
         observations: List[Tuple[float, CanFrame]] = []
@@ -335,6 +332,11 @@ def discover_socketcan_bitrate(
             # it independently re-verifies listen-only at the OS level before
             # this loop is allowed to observe anything.
             source.open()
+            if progress is not None:
+                progress(DiscoveryProgress(
+                    "candidate-listening",
+                    "Listening at {} kbit/s…".format(_kbit(bitrate)),
+                    index, total_candidates))
             observation_start = clock()
             deadline = observation_start + max(0.0, thresholds.observation_window)
             while not stop.is_set():
@@ -390,9 +392,18 @@ def discover_socketcan_bitrate(
                 interface, DiscoveryStatus.CANCELLED, None, tuple(results),
                 reasons=("Discovery was cancelled",))
 
+    if progress is not None:
+        progress(DiscoveryProgress(
+            "evaluating", "Evaluating candidates…", total_candidates, total_candidates))
+
     stable = [item for item in results if item.status == CandidateStatus.STABLE]
     if len(stable) == 1:
         selected = stable[0]
+        if progress is not None:
+            progress(DiscoveryProgress(
+                "winner-configuring",
+                "Configuring {} kbit/s…".format(_kbit(selected.bitrate)),
+                total_candidates, total_candidates))
         try:
             # Candidates tried after the winner leave the interface configured
             # at whatever rate was tested last -- explicitly reconfigure it to

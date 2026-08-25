@@ -105,29 +105,26 @@ class ConfigDialog(ResponsiveDialog):
             "normally can0 on a Raspberry Pi with a single CAN HAT.")
         live_form.addRow("Interface", self.live_channel)
 
-        self.live_auto_bitrate = QCheckBox(
-            "Automatically detect bitrate on Start")
-        self.live_auto_bitrate.setChecked(bool(
-            self.config.get("source.live.auto_bitrate", True)))
-        self.live_auto_bitrate.setToolTip(
-            "Recommended. Start passively scans the candidate bitrates below "
-            "and configures the interface itself before capturing. Disable "
-            "this only to use the fixed bitrate configured below -- for "
-            "example if the interface is already configured externally, or "
-            "auto detection is not reliable on this bus."
-        )
-        self.live_auto_bitrate.toggled.connect(self._on_auto_bitrate_toggled)
-        live_form.addRow("", self.live_auto_bitrate)
-
+        # Configuration only -- not a workflow toggle. Whether a scan runs
+        # at all is a distinct action (the Auto Scan button/F8 in the main
+        # window), never something Settings decides; Start always uses
+        # this bitrate as-is, deterministically applied to the interface --
+        # see cansniff/session.py and cansniff/ui/main_window.py's
+        # start_capture/start_auto_scan.
         self.live_bitrate = QSpinBox()
         self.live_bitrate.setRange(1000, 8000000)
         self.live_bitrate.setSingleStep(50000)
         self.live_bitrate.setValue(int(self.config.get("source.live.bitrate", 500000)))
-        live_form.addRow("Bitrate (bit/s)", self.live_bitrate)
-        self._on_auto_bitrate_toggled(self.live_auto_bitrate.isChecked())
+        self.live_bitrate.setToolTip(
+            "Used by Start, applied to the interface exactly as configured "
+            "here. Auto Scan (the main window's own button) finds and "
+            "applies a bitrate automatically instead, and updates this "
+            "value to match when it does."
+        )
+        live_form.addRow("Manual bitrate (bit/s)", self.live_bitrate)
 
         self.live_fd = QCheckBox(
-            "CAN FD (manual bitrate only -- auto detection is Classic CAN only)")
+            "CAN FD (manual bitrate only -- Auto Scan is Classic CAN only)")
         self.live_fd.setChecked(bool(self.config.get("source.live.fd", False)))
         live_form.addRow("", self.live_fd)
 
@@ -182,14 +179,6 @@ class ConfigDialog(ResponsiveDialog):
         is_file = self.source_type.currentText() == "file"
         self.file_box.setVisible(is_file)
         self.live_box.setVisible(not is_file)
-
-    def _on_auto_bitrate_toggled(self, checked: bool) -> None:
-        self.live_bitrate.setEnabled(not checked)
-        self.live_bitrate.setToolTip(
-            "Overridden by the winning rate each time auto detection runs."
-            if checked else
-            "Used as-is; the interface must already be configured at this "
-            "rate (see README) unless auto detection is enabled above.")
 
     def _on_interface_changed(self, *_args) -> None:
         support = listen_only_support("socketcan")
@@ -334,7 +323,14 @@ class ConfigDialog(ResponsiveDialog):
             "bitrate": int(self.live_bitrate.value()),
             "data_bitrate": int(self.live_data_bitrate.value()),
             "fd": bool(self.live_fd.isChecked()),
-            "auto_bitrate": bool(self.live_auto_bitrate.isChecked()),
+            # No longer surfaced in this dialog -- there is no "auto
+            # bitrate" workflow toggle; Auto Scan (the main window's own
+            # button) is a separate, explicit action -- see
+            # cansniff/ui/main_window.py and cansniff/config.py's own note
+            # on this key. Carried over as-is rather than silently reset to
+            # the DEFAULTS value, for an older config file that still has
+            # it; nothing reads it anymore either way.
+            "auto_bitrate": self.config.get("source.live.auto_bitrate", True),
             "require_listen_only": bool(self.require_listen_only.isChecked()),
             "extra_kwargs": extra,
         }

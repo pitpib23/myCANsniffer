@@ -14,7 +14,7 @@ import json
 import os
 import threading
 import time
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 from PySide6.QtCore import QObject, Signal, Slot
 
@@ -92,6 +92,7 @@ class CaptureWorker(QObject):
         batch_limit: int = 2000,
         max_pending_batches: int = 8,
         logger: Optional[FrameLogger] = None,
+        prepare: Optional[Callable[[], None]] = None,
     ):
         super().__init__()
         self._source = source
@@ -100,6 +101,17 @@ class CaptureWorker(QObject):
         self._batch_limit = max(1, int(batch_limit))
         self._max_pending = max(1, int(max_pending_batches))
         self._logger = logger
+        # Optional hook run once, on this worker's own thread, before
+        # source.open() -- see cansniff/session.py's
+        # SocketCanSessionController.prepare_manual, which
+        # cansniff/ui/main_window.py wires in here for a live SocketCAN
+        # source. Keeps physical-link configuration (a brief blocking
+        # subprocess call) off the Qt UI thread, exactly like source.open()
+        # itself already is, without CaptureWorker or CanFrameSource having
+        # to know anything about SocketCAN specifically. Must raise
+        # SourceError to be treated as a startup failure; any other
+        # exception is also caught, below, and reported the same way.
+        self._prepare = prepare
 
         self._running = False
         self._stop_requested = threading.Event()
@@ -188,6 +200,28 @@ class CaptureWorker(QObject):
         if not self._running:
             self._finish()
             return
+        if self._prepare is not None:
+            try:
+                self._prepare()
+            except SourceError as exc:
+                self.source_errors += 1
+                self.completion_reason = "error"
+                self.errorOccurred.emit(str(exc))
+                self._finish()
+                return
+            except Exception as exc:  # unexpected controller failure
+                self.source_errors += 1
+                self.completion_reason = "error"
+                self.errorOccurred.emit("Failed to prepare source: {}".format(exc))
+                self._finish()
+                return
+            # request_stop() may have arrived while prepare() -- a brief
+            # blocking subprocess call -- was running. Same reasoning as
+            # the check above open(): honour it now rather than proceed to
+            # open a bus on an interface Stop already asked to release.
+            if self._stop_requested.is_set():
+                self._finish()
+                return
         try:
             self._source.open()
         except SourceError as exc:

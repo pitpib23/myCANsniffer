@@ -753,113 +753,40 @@ class LiveSourceSafetyTests(unittest.TestCase):
             note = source._preflight()
         self.assertTrue(note.startswith("NOT VERIFIED"))
 
-    def test_socketcan_open_fails_closed_when_the_link_cannot_be_configured(self):
-        """No `ip`/`sudo`/privileged helper exists on the machine running
-        this test suite (by design -- see tests/test_socketcan.py and
-        test_socketcan_helper.py for the real coverage of that layer,
-        entirely through an injected runner). Because open() now actively
-        configures the link before opening the bus (see the module
-        docstring's ``configure_link``), that configuration attempt is what
-        fails here -- the exact message is environment-dependent (missing
-        interface vs. missing tooling), but it must always fail closed
-        with a SourceError, never silently proceed to open a bus on an
-        unconfigured link.
-        """
+    def test_socketcan_requires_confirmed_listen_only(self):
+        """LiveSource never configures the link itself (see the module
+        docstring and cansniff/session.py) -- it only re-verifies, so this
+        must fail purely on the read-only listen-only check, with no `ip`/
+        `sudo`/subprocess call of any kind reachable from here."""
         source = LiveSource({"interface": "socketcan", "channel": "can0"})
-        with self.assertRaises(SourceError):
-            source.open()
-
-    def test_socketcan_configure_failure_still_requires_confirmed_listen_only(self):
-        """With configure_link disabled (as cansniff/discovery/bitrate.py's
-        own temporary sources set it -- that code owns configuration
-        itself), open() falls back to the original read-only preflight:
-        refuse unless the kernel reports listen-only."""
-        source = LiveSource({
-            "interface": "socketcan", "channel": "can0", "configure_link": False,
-        })
-        with self.assertRaises(SourceError) as ctx:
-            source.open()
+        with mock.patch("cansniff.sources.live._socketcan_is_listen_only",
+                        return_value=None):
+            with self.assertRaises(SourceError) as ctx:
+                source.open()
         self.assertIn("listen-only", str(ctx.exception))
 
-    def test_configure_link_failure_is_fatal_when_listen_only_is_required(self):
-        source = LiveSource({"interface": "socketcan", "channel": "can0"})
-        self.assertTrue(source.require_listen_only)  # the default
-        with self.assertRaises(SourceError):
-            source.open()
-
-    def test_configure_link_failure_falls_back_to_unverified_open_when_allowed(self):
-        """An operator who explicitly disabled 'Require confirmed
-        listen-only mode' is accepting unverified operation -- a configure
-        failure (no helper installed, no `ip`, ...) must not additionally
-        block Start in that mode; it falls back to the old best-effort
-        open, exactly like configure_link=False would."""
-        calls = []
-
-        class FakeBus:
-            def __init__(self, **kwargs):
-                calls.append(kwargs)
-
-            def shutdown(self):
-                pass
+    def test_open_never_imports_socketcan_link(self):
+        """Requirement: LiveSource does not own bringing the interface
+        down/up, setting a bitrate, or any privileged-helper call --
+        cansniff.session.SocketCanSessionController does, before this
+        source is ever constructed. Confirmed both by source inspection
+        (no SocketCanLink construction anywhere in this module) and by
+        exercising open() with SocketCanLink itself booby-trapped."""
+        import cansniff.sources.live as module
+        self.assertNotIn("SocketCanLink", dir(module))
 
         source = LiveSource({
             "interface": "socketcan", "channel": "can0",
             "require_listen_only": False,
         })
-        with mock.patch("cansniff.sources.live._socketcan_is_listen_only",
-                        return_value=None), \
-             mock.patch.dict(sys.modules, {"can": types.SimpleNamespace(Bus=FakeBus)}):
-            source.open()  # must not raise
-        self.assertEqual(len(calls), 1)
-        self.assertFalse(source.passive_verified)
-        source.close()
-
-    def test_configure_link_false_skips_configuration_on_open(self):
-        """This is exactly what cansniff/discovery/bitrate.py's temporary
-        per-candidate sources rely on: the scan already configured the link
-        itself immediately before constructing this source."""
-        calls = []
-
-        class FakeBus:
-            def __init__(self, **kwargs):
-                calls.append(kwargs)
-
-            def shutdown(self):
-                pass
-
-        source = LiveSource({
-            "interface": "socketcan", "channel": "can0", "configure_link": False,
-        })
-        self.assertFalse(source.configure_link)
-        with mock.patch("cansniff.sources.live._socketcan_is_listen_only",
-                        return_value=True), \
-             mock.patch.object(source, "_configure_socketcan_link") as configure, \
-             mock.patch.dict(sys.modules, {"can": types.SimpleNamespace(Bus=FakeBus)}):
-            source.open()
-        configure.assert_not_called()
-        self.assertEqual(len(calls), 1)
-        source.close()
-
-    def test_configure_link_true_by_default_configures_before_opening(self):
-        calls = []
-
-        class FakeBus:
-            def __init__(self, **kwargs):
-                calls.append(kwargs)
-
-            def shutdown(self):
-                pass
-
-        source = LiveSource({"interface": "socketcan", "channel": "can0"})
-        self.assertTrue(source.configure_link)  # the default
-        with mock.patch.object(source, "_configure_socketcan_link") as configure, \
+        with mock.patch("cansniff.socketcan.SocketCanLink",
+                        side_effect=AssertionError(
+                            "LiveSource must never construct a SocketCanLink")), \
              mock.patch("cansniff.sources.live._socketcan_is_listen_only",
-                        return_value=True), \
-             mock.patch.dict(sys.modules, {"can": types.SimpleNamespace(Bus=FakeBus)}):
-            source.open()
-        configure.assert_called_once()
-        self.assertEqual(len(calls), 1)
-        source.close()
+                        return_value=None), \
+             mock.patch.dict(sys.modules, {
+                 "can": types.SimpleNamespace(Bus=lambda **kw: mock.Mock())}):
+            source.open()  # must not raise -- and must not touch SocketCanLink
 
     def test_virtual_interface_is_considered_passive(self):
         source = LiveSource({"interface": "virtual", "channel": "0"})

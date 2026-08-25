@@ -51,7 +51,7 @@ from ..export import (
 )
 from ..filters import FilterSet
 from ..model import CanFrame
-from ..socketcan import SocketCanError, SocketCanLink
+from ..session import SocketCanSessionController
 from ..sources.live import LiveSource
 from ..investigation import (
     Annotation, Bookmark, BookmarkKind, CaptureReferenceStatus, ComparisonDefinition,
@@ -63,6 +63,7 @@ from ..investigation import (
 from ..investigation.model import new_id, utc_now
 from ..investigation.io import hash_file
 from ..sources import SourceError, build_source
+from .auto_scan_dialog import AutoScanDialog
 from .config_dialog import ConfigDialog
 from .compare_view import CompareView
 from .bus_overview import BusOverviewDialog
@@ -298,12 +299,26 @@ class MainWindow(QMainWindow):
         self.theme = theme
         self.setWindowTitle("CAN Sniffer — passive receive-only")
 
+        # Set once, at the top of closeEvent -- guards every slot below that
+        # would otherwise pop a modal QMessageBox in response to a
+        # background worker's signal. errorOccurred/resultReady are queued,
+        # cross-thread signals: one can already be sitting in the event
+        # queue, emitted moments before the window closes, and only get
+        # delivered on a *later* processEvents()/exec() pass -- by which
+        # time this window may be hidden and scheduled for deletion.
+        # Showing a modal dialog from inside that slot then pumps a nested
+        # event loop that can process this window's own deferred deletion
+        # while one of its own methods is still executing on the call
+        # stack, corrupting the C++ side well past anything a Python
+        # try/except can catch. Once closing, these slots still update
+        # state/logs -- they just skip the dialog.
+        self._window_closing = False
         self._thread: Optional[QThread] = None
         self._worker: Optional[CaptureWorker] = None
-        #: Owns the passive SocketCAN bitrate scan Start triggers when
-        #: source.live.auto_bitrate is set -- see _start_discovery. Mutually
-        #: exclusive with self._thread/self._worker by construction: capture
-        #: state is only ever Idle, Discovering, Running, Paused or Stopping.
+        #: Owns the passive SocketCAN bitrate scan the explicit Auto Scan
+        #: button triggers -- see start_auto_scan. Mutually exclusive with
+        #: self._thread/self._worker by construction: capture state is only
+        #: ever Idle, Discovering, Running, Paused or Stopping.
         self._discovery_thread: Optional[QThread] = None
         self._discovery_worker: Optional[SocketCanDiscoveryWorker] = None
         #: Set by _on_discovery_result/_on_discovery_error, read once by
@@ -314,6 +329,13 @@ class MainWindow(QMainWindow):
         #: the same two-step pattern _on_thread_finished already uses).
         self._pending_start_after_discovery = False
         self._discovery_status_message = ""
+        #: The DiscoveryStatus of the just-finished scan, or "error" for a
+        #: worker-level exception -- read once by _on_discovery_thread_finished
+        #: to decide whether the Auto Scan popup auto-closes (success or
+        #: cancellation) or stays open showing results (everything else --
+        #: see AutoScanDialog's own docstring).
+        self._discovery_outcome: Optional[str] = None
+        self._auto_scan_dialog: Optional[AutoScanDialog] = None
         self._bus_overview: Optional[BusOverviewDialog] = None
         #: Idle / Running / Paused / Stopping — see _apply_capture_state.
         self._capture_state = self._IDLE
@@ -743,10 +765,16 @@ class MainWindow(QMainWindow):
         primary_row.addSpacing(SPACE_LG)
 
         self.start_button = self._bar_button("Start", primary=True, slot=self.start_capture,
-                                             tip="Open the configured source and begin "
-                                                 "receiving  (F5)")
+                                             tip="Open the configured live source at its "
+                                                 "manually configured bitrate, or play back "
+                                                 "the configured capture file  (F5)")
+        self.auto_scan_button = self._bar_button(
+            "Auto Scan", slot=self.start_auto_scan,
+            tip="Passively scan candidate SocketCAN bitrates and start live "
+                "capture automatically on whichever one is detected  (F8)")
         self.stop_button = self._bar_button("Stop", slot=self.stop_capture,
-                                            tip="Close the source  (F6)")
+                                            tip="Close the source, or cancel an in-progress "
+                                                "Auto Scan  (F6)")
         # Stable, not just sized-to-fit: this button's own text toggles
         # between "Pause" and "Resume" for as long as the window is open,
         # and QPushButton.setText() unconditionally invalidates its cached
@@ -766,8 +794,8 @@ class MainWindow(QMainWindow):
                 "The capture log on disk, the loaded database and the filters "
                 "are untouched  (Ctrl+L)",
         )
-        for button in (self.start_button, self.stop_button, self.pause_button,
-                       self.clear_button):
+        for button in (self.start_button, self.auto_scan_button, self.stop_button,
+                       self.pause_button, self.clear_button):
             primary_row.addWidget(button)
 
         primary_row.addStretch(1)
@@ -982,6 +1010,7 @@ class MainWindow(QMainWindow):
         for text, sequence, slot in (
             ("Start", "F5", self.start_capture),
             ("Stop", "F6", self.stop_capture),
+            ("Auto Scan", "F8", self.start_auto_scan),
             ("Clear", "Ctrl+L", self.clear_views),
             ("Focus search", "Ctrl+F", lambda: self.filter_bar.search_box.setFocus()),
         ):
@@ -1132,41 +1161,38 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def start_capture(self) -> None:
+        """Start always uses the manually configured bitrate. Auto Scan
+        (start_auto_scan) is a separate, explicit action -- neither one
+        implicitly triggers the other, and there is no Settings toggle that
+        changes what this button does (see cansniff/ui/config_dialog.py).
+        """
         if self._capture_state != self._IDLE or self._interaction_locked:
             return
-        if self._wants_auto_discovery():
-            self._start_discovery()
-            return
         self._start_capture_now()
-
-    def _wants_auto_discovery(self) -> bool:
-        """Whether Start should passively detect the bitrate before capturing.
-
-        Live sources only, Classic CAN only (see cansniff/discovery/bitrate.py
-        -- CAN FD auto-discovery is not implemented), and only when the
-        operator has not disabled "Automatically detect bitrate on Start" in
-        Settings / source.live.auto_bitrate.
-        """
-        return (
-            str(self.config.get("source.type", "file")) == "live"
-            and bool(self.config.get("source.live.auto_bitrate", True))
-            and not bool(self.config.get("source.live.fd", False))
-        )
 
     def _start_capture_now(self, configure_link: bool = True) -> None:
         """Build a fresh source and start capturing on it.
 
-        ``configure_link`` controls whether a live SocketCAN source must
-        reconfigure the OS-level link (down -> bitrate + listen-only -> up
-        -> verify) before opening -- see cansniff/sources/live.py. It is
-        True for every ordinary manual Start (Settings' bitrate must always
-        be deterministically applied, never assumed already in effect --
-        see LiveSource's module docstring), and False only when this is
-        called right after a successful auto-discovery scan
-        (_on_discovery_thread_finished), which has already configured the
-        winning bitrate itself as its own final step; reconfiguring a
-        second time here would be redundant and would bounce the link
-        again immediately before capture begins.
+        ``configure_link`` controls whether a live SocketCAN source must be
+        deterministically reconfigured -- down -> bitrate + listen-only ->
+        up -> verify, through cansniff.session.SocketCanSessionController --
+        before this opens it. It is True for every ordinary manual Start
+        (Settings' bitrate must always be applied, never assumed already in
+        effect -- see SocketCanSessionController's and LiveSource's own
+        module docstrings), and False only when this is called right after
+        a successful Auto Scan (_on_discovery_thread_finished), which has
+        already configured the winning bitrate itself, verified, as its own
+        final step (cansniff/discovery/bitrate.py's "Winner
+        Reconfiguration"); reconfiguring a second time here would be
+        redundant and would bounce the link again immediately before
+        capture begins -- see the "CRITICAL WINNER RACE" this guards
+        against, and tests/test_socketcan_lifecycle.py's regression
+        coverage for it.
+
+        The configuration itself never runs here, on the Qt UI thread --
+        it is handed to CaptureWorker as a `prepare` hook (see
+        cansniff/capture.py) that runs on the worker's own thread, exactly
+        like source.open() already does.
         """
         try:
             # Retained history (Plot/Trace/Range) survives Stop -- only
@@ -1184,8 +1210,19 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Cannot start capture", str(exc))
             return
 
-        if not configure_link and isinstance(source, LiveSource):
-            source.configure_link = False
+        prepare = None
+        if configure_link and isinstance(source, LiveSource) and source.interface == "socketcan":
+            channel, bitrate = source.channel, source.bitrate
+            # Constructing the controller (which validates the interface
+            # name -- see cansniff/socketcan.py's validate_interface_name)
+            # is deferred into the hook itself, run on the capture worker's
+            # own thread, rather than done here on the Qt UI thread: an
+            # invalid channel name must surface as an ordinary "Cannot
+            # start capture" report through CaptureWorker's existing
+            # prepare-failure handling, never as an unhandled exception
+            # raised straight out of a button's click handler.
+            def prepare():
+                SocketCanSessionController(channel).prepare_manual(bitrate)
 
         logger = None
         if bool(self.config.get("logging.enabled", False)):
@@ -1205,6 +1242,7 @@ class MainWindow(QMainWindow):
             refresh_ms=int(self.config.get("capture.ui_refresh_ms", 100)),
             batch_limit=max(1, int(self.config.get("capture.queue_size", 20000)) // 10),
             logger=logger,
+            prepare=prepare,
         )
         thread = QThread(self)
         worker.moveToThread(thread)
@@ -1251,6 +1289,15 @@ class MainWindow(QMainWindow):
         thread.start()
 
     def stop_capture(self) -> None:
+        """Stops either an active capture or an active Auto Scan -- exactly
+        one cancellation path for the latter, shared with the Auto Scan
+        popup's own Cancel button and its window-close (X) -- see
+        start_auto_scan and AutoScanDialog.cancelled. Safe/idempotent to
+        call when neither is happening (Idle, or already Stopping): every
+        branch below is gated on the current state, so a stray extra call
+        -- including one arriving from a stale, already-closed scan dialog
+        -- simply does nothing.
+        """
         if self._interaction_locked:
             return
         if self._capture_state == self._DISCOVERING:
@@ -1271,15 +1318,47 @@ class MainWindow(QMainWindow):
         self._apply_capture_state(self._STOPPING)
         self._lock_interactions()
 
-    # -- automatic SocketCAN bitrate discovery ---------------------------
+    # -- automatic SocketCAN bitrate discovery ("Auto Scan") --------------
 
-    def _start_discovery(self) -> None:
+    def start_auto_scan(self) -> None:
+        """The Auto Scan button/shortcut's entry point -- a distinct action
+        from Start (start_capture), never triggered implicitly by it and
+        never gated by a Settings toggle (there is none -- see
+        cansniff/ui/config_dialog.py). Opens a dedicated, non-blocking
+        progress dialog (AutoScanDialog) and runs the same
+        SocketCanDiscoveryWorker/discover_socketcan_bitrate engine Start
+        used to trigger implicitly; only how it is reached, and the
+        dedicated popup, are new.
+        """
+        if self._capture_state != self._IDLE or self._interaction_locked:
+            return
+        if bool(self.config.get("source.live.fd", False)):
+            QMessageBox.information(
+                self, "Auto Scan",
+                "Automatic bitrate detection is Classic CAN only. Disable "
+                "CAN FD in Settings, or use Start with a manually "
+                "configured bitrate, to capture CAN FD traffic.")
+            return
+
         interface = (str(self.config.get("source.live.channel", DEFAULT_INTERFACE)).strip()
                     or DEFAULT_INTERFACE)
         discovery_config = self.config.get("discovery", {}) or {}
         candidates = tuple(
             discovery_config.get("classic_bitrates", DEFAULT_BITRATES) or DEFAULT_BITRATES)
         thresholds = DiscoveryThresholds.from_mapping(discovery_config)
+
+        dialog = AutoScanDialog(interface, len(candidates), self.theme, self)
+        # Cancel, the popup's own window-close (X), and this window's Stop
+        # button all funnel into exactly this one path -- never a second,
+        # independent cancellation mechanism. The identity check discards a
+        # close arriving from a *previous*, already-finished scan's dialog
+        # that the operator left open to read its results (see
+        # _on_discovery_thread_finished): without it, closing that stale
+        # window could cancel a *different*, currently-running scan started
+        # afterward.
+        dialog.cancelled.connect(
+            lambda d=dialog: self.stop_capture() if d is self._auto_scan_dialog else None)
+        self._auto_scan_dialog = dialog
 
         worker = SocketCanDiscoveryWorker(
             interface, candidates=candidates, thresholds=thresholds)
@@ -1288,8 +1367,11 @@ class MainWindow(QMainWindow):
 
         thread.started.connect(worker.run)
         worker.progressChanged.connect(self._on_discovery_progress)
+        worker.progressChanged.connect(dialog.on_progress)
         worker.resultReady.connect(self._on_discovery_result)
+        worker.resultReady.connect(dialog.on_result)
         worker.errorOccurred.connect(self._on_discovery_error)
+        worker.errorOccurred.connect(dialog.on_error)
         worker.finished.connect(thread.quit, Qt.DirectConnection)
         thread.finished.connect(self._on_discovery_thread_finished)
 
@@ -1297,19 +1379,22 @@ class MainWindow(QMainWindow):
         self._discovery_thread = thread
         self._pending_start_after_discovery = False
         self._discovery_status_message = ""
+        self._discovery_outcome = None
         self._apply_capture_state(self._DISCOVERING)
         self.status_message.setText("Checking {}…".format(interface))
         self._lock_interactions()
+        dialog.show()
         thread.start()
 
     def _on_discovery_progress(self, item) -> None:
         self.status_message.setText(item.message)
 
     def _on_discovery_result(self, result) -> None:
+        self._discovery_outcome = result.status
         if result.status == DiscoveryStatus.DETECTED:
-            # Persisted so BUS/status reflect it, and so a later manual Start
-            # with auto-detect turned off falls back to the last known rate
-            # rather than the stale default.
+            # Persisted so BUS/status reflect it, and so a manual Start
+            # later falls back to the last detected rate rather than the
+            # stale default.
             self.config.set("source.live.bitrate", int(result.selected_bitrate))
             try:
                 self.config.save()
@@ -1323,21 +1408,28 @@ class MainWindow(QMainWindow):
 
         self._pending_start_after_discovery = False
         if result.status == DiscoveryStatus.CANCELLED:
-            self._discovery_status_message = "Bitrate detection cancelled"
+            self._discovery_status_message = "Auto Scan cancelled"
             return
-        self._discovery_status_message = "Bitrate detection: {}".format(
-            result.status.value)
-        reasons = "\n".join("- " + reason for reason in result.reasons) or (
-            "No further detail is available.")
-        QMessageBox.warning(
-            self, "Automatic bitrate detection",
-            "Could not determine a Classic CAN bitrate for {}.\n\n{}".format(
-                result.interface, reasons))
+        self._discovery_status_message = "Auto Scan: {}".format(result.status.value)
+        # The popup itself (AutoScanDialog.on_result, connected alongside
+        # this) is where results/reasons are shown now -- see its own
+        # "POPUP — NO TRAFFIC"/"AMBIGUOUS"/"ERROR" behavior. This is only a
+        # safety net for the (should-not-happen) case of no popup existing,
+        # and skipped entirely while closing -- see _window_closing.
+        if self._auto_scan_dialog is None and not self._window_closing:
+            reasons = "\n".join("- " + reason for reason in result.reasons) or (
+                "No further detail is available.")
+            QMessageBox.warning(
+                self, "Auto Scan",
+                "Could not determine a Classic CAN bitrate for {}.\n\n{}".format(
+                    result.interface, reasons))
 
     def _on_discovery_error(self, message: str) -> None:
         self._pending_start_after_discovery = False
-        self._discovery_status_message = "Bitrate detection failed"
-        QMessageBox.critical(self, "Bitrate detection failed", message)
+        self._discovery_status_message = "Auto Scan failed"
+        self._discovery_outcome = "error"
+        if self._auto_scan_dialog is None and not self._window_closing:
+            QMessageBox.critical(self, "Auto Scan failed", message)
 
     def _on_discovery_thread_finished(self) -> None:
         thread = self.sender()
@@ -1350,19 +1442,36 @@ class MainWindow(QMainWindow):
         thread.deleteLater()
         proceed = self._pending_start_after_discovery
         message = self._discovery_status_message
+        outcome = self._discovery_outcome
+        dialog = self._auto_scan_dialog
         self._pending_start_after_discovery = False
         self._discovery_status_message = ""
+        self._discovery_outcome = None
+        self._auto_scan_dialog = None
         if proceed:
             # discover_socketcan_bitrate already brought the interface down,
             # applied the winning bitrate + listen-only, and verified it as
             # its own last step (see cansniff/discovery/bitrate.py's
             # "Winner Reconfiguration") -- do not reconfigure it a second
-            # time here.
+            # time here. Capture is started first, so the popup only closes
+            # once capture is actually live -- matching "close the progress
+            # popup automatically" once a winner transitions into capture.
+            # self._auto_scan_dialog is already None above, so the close
+            # below cannot re-trigger cancellation through the identity
+            # check in start_auto_scan's lambda.
             self._start_capture_now(configure_link=False)
+            if dialog is not None:
+                dialog.close()
             return
         self._apply_capture_state(self._IDLE)
         if message:
             self.status_message.setText(message)
+        if dialog is not None:
+            if outcome == DiscoveryStatus.CANCELLED:
+                dialog.close()
+            # else: leave it open, showing whatever on_result/on_error
+            # already populated, with its own Cancel button now reading
+            # Close -- see "POPUP — NO TRAFFIC"/"AMBIGUOUS"/"ERROR".
 
     def _teardown_discovery_thread(self) -> None:
         """Synchronous cancel-and-join, used by closeEvent -- mirrors
@@ -1376,6 +1485,9 @@ class MainWindow(QMainWindow):
         thread.wait()
         self._discovery_worker = None
         self._discovery_thread = None
+        if self._auto_scan_dialog is not None:
+            self._auto_scan_dialog.close()
+            self._auto_scan_dialog = None
 
     def _teardown_thread(self) -> None:
         thread = self._thread
@@ -1406,10 +1518,12 @@ class MainWindow(QMainWindow):
         if not isinstance(source, LiveSource) or source.interface != "socketcan":
             return
         try:
-            SocketCanLink(source.channel).down()
-        except SocketCanError as exc:
-            log.warning("Could not bring %s down after Stop: %s", source.channel, exc)
+            SocketCanSessionController(source.channel).down_best_effort()
         except Exception:
+            # down_best_effort() itself never raises -- this is only a
+            # backstop against something unexpected in the controller
+            # constructor itself (e.g. an interface name that somehow
+            # became invalid between Start and now).
             log.exception("Unexpected error bringing %s down after Stop", source.channel)
 
     def _finalize_thread(self, thread: QThread) -> None:
@@ -1489,6 +1603,9 @@ class MainWindow(QMainWindow):
         worker = self._worker
         if worker is not None and worker.completion_reason == "error":
             self.integrity_accumulator.set_source_state(SourceState.ERROR)
+        if self._window_closing:
+            log.warning("Capture error while closing: %s", message)
+            return
         QMessageBox.critical(self, "Capture error", message)
         self.status_message.setText("Error: {}".format(message.splitlines()[0]))
 
@@ -1529,7 +1646,8 @@ class MainWindow(QMainWindow):
             self.pause_button.toggle()
 
     def _refresh_capture_controls(self) -> None:
-        """The one place Start/Stop/Pause's *enabled* state is computed.
+        """The one place Start/Auto Scan/Stop/Pause's *enabled* state is
+        computed.
 
         Two independent inputs, neither the other's source of truth:
         ``_capture_state`` (what capture is actually doing — the only thing
@@ -1539,14 +1657,22 @@ class MainWindow(QMainWindow):
         when both agree it should be. Called from _apply_capture_state on
         every real state transition, and from the lock/unlock methods on
         every debounce edge, so this is the only function that ever
-        actually flips one of these three buttons' enabled bit.
+        actually flips one of these four buttons' enabled bit.
+
+        Start and Auto Scan share one rule -- enabled only from Idle -- for
+        every intermediate phase either one goes through (configuring,
+        scanning, evaluating, starting capture): both are simply "not
+        Idle" for the whole of that phase, which is exactly the coarse
+        Running/Discovering states already give. Stop is the mirror image:
+        enabled through every one of those phases so it can cancel or stop
+        any of them, and doubles as Auto Scan's own Cancel -- see
+        stop_capture -- rather than needing a second, rarely-used button.
         """
         state = self._capture_state
         active = state in (self._RUNNING, self._PAUSED)
         interactive = not self._interaction_locked
         self.start_button.setEnabled(state == self._IDLE and interactive)
-        # While Discovering, Stop doubles as Cancel -- see stop_capture --
-        # rather than adding a second, rarely-used button just for this.
+        self.auto_scan_button.setEnabled(state == self._IDLE and interactive)
         self.stop_button.setEnabled(
             (active or state == self._DISCOVERING) and interactive)
         self.pause_button.setEnabled(active and interactive)
@@ -3177,6 +3303,7 @@ class MainWindow(QMainWindow):
         if not self._confirm_project_transition():
             event.ignore()
             return
+        self._window_closing = True
         self._protocol_closing = True
         self._cancel_protocol_survey(wait=True)
         self._compare_closing = True

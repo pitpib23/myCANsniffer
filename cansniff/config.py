@@ -70,13 +70,16 @@ DEFAULTS: Dict[str, Any] = {
             # appears in tests. See cansniff/sources/live.py.
             "interface": "socketcan",
             "channel": "can0",          # SocketCAN interface name
-            "bitrate": 500000,          # last known/fallback Classic CAN bitrate
+            "bitrate": 500000,          # manual bitrate, used as-is by Start
             "data_bitrate": 2000000,     # CAN FD only
             "fd": False,
-            # When true (default) and not CAN FD, Start passively scans
-            # discovery.classic_bitrates before capturing -- see
-            # cansniff/discovery/bitrate.py -- and "bitrate" above becomes the
-            # last detected rate rather than something the operator sets.
+            # No longer read anywhere. Start always deterministically
+            # applies "bitrate" above to the interface; automatic detection
+            # is the separate, explicit Auto Scan action (main window
+            # button / F8) -- never a Settings toggle -- see
+            # cansniff/ui/main_window.py and cansniff/session.py. Kept only
+            # so an older config file that still has this key continues to
+            # load without incident; safe to delete by hand.
             "auto_bitrate": True,
             # Safe default: refuse unless listen-only is confirmed. Operators
             # may explicitly set false to allow clearly-labelled unverified
