@@ -1,0 +1,22 @@
+# myCANsniffer SocketCAN helper -- narrow, passwordless sudo for exactly one
+# root-owned executable. Installed by install-helper.sh (never edit sudoers
+# by hand for this) as /etc/sudoers.d/socketcan-helper, mode 0440, owned by
+# root:root, and validated with `visudo -c` before being put in place.
+#
+# This grants members of the `cansniff` group permission to run
+# /usr/local/sbin/socketcan-helper as root, with any arguments, without a
+# password. That is deliberately as far as sudo's own scoping goes: sudoers
+# restricts *which program* may run as root (this one, and only this one --
+# not `ip`, not a shell, not anything named on the command line); the
+# program itself is what restricts *what it will do* -- see
+# packaging/linux/socketcan-helper, which accepts only the three narrow
+# `status`/`configure`/`down` operations and validates every argument.
+# Splitting it this way (rather than trying to enumerate every allowed
+# subcommand+argument combination in sudoers itself, which sudoers' own
+# wildcard matching cannot do safely) keeps both halves small and auditable.
+#
+# The GUI invokes this as: sudo -n socketcan-helper <verb> <iface> [bitrate]
+# -n is load-bearing: if this entry is missing or the user is not in the
+# `cansniff` group, sudo fails immediately with a clear "a password is
+# required" message instead of hanging waiting for terminal authentication.
+%cansniff ALL=(root) NOPASSWD: /usr/local/sbin/socketcan-helper

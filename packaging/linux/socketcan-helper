@@ -1,0 +1,219 @@
+#!/usr/bin/python3
+"""socketcan-helper -- narrow, root-owned SocketCAN privilege boundary.
+
+This is the ONLY program myCANsniffer's normal-user GUI process is ever
+granted (via a scoped `sudo -n` sudoers entry -- see
+packaging/linux/socketcan-helper.sudoers) permission to run as root. It is
+deliberately small, dependency-free (Python 3 standard library only, no
+`cansniff` import), and auditable: read it top to bottom in a couple of
+minutes.
+
+It supports exactly three operations, and nothing else:
+
+    socketcan-helper status    <iface>
+    socketcan-helper configure <iface> <bitrate>
+    socketcan-helper down      <iface>
+
+There is no passthrough to arbitrary `ip` arguments, no way to name a
+different executable to run, and no way to execute an arbitrary command
+through this program. Every argument is validated before it is used, `ip`
+is always invoked from a fixed absolute path chosen by this script (never
+from PATH, an environment variable, or a command-line argument), and a
+shell is never involved -- every `ip` invocation is a single
+subprocess.run([...]) call built from an explicit argument list.
+
+configure performs the full sequence in one privileged operation, so the
+caller (running unprivileged) can never observe -- or race -- a partially
+configured link:
+
+    ip link set <iface> down
+    ip link set <iface> type can bitrate <bitrate> listen-only on
+    ip link set <iface> up
+    ip -details link show <iface>        # verify UP + listen-only
+
+If verification fails, the interface is brought back down before this
+exits non-zero -- a link is never left up in an unconfirmed state.
+
+Exit codes: 0 success. 2 usage/argument error. 3 validation error (bad
+interface name or bitrate). 4 `ip` (iproute2) not found. 5 interface does
+not exist. 6 an `ip` invocation failed for some other reason. 7 listen-only
+could not be confirmed after configuration.
+"""
+
+import os
+import re
+import subprocess
+import sys
+
+PROG = "socketcan-helper"
+
+#: Fixed, absolute candidates -- checked in order, first executable file
+#: wins. Never resolved through PATH and never overridable by environment
+#: or argument: this is the one thing standing between "an unprivileged
+#: process asked" and "the kernel's CAN link configuration changed".
+IP_CANDIDATES = ("/usr/sbin/ip", "/sbin/ip", "/usr/bin/ip")
+
+#: Same allowlist cansniff/socketcan.py applies before ever invoking sudo --
+#: duplicated deliberately (defense-in-depth across the privilege boundary).
+#: This program trusts nothing about what already ran unprivileged.
+IFACE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,14}$")
+
+#: A broad, safe Classic CAN bitrate range rather than hard-coding the
+#: application's discrete candidate list here too -- see
+#: cansniff/discovery/bitrate.py (DEFAULT_BITRATES) and
+#: cansniff/config.py (discovery.classic_bitrates) for that one source of
+#: truth; a manually-entered bitrate is not restricted to the auto-scan
+#: candidates. This is only a sanity bound against a malformed/absurd value
+#: reaching `ip`.
+MIN_BITRATE = 1_000
+MAX_BITRATE = 8_000_000
+
+TIMEOUT_SECONDS = 5.0
+
+EXIT_OK = 0
+EXIT_USAGE = 2
+EXIT_VALIDATION = 3
+EXIT_IP_MISSING = 4
+EXIT_INTERFACE_MISSING = 5
+EXIT_IP_FAILED = 6
+EXIT_LISTEN_ONLY_UNCONFIRMED = 7
+
+
+def _fail(code, message):
+    sys.stderr.write("{}: {}\n".format(PROG, message))
+    return code
+
+
+def _valid_iface(name):
+    return bool(name) and bool(IFACE_RE.match(name))
+
+
+def _resolve_ip():
+    for path in IP_CANDIDATES:
+        if os.path.isfile(path) and os.access(path, os.X_OK):
+            return path
+    return None
+
+
+def _run_ip(ip_path, *args):
+    """One structured, shell-free `ip` invocation. Never raises for a
+    non-zero exit -- callers inspect returncode/stderr themselves."""
+    argv = [ip_path] + list(args)
+    return subprocess.run(argv, capture_output=True, text=True,
+                          timeout=TIMEOUT_SECONDS)
+
+
+def _classify_ip_failure(stderr):
+    low = (stderr or "").lower()
+    if ("cannot find device" in low or "does not exist" in low
+            or "no such device" in low):
+        return EXIT_INTERFACE_MISSING
+    return EXIT_IP_FAILED
+
+
+def _link_is_up_and_listen_only(details_stdout):
+    low = (details_stdout or "").lower()
+    up = ("state up" in low or ",up," in low or "<up," in low or ",up>" in low)
+    listen_only = "listen-only on" in low
+    return up, listen_only
+
+
+def cmd_status(ip_path, iface):
+    result = _run_ip(ip_path, "-details", "link", "show", iface)
+    if result.returncode != 0:
+        sys.stderr.write(result.stderr or "")
+        return _classify_ip_failure(result.stderr)
+    sys.stdout.write(result.stdout or "")
+    return EXIT_OK
+
+
+def cmd_down(ip_path, iface):
+    result = _run_ip(ip_path, "link", "set", iface, "down")
+    if result.returncode != 0:
+        sys.stderr.write(result.stderr or "")
+        return _classify_ip_failure(result.stderr)
+    return EXIT_OK
+
+
+def cmd_configure(ip_path, iface, bitrate_text):
+    try:
+        bitrate = int(bitrate_text)
+    except ValueError:
+        return _fail(EXIT_VALIDATION, "invalid bitrate {!r}".format(bitrate_text))
+    if not (MIN_BITRATE <= bitrate <= MAX_BITRATE):
+        return _fail(EXIT_VALIDATION, "bitrate {} out of range [{}, {}]".format(
+            bitrate, MIN_BITRATE, MAX_BITRATE))
+
+    down = _run_ip(ip_path, "link", "set", iface, "down")
+    if down.returncode != 0:
+        sys.stderr.write(down.stderr or "")
+        return _classify_ip_failure(down.stderr)
+
+    set_type = _run_ip(
+        ip_path, "link", "set", iface, "type", "can",
+        "bitrate", str(bitrate), "listen-only", "on")
+    if set_type.returncode != 0:
+        sys.stderr.write(set_type.stderr or "")
+        # Interface is already down (the step above succeeded) -- leave it
+        # there rather than bring up a link the driver just rejected.
+        return _classify_ip_failure(set_type.stderr)
+
+    up = _run_ip(ip_path, "link", "set", iface, "up")
+    if up.returncode != 0:
+        sys.stderr.write(up.stderr or "")
+        return _classify_ip_failure(up.stderr)
+
+    verify = _run_ip(ip_path, "-details", "link", "show", iface)
+    if verify.returncode != 0:
+        sys.stderr.write(verify.stderr or "")
+        return _classify_ip_failure(verify.stderr)
+
+    is_up, listen_only_on = _link_is_up_and_listen_only(verify.stdout)
+    if not is_up or not listen_only_on:
+        # Do not leave a half-verified link live -- bring it back down
+        # before reporting failure. Best-effort: the configuration failure
+        # is what gets reported either way.
+        _run_ip(ip_path, "link", "set", iface, "down")
+        return _fail(
+            EXIT_LISTEN_ONLY_UNCONFIRMED,
+            "listen-only could not be confirmed on {} after "
+            "configuration".format(iface))
+
+    sys.stdout.write(verify.stdout or "")
+    return EXIT_OK
+
+
+def main(argv):
+    if len(argv) < 2:
+        return _fail(EXIT_USAGE,
+                     "usage: {} status|configure|down <iface> [bitrate]".format(PROG))
+
+    verb, iface = argv[0], argv[1]
+    if not _valid_iface(iface):
+        return _fail(EXIT_VALIDATION, "invalid interface name {!r}".format(iface))
+
+    if verb == "status" and len(argv) != 2:
+        return _fail(EXIT_USAGE, "status takes exactly one argument")
+    if verb == "down" and len(argv) != 2:
+        return _fail(EXIT_USAGE, "down takes exactly one argument")
+    if verb == "configure" and len(argv) != 3:
+        return _fail(EXIT_USAGE, "configure requires exactly iface and bitrate")
+    if verb not in ("status", "down", "configure"):
+        return _fail(EXIT_USAGE, "unknown operation {!r}".format(verb))
+
+    ip_path = _resolve_ip()
+    if ip_path is None:
+        return _fail(
+            EXIT_IP_MISSING,
+            "'ip' (iproute2) was not found at any of: {}".format(
+                ", ".join(IP_CANDIDATES)))
+
+    if verb == "status":
+        return cmd_status(ip_path, iface)
+    if verb == "down":
+        return cmd_down(ip_path, iface)
+    return cmd_configure(ip_path, iface, argv[2])
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

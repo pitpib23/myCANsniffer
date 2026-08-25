@@ -10,6 +10,7 @@ Capture still runs on a worker thread; this window only consumes frames.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import tempfile
 import threading
@@ -50,6 +51,8 @@ from ..export import (
 )
 from ..filters import FilterSet
 from ..model import CanFrame
+from ..socketcan import SocketCanError, SocketCanLink
+from ..sources.live import LiveSource
 from ..investigation import (
     Annotation, Bookmark, BookmarkKind, CaptureReferenceStatus, ComparisonDefinition,
     InvestigationProject, PROJECT_EXTENSION, ProjectError, ReportContext,
@@ -81,6 +84,8 @@ from .widgets import (
     Chip, CurrentPageStack, MetricChip, NavRail, SectionLabel,
     fit_top_level_to_screen, scrollable,
 )
+
+log = logging.getLogger(__name__)
 
 #: Minimum spacing between ISO-TP survey rebuilds while frames are still
 #: arriving -- see MainWindow._refresh_isotp. A live capture can bump the
@@ -1148,7 +1153,21 @@ class MainWindow(QMainWindow):
             and not bool(self.config.get("source.live.fd", False))
         )
 
-    def _start_capture_now(self) -> None:
+    def _start_capture_now(self, configure_link: bool = True) -> None:
+        """Build a fresh source and start capturing on it.
+
+        ``configure_link`` controls whether a live SocketCAN source must
+        reconfigure the OS-level link (down -> bitrate + listen-only -> up
+        -> verify) before opening -- see cansniff/sources/live.py. It is
+        True for every ordinary manual Start (Settings' bitrate must always
+        be deterministically applied, never assumed already in effect --
+        see LiveSource's module docstring), and False only when this is
+        called right after a successful auto-discovery scan
+        (_on_discovery_thread_finished), which has already configured the
+        winning bitrate itself as its own final step; reconfiguring a
+        second time here would be redundant and would bounce the link
+        again immediately before capture begins.
+        """
         try:
             # Retained history (Plot/Trace/Range) survives Stop -- only
             # Clear or opening a new capture drops it (see clear_views) --
@@ -1164,6 +1183,9 @@ class MainWindow(QMainWindow):
             self._update_bus_overview()
             QMessageBox.critical(self, "Cannot start capture", str(exc))
             return
+
+        if not configure_link and isinstance(source, LiveSource):
+            source.configure_link = False
 
         logger = None
         if bool(self.config.get("logging.enabled", False)):
@@ -1331,7 +1353,12 @@ class MainWindow(QMainWindow):
         self._pending_start_after_discovery = False
         self._discovery_status_message = ""
         if proceed:
-            self._start_capture_now()
+            # discover_socketcan_bitrate already brought the interface down,
+            # applied the winning bitrate + listen-only, and verified it as
+            # its own last step (see cansniff/discovery/bitrate.py's
+            # "Winner Reconfiguration") -- do not reconfigure it a second
+            # time here.
+            self._start_capture_now(configure_link=False)
             return
         self._apply_capture_state(self._IDLE)
         if message:
@@ -1363,6 +1390,28 @@ class MainWindow(QMainWindow):
         thread.wait()
         self._finalize_thread(thread)
 
+    def _bring_live_interface_down(self, worker: CaptureWorker) -> None:
+        """Best-effort: bring a just-finished live SocketCAN capture's
+        interface back down. Never raises -- a failure here (interface
+        already gone, helper/sudo not configured, ...) must not block the
+        UI from returning to Idle, the same way discovery's own
+        _best_effort_down does not block a scan from completing. Reads the
+        channel off the source that was actually just capturing, not off
+        current Settings, which may have been edited to a different
+        channel while this capture was still running (see
+        cansniff/ui/config_dialog.py -- Settings only take effect on the
+        next Start).
+        """
+        source = getattr(worker, "_source", None)
+        if not isinstance(source, LiveSource) or source.interface != "socketcan":
+            return
+        try:
+            SocketCanLink(source.channel).down()
+        except SocketCanError as exc:
+            log.warning("Could not bring %s down after Stop: %s", source.channel, exc)
+        except Exception:
+            log.exception("Unexpected error bringing %s down after Stop", source.channel)
+
     def _finalize_thread(self, thread: QThread) -> None:
         if thread is not self._thread:
             return
@@ -1382,6 +1431,13 @@ class MainWindow(QMainWindow):
                     worker, "driver_overruns", "_integrity_driver_baseline"),
                 state=state,
             )
+            # Stop (and window close, which shares this path) always leaves
+            # the configured SocketCAN interface down -- see
+            # cansniff/socketcan.py. worker.run()'s own finally block has
+            # already closed the Bus before sourceFinished ever reaches
+            # here (see CaptureWorker._finish), so this never races an open
+            # receive handle.
+            self._bring_live_interface_down(worker)
         self._worker = None
         self._thread = None
         # Returning to Idle resets Pause — unchecked, disabled, labelled

@@ -318,6 +318,13 @@ def discover_socketcan_bitrate(
             "bitrate": bitrate,
             "fd": False,
             "require_listen_only": True,
+            # This loop already just configured the link itself, above, via
+            # scan_link.configure() -- LiveSource must not redundantly
+            # reconfigure it again right before observing (see
+            # cansniff/sources/live.py's configure_link docstring). Only
+            # this per-candidate scan and the final winner reconfiguration
+            # below own link configuration during discovery.
+            "configure_link": False,
         }
         source = None
         observations: List[Tuple[float, CanFrame]] = []
