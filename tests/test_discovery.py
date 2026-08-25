@@ -267,6 +267,28 @@ class BitrateDiscoveryTests(unittest.TestCase):
                 self.assertEqual(len(link.configure_calls), 1,
                                  "the second candidate must not be attempted")
 
+    def test_listen_only_unconfirmed_configuration_failure_aborts_the_whole_scan(self):
+        # Regression for the "CRITICAL AUTO-SCAN FAILURE CLASSIFICATION" bug:
+        # listen-only is one CAN controller-mode bit, unrelated to bitrate,
+        # so a genuine failure to confirm it (most often a state-parser
+        # mismatch against this system's actual `ip -details` rendering) is
+        # systemic -- it must abort the whole scan and say so, rather than
+        # silently re-trying every remaining candidate and reporting each
+        # one as its own unrelated failure (or worse, "no traffic", if the
+        # per-candidate loop happened to keep going).
+        link = _FakeLink(configure_side_effects={
+            250000: SocketCanError(
+                SocketCanErrorKind.LISTEN_ONLY_UNCONFIRMED,
+                "listen-only could not be confirmed"),
+        })
+        result, factory = self._run({500000: _stable_frames()}, link=link)
+        self.assertEqual(result.status, DiscoveryStatus.CONFIGURATION_ERROR)
+        self.assertEqual(factory.settings, [],
+                         "no source should ever be opened after a systemic failure")
+        self.assertEqual(len(link.configure_calls), 1,
+                         "the second candidate must not be attempted")
+        self.assertIn("listen-only", result.reasons[0].lower())
+
     def test_winning_bitrate_is_explicitly_reconfigured_after_the_scan(self):
         # 250000 is tried and fails after 500000 would have already won --
         # candidates keep going in ascending order, so the link ends up

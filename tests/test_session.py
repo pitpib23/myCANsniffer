@@ -50,7 +50,8 @@ class ControllerDelegatesToSocketCanLinkTests(unittest.TestCase):
 
     def test_configure_delegates_and_returns_verified_state(self):
         runner = _RecordingRunner(results=[
-            _result(0, stdout="can0: <UP> state UP\n    listen-only on")])
+            _result(0, stdout="can0: <UP> state UP\n    can <LISTEN-ONLY> state "
+                              "ERROR-ACTIVE\n    bitrate 500000")])
         controller = SocketCanSessionController(
             "can0", link=SocketCanLink("can0", runner=runner))
         state = controller.configure(500000)

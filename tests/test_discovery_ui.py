@@ -369,6 +369,33 @@ class MainWindowAutoScanTests(unittest.TestCase):
         self.assertEqual(dialog.action_button.text(), "Close")
         self.assertTrue(dialog.isVisible() or not dialog.isHidden())
 
+    def test_systemic_configuration_error_shows_the_actual_reason_not_just_no_traffic(self):
+        """Regression for "PROGRESS DIALOG LISTEN-ONLY STATUS": a systemic
+        configuration failure (most commonly listen-only verification
+        failing -- see cansniff/socketcan.py's SYSTEMIC_ERROR_KINDS) means
+        the scan never reached the listening phase for any candidate. The
+        dialog must show *why* (result.reasons), never just a bare generic
+        template that could be misread as "no traffic was heard"."""
+        configuration_error = DiscoveryResult(
+            "can0", DiscoveryStatus.CONFIGURATION_ERROR, None, (),
+            reasons=(
+                "Could not configure can0: Listen-only mode could not be "
+                "confirmed on can0 after configuration. Capture was not "
+                "started. (listen-only-unconfirmed)",
+                "Remaining candidates were not attempted",
+            ))
+        with mock.patch("cansniff.discovery.discover_socketcan_bitrate",
+                        return_value=configuration_error):
+            self.window.start_auto_scan()
+            dialog = self.window._auto_scan_dialog
+            self.assertTrue(self._wait(
+                lambda: self.window._capture_state == self.window._IDLE))
+        text = dialog.status_label.text()
+        self.assertIn("Could not configure can0", text)
+        self.assertIn("listen-only", text.lower())
+        self.assertIn("Remaining candidates were not attempted", text)
+        self.assertEqual(dialog.action_button.text(), "Close")
+
     def test_ambiguous_result_leaves_the_dialog_open_with_results_and_stays_idle(self):
         stable_candidates = (_stable_candidate(250000), _stable_candidate(500000))
         ambiguous = DiscoveryResult(

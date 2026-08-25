@@ -33,13 +33,22 @@ def _proc(returncode=0, stdout="", stderr=""):
     return types.SimpleNamespace(returncode=returncode, stdout=stdout, stderr=stderr)
 
 
+#: Realistic `ip -details link show can0` renderings (iproute2's
+#: ip/iplink_can.c, print_ctrlmode): the active ctrlmode bit(s), if any,
+#: appear as a bracketed flag list directly between "can" and "state" -- see
+#: _CAN_CTRLMODE_LINE_RE's docstring below for why free "listen-only on"/
+#: "off" text (this file's fixtures before this was fixed) never matches
+#: real output and was the root cause of a correctly-configured, genuinely
+#: listen-only interface being reported as unconfirmed.
 UP_LISTEN_ONLY = (
     "3: can0: <NOARP,UP,LOWER_UP,ECHO> state UP\n"
-    "    can state ERROR-ACTIVE\n"
-    "    bitrate 500000 sample-point 0.875\n"
-    "    listen-only on")
+    "    can <LISTEN-ONLY> state ERROR-ACTIVE\n"
+    "    bitrate 500000 sample-point 0.875")
 
-UP_NOT_LISTEN_ONLY = "3: can0: <NOARP,UP,LOWER_UP,ECHO> state UP\n    listen-only off"
+UP_NOT_LISTEN_ONLY = (
+    "3: can0: <NOARP,UP,LOWER_UP,ECHO> state UP\n"
+    "    can state ERROR-ACTIVE\n"
+    "    bitrate 500000 sample-point 0.875")
 
 
 class _RecordingIp:
@@ -230,11 +239,54 @@ class ConfigureSequenceTests(HelperTestCase):
     def test_not_up_after_configure_is_also_treated_as_unconfirmed(self):
         ip = _RecordingIp({
             ("-details", "link", "show"): _proc(
-                0, stdout="can0: <NOARP> state DOWN\n    listen-only on"),
+                0, stdout="can0: <NOARP> state DOWN\n    can <LISTEN-ONLY> state "
+                          "STOPPED restart-ms 0"),
         })
         self.helper._run_ip = ip
         rc = self.helper.main(["configure", "can0", "500000"])
         self.assertEqual(rc, self.helper.EXIT_LISTEN_ONLY_UNCONFIRMED)
+
+
+class ListenOnlyDetectionTests(HelperTestCase):
+    """Direct unit coverage of _link_is_up_and_listen_only -- the function
+    ConfigureSequenceTests exercises only indirectly through main(). See its
+    docstring in packaging/linux/socketcan-helper for the root-cause story
+    this guards against.
+    """
+
+    def test_recognizes_the_bracket_form(self):
+        up, listen_only = self.helper._link_is_up_and_listen_only(
+            "can0: <UP> state UP\n    can <LISTEN-ONLY> state ERROR-ACTIVE")
+        self.assertTrue(up)
+        self.assertTrue(listen_only)
+
+    def test_recognizes_listen_only_alongside_other_flags(self):
+        _up, listen_only = self.helper._link_is_up_and_listen_only(
+            "can0: <UP> state UP\n    can <LOOPBACK,LISTEN-ONLY> state ERROR-ACTIVE")
+        self.assertTrue(listen_only)
+
+    def test_no_bracket_at_all_means_not_listen_only(self):
+        _up, listen_only = self.helper._link_is_up_and_listen_only(
+            "can0: <UP> state UP\n    can state ERROR-ACTIVE")
+        self.assertFalse(listen_only)
+
+    def test_a_different_flag_alone_means_not_listen_only(self):
+        _up, listen_only = self.helper._link_is_up_and_listen_only(
+            "can0: <UP> state UP\n    can <LOOPBACK> state ERROR-ACTIVE")
+        self.assertFalse(listen_only)
+
+    def test_unparseable_output_fails_closed_to_not_listen_only(self):
+        # No `can ... state` line at all -- must not be trusted either way.
+        _up, listen_only = self.helper._link_is_up_and_listen_only("garbage output")
+        self.assertFalse(listen_only)
+
+    def test_legacy_free_text_form_is_still_recognized_as_a_fallback(self):
+        # Same defensive-only legacy fallback as cansniff/socketcan.py's
+        # _parse_state -- only applies when no `can ... state` line is
+        # found at all.
+        _up, listen_only = self.helper._link_is_up_and_listen_only(
+            "can0: <UP> state UP\n    listen-only on")
+        self.assertTrue(listen_only)
 
 
 class StatusAndDownTests(HelperTestCase):

@@ -162,7 +162,15 @@ executed on physical hardware; do not claim this status from mocked tests.
 1. `ip -details link show can0` -- note the current state.
 2. In Settings, set a known-correct manual bitrate; press **Start**.
 3. `ip -details link show can0` again -- confirm: `UP`, the configured
-   bitrate, `listen-only on`.
+   bitrate, and a `can <LISTEN-ONLY>` (or `can <...,LISTEN-ONLY,...>`)
+   controller-mode line -- **not** free text like `listen-only on` anywhere,
+   which real `ip -details` output does not contain (see
+   `cansniff/socketcan.py`'s `_parse_state` docstring). Compare this raw
+   output against what the application itself logged at `INFO` for the same
+   attempt (`SocketCanSessionController.configure`'s `"... configured:
+   up=... listen_only=... bitrate=..."` line) -- they must agree. If they
+   ever disagree, that disagreement is itself a bug: stop here and report it
+   with the raw `ip -details` text, rather than continuing.
 4. Confirm frames arrive in Messages.
 5. Press **Stop**; confirm `ip -details link show can0` reports `DOWN`.
 
@@ -171,9 +179,14 @@ executed on physical hardware; do not claim this status from mocked tests.
 1. Press **Auto Scan**; confirm the popup opens, candidate progress and
    statistics visibly update, and the main window stays responsive.
 2. Confirm the correct bitrate is detected and capture starts automatically
-   (no second button press).
+   (no second button press). If every candidate instead fails identically
+   before any traffic is observed, the popup's result text names the actual
+   reason (see `DiscoveryResult.reasons`, surfaced verbatim by
+   `AutoScanDialog.on_result`) -- a listen-only verification failure is
+   reported distinctly from "no traffic" and aborts the scan immediately
+   rather than retrying every remaining candidate the same way.
 3. `ip -details link show can0` -- confirm it matches the detected rate,
-   `UP`, `listen-only on`.
+   `UP`, and shows the `LISTEN-ONLY` controller-mode flag as in step 3 above.
 4. Press **Stop**; confirm `can0` is `DOWN`.
 
 **Bitrate change:**

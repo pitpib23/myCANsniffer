@@ -111,11 +111,83 @@ def _classify_ip_failure(stderr):
     return EXIT_IP_FAILED
 
 
+#: Real `ip -details link show <iface>` output (iproute2's
+#: ip/iplink_can.c, print_ctrlmode) renders every active CAN controller-mode
+#: bit as a bracketed, comma-separated flag list directly after the `can`
+#: keyword and directly before `state`, e.g.:
+#:
+#:     can <LISTEN-ONLY> state ERROR-ACTIVE restart-ms 0
+#:     can <LOOPBACK,LISTEN-ONLY> state ERROR-ACTIVE restart-ms 0
+#:     can state ERROR-ACTIVE restart-ms 0        <- no bit set at all
+#:
+#: There is no "on"/"off" qualifier anywhere in that line. An earlier
+#: version of this function looked only for the literal substring
+#: "listen-only on", which never appears in real iproute2 output -- so a
+#: correctly-configured, genuinely listen-only interface was reported as
+#: NOT listen-only, and this helper brought the link it had just configured
+#: back down and returned EXIT_LISTEN_ONLY_UNCONFIRMED even though
+#: configuration had actually succeeded. This is the root cause of manual
+#: Start / Auto Scan failing on a link that visibly shows listen-only when
+#: inspected by hand with the same `ip -details link show` command.
+#:
+#: Must stay logic-equivalent to cansniff/socketcan.py's _parse_state -- see
+#: tests/test_listen_only_parser_parity.py, which feeds the same raw
+#: fixtures through both and asserts agreement. This copy stays
+#: self-contained (no `cansniff` import, see the module docstring) on
+#: purpose; equivalence is enforced by that shared test, not by shared code.
+_CAN_CTRLMODE_LINE_RE = re.compile(r"\bcan\s*(<([^>]*)>)?\s*state\b", re.IGNORECASE)
+
+#: Defensive fallback only, same as cansniff/socketcan.py's own copy: no
+#: iproute2 version this project has documented evidence for renders
+#: free-text "listen-only on"/"off" anywhere. Kept in case some other CAN
+#: tool, or a future/unrecognized iproute2 rendering, does -- but it only
+#: ever applies when no _CAN_CTRLMODE_LINE_RE match was found at all, and
+#: requires an explicit "on"/"off" qualifier: it must never treat the bare
+#: substring "listen-only" as meaning DISABLED (see the root-cause note
+#: above -- that exact mistake is what this replaces).
+_LEGACY_LISTEN_ONLY_ON_RE = re.compile(r"listen[-_]only\s+on\b", re.IGNORECASE)
+_LEGACY_LISTEN_ONLY_OFF_RE = re.compile(r"listen[-_]only\s+off\b", re.IGNORECASE)
+
+
+def _ctrlmode_flags(bracket_text):
+    flags = set()
+    for token in bracket_text.split(","):
+        token = token.strip().lower().replace("_", "-")
+        if token:
+            flags.add(token)
+    return flags
+
+
 def _link_is_up_and_listen_only(details_stdout):
-    low = (details_stdout or "").lower()
+    """Returns (up, listen_only) from `ip -details link show` output.
+
+    Uses the identical detection logic as cansniff/socketcan.py's
+    _parse_state (tri-state internally: found-enabled / found-disabled /
+    unknown), then collapses "unknown" to False for this function's own
+    narrower purpose: deciding whether the link this helper just configured
+    may be trusted and left up. An unparseable/absent report is therefore
+    treated exactly like a positively-disabled one here -- either way this
+    helper brings the link back down and reports
+    EXIT_LISTEN_ONLY_UNCONFIRMED rather than leaving an unconfirmed link
+    live -- whereas cansniff/socketcan.py's own copy keeps "unknown"
+    distinct from "disabled" for accurate operator-facing diagnosis.
+    """
+    text = details_stdout or ""
+    low = text.lower()
     up = ("state up" in low or ",up," in low or "<up," in low or ",up>" in low)
-    listen_only = "listen-only on" in low
-    return up, listen_only
+
+    listen_only = None
+    ctrlmode = _CAN_CTRLMODE_LINE_RE.search(text)
+    if ctrlmode is not None:
+        bracket = ctrlmode.group(2)
+        listen_only = ("listen-only" in _ctrlmode_flags(bracket)
+                       if bracket is not None else False)
+    elif _LEGACY_LISTEN_ONLY_ON_RE.search(text):
+        listen_only = True
+    elif _LEGACY_LISTEN_ONLY_OFF_RE.search(text):
+        listen_only = False
+
+    return up, bool(listen_only)
 
 
 def cmd_status(ip_path, iface):

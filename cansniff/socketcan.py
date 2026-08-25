@@ -47,11 +47,14 @@ Typical use (see ``cansniff/discovery/bitrate.py`` and
 
 from __future__ import annotations
 
+import logging
 import re
 import subprocess
 from dataclasses import dataclass
 from enum import Enum
 from typing import Callable, List, Optional
+
+log = logging.getLogger(__name__)
 
 #: Default binary names/paths. ``ip`` is resolved through PATH like any other
 #: read-only subprocess call. The helper and ``sudo`` are fixed absolute
@@ -122,12 +125,23 @@ class SocketCanErrorKind(str, Enum):
 #: Failure kinds that will recur identically for every remaining candidate --
 #: the interface itself, the privilege boundary, or the tooling is the
 #: problem, not the bitrate under test.
+#:
+#: LISTEN_ONLY_UNCONFIRMED belongs here too: listen-only is a single CAN
+#: controller-mode bit, entirely independent of which bitrate was just set,
+#: so a genuine failure to confirm it will fail identically at every
+#: remaining candidate -- it is never "this bitrate doesn't support
+#: listen-only". Treating it as per-candidate (as an earlier version of this
+#: module did) let one systemic problem -- most commonly a state-parser
+#: mismatch against this system's actual `ip -details` rendering, see
+#: _parse_state below -- masquerade as every single candidate failing
+#: independently, which is misleading and wastes the whole scan window.
 SYSTEMIC_ERROR_KINDS = frozenset((
     SocketCanErrorKind.IP_UNAVAILABLE,
     SocketCanErrorKind.INTERFACE_MISSING,
     SocketCanErrorKind.PERMISSION_DENIED,
     SocketCanErrorKind.HELPER_UNAVAILABLE,
     SocketCanErrorKind.VALIDATION_ERROR,
+    SocketCanErrorKind.LISTEN_ONLY_UNCONFIRMED,
 ))
 
 
@@ -269,7 +283,76 @@ def _classify_helper_failure(interface: str, argv: List[str], stderr: str,
         tuple(argv), stderr)
 
 
+#: Real ``ip -details link show <iface>`` output (iproute2's
+#: ``ip/iplink_can.c``, ``print_ctrlmode``) renders every active CAN
+#: controller-mode bit as a bracketed, comma-separated flag list directly
+#: after the ``can`` keyword and directly before ``state``, e.g.::
+#:
+#:     can <LISTEN-ONLY> state ERROR-ACTIVE restart-ms 0
+#:     can <LOOPBACK,LISTEN-ONLY> state ERROR-ACTIVE restart-ms 0
+#:     can state ERROR-ACTIVE restart-ms 0        <- no bit set at all
+#:
+#: There is no "on"/"off" qualifier anywhere in that line: a flag's name
+#: appears, alone, inside the bracket if (and only if) the bit is set, and
+#: the whole bracket is omitted -- not printed empty -- when no ctrlmode bit
+#: is set. An earlier version of this parser looked only for the literal
+#: substring "listen-only on"/"off", which never appears in real iproute2
+#: output at all -- it therefore fell through to a bare `"listen-only" in
+#: text` check that (wrongly) reported DISABLED for a genuinely
+#: listen-only-*enabled* interface, because the substring "listen-only" is
+#: present (inside the bracket) but not followed by " on". This is the root
+#: cause of manual Start / Auto Scan reporting listen-only as unverified on
+#: a link `ip -details link show` itself shows is correctly configured.
+#:
+#: \bcan\b (not \bcan0\b) deliberately: an interface name like "can0" has no
+#: word boundary between "can" and the digit, so this never matches the
+#: interface's own name on the first summary line; it also correctly skips
+#: over the unrelated "link/can" line (nothing but whitespace is allowed
+#: between "can" and "state" here, and "link/can" is always followed by
+#: other non-whitespace text, never directly by "state").
+_CAN_CTRLMODE_LINE_RE = re.compile(r"\bcan\s*(<([^>]*)>)?\s*state\b", re.IGNORECASE)
+
+#: Defensive fallback only: no iproute2 version this project has documented
+#: evidence for renders free-text "listen-only on"/"off" anywhere. Kept in
+#: case some other CAN tool, or a future/unrecognized iproute2 rendering,
+#: does -- but it only ever applies when no _CAN_CTRLMODE_LINE_RE match was
+#: found at all, and requires an explicit "on"/"off" qualifier: it must
+#: never treat the bare substring "listen-only" as meaning DISABLED (see the
+#: root-cause note above -- that exact mistake is what this replaces).
+_LEGACY_LISTEN_ONLY_ON_RE = re.compile(r"listen[-_]only\s+on\b", re.IGNORECASE)
+_LEGACY_LISTEN_ONLY_OFF_RE = re.compile(r"listen[-_]only\s+off\b", re.IGNORECASE)
+
+
+def _ctrlmode_flags(bracket_text: str) -> "set":
+    """Normalize a ``<FLAG,FLAG,...>`` bracket's contents into a set of
+    lowercase, hyphen-normalized tokens (``LISTEN-ONLY`` and ``listen_only``
+    both become ``listen-only``), so comparison never depends on iproute2's
+    exact casing or separator choice."""
+    flags = set()
+    for token in bracket_text.split(","):
+        token = token.strip().lower().replace("_", "-")
+        if token:
+            flags.add(token)
+    return flags
+
+
 def _parse_state(output: str) -> SocketCanState:
+    """Parse ``ip -details link show <iface>`` output.
+
+    ``listen_only`` is a genuine tri-state -- ``True``/``False``/``None`` --
+    never collapsed to a plain bool while parsing:
+
+      * ``True`` -- a ``can [<...>] state ...`` line was found and its
+        bracket (if any) includes ``LISTEN-ONLY``.
+      * ``False`` -- that line was found and positively does *not* include
+        it (no bracket at all, or a bracket without it).
+      * ``None`` -- unknown: no such line (and no recognized legacy on/off
+        text either) could be found anywhere in this output. Every caller
+        must treat this the same as "not verified" -- never the same as
+        ``False`` ("verified disabled"). See ``cansniff/sources/live.py``'s
+        ``_preflight``, which reports these two cases with deliberately
+        different wording, and ``SYSTEMIC_ERROR_KINDS`` above.
+    """
     lowered = output.lower()
     # `ip link show` reports state two ways depending on version/flags: a
     # trailing "state UP" field, and/or "UP" inside the <FLAG,FLAG,...>
@@ -277,14 +360,26 @@ def _parse_state(output: str) -> SocketCanState:
     # decide whether it is safe to open the interface.
     up = ("state up" in lowered or ",up," in lowered
           or "<up," in lowered or ",up>" in lowered)
-    if "listen-only on" in lowered:
-        listen_only: Optional[bool] = True
-    elif "listen-only off" in lowered or "listen-only" in lowered:
-        listen_only = False
-    else:
-        listen_only = None
     match = re.search(r"bitrate\s+(\d+)", lowered)
     bitrate = int(match.group(1)) if match else None
+
+    listen_only: Optional[bool] = None
+    ctrlmode = _CAN_CTRLMODE_LINE_RE.search(output)
+    if ctrlmode is not None:
+        bracket = ctrlmode.group(2)
+        if bracket is None:
+            # "can state ..." with no bracket at all: no ctrlmode bit set.
+            listen_only = False
+        else:
+            listen_only = "listen-only" in _ctrlmode_flags(bracket)
+    elif _LEGACY_LISTEN_ONLY_ON_RE.search(output):
+        listen_only = True
+    elif _LEGACY_LISTEN_ONLY_OFF_RE.search(output):
+        listen_only = False
+    # else: no recognized CAN controller-mode report was found anywhere in
+    # this output (wrong interface type, unrecognized iproute2 rendering,
+    # truncated output, ...) -- listen_only stays None/unknown, on purpose.
+
     return SocketCanState(exists=True, up=up, listen_only=listen_only,
                           bitrate=bitrate, raw=output)
 
@@ -347,9 +442,22 @@ class SocketCanLink:
     def is_listen_only(self) -> Optional[bool]:
         """None means unknown -- interface missing, `ip` unavailable, etc."""
         try:
-            return self.state().listen_only
-        except SocketCanError:
+            state = self.state()
+        except SocketCanError as exc:
+            log.debug("%s: could not determine listen-only state: %s", self.interface, exc)
             return None
+        if state.exists and state.listen_only is None:
+            # A genuine parse failure (the interface exists and `ip` ran
+            # successfully, but no recognizable CAN controller-mode report
+            # was found in its output -- see _parse_state) rather than a
+            # missing interface. Callers only ever see None/"unverified"
+            # here (correctly fail closed) -- log the raw output so this is
+            # actually diagnosable instead of a silent dead end.
+            log.warning(
+                "%s: listen-only state could not be determined from `ip "
+                "-details link show` output; treating as unverified (fail "
+                "closed). Raw output was: %r", self.interface, state.raw)
+        return state.listen_only
 
     # -- configuration (privileged, via the helper) ----------------------
 

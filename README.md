@@ -710,6 +710,35 @@ receive-own-messages, or listen-only/passive-related bus arguments. These
 guarantees are covered by software tests; no physical adapter's electrical
 listen-only behavior was hardware-verified as part of this implementation.
 
+**How listen-only is actually detected.** `ip -details link show <iface>`
+renders every active CAN controller-mode bit as a bracketed flag list
+directly between `can` and `state` — e.g. `can <LISTEN-ONLY> state
+ERROR-ACTIVE …` — never as free text like `listen-only on`/`off`; the bracket
+is omitted entirely (not printed empty) when no bit is set. Both parsers in
+this project (`cansniff/socketcan.py`'s `_parse_state`, and
+`packaging/linux/socketcan-helper`'s own copy — kept separate deliberately,
+since the helper is a dependency-free, `cansniff`-free script by design, but
+required to agree by `tests/test_listen_only_parser_parity.py`) key off that
+bracket. An earlier revision looked only for literal `listen-only on` text,
+which real `ip -details` output never contains — it silently reported a
+correctly-configured, genuinely listen-only interface as *not* listen-only,
+which is why manual Start and Auto Scan could fail even though `ip -details
+link show can0` run by hand visibly showed it enabled. `state.listen_only`
+(and the read-only `is_listen_only()`/`is_listen_only` helpers) is a genuine
+tri-state — `True`/`False`/`None` — and `None` ("could not be determined")
+is never treated the same as `False` ("positively confirmed disabled") by
+any caller; a `LISTEN_ONLY_UNCONFIRMED` failure from the privileged helper is
+also treated as **systemic** (`SocketCanErrorKind.systemic`), aborting the
+rest of an Auto Scan immediately with the real reason, rather than letting
+one system-wide verification problem look like every single candidate
+bitrate independently failing (or worse, being misreported as "no traffic").
+This has been exercised against fixtures built from the documented iproute2
+rendering (`ip/iplink_can.c`) — **not** captured from physical hardware; no
+Raspberry Pi/CAN HAT was available in this development environment. Anyone
+deploying this should run `ip -details link show can0` by hand once after a
+manual Start and compare it against what the application reports (logged at
+`INFO` by `SocketCanSessionController.configure`) before relying on it.
+
 #### Auto Scan
 
 Pressing **Auto Scan** opens a dedicated, non-blocking progress dialog and

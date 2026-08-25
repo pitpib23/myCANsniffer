@@ -164,7 +164,19 @@ class AutoScanDialog(ResponsiveDialog):
             return
         template = _RESULT_MESSAGES.get(result.status, "Auto Scan finished: {}".format(
             result.status.value))
-        self.status_label.setText(template.format(interface=self.interface))
+        text = template.format(interface=self.interface)
+        # The summary line alone cannot distinguish "no traffic observed"
+        # from "scan never reached the listening phase at all" (for example
+        # a systemic listen-only verification failure -- see
+        # cansniff/socketcan.py's SYSTEMIC_ERROR_KINDS) -- both can produce
+        # a CONFIGURATION_ERROR/generic-template result. result.reasons
+        # always carries that distinction; show it here so this, the
+        # primary result surface during a real scan, never hides it the way
+        # a bare templated one-liner would. Mirrors the wording
+        # MainWindow's own (dialog-absent) fallback path already uses.
+        if result.reasons:
+            text += "\n\n" + "\n".join("- " + reason for reason in result.reasons)
+        self.status_label.setText(text)
         self._show_close_button()
 
     def on_error(self, message: str) -> None:

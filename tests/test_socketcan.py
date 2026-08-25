@@ -99,15 +99,21 @@ class ReadOperationsAreUnprivilegedTests(unittest.TestCase):
             SocketCanLink("can0", runner=runner).exists()
 
     def test_state_parses_listen_only_on(self):
+        # Realistic `ip -details link show can0` rendering (iproute2's
+        # ip/iplink_can.c print_ctrlmode): the active ctrlmode bit(s) appear
+        # as a bracketed flag list directly between "can" and "state" -- not
+        # as free "listen-only on" text anywhere. See _CAN_CTRLMODE_LINE_RE's
+        # own docstring in cansniff/socketcan.py for the root-cause story.
         output = ("3: can0: <NOARP,UP,LOWER_UP,ECHO> mtu 16 qdisc pfifo_fast state UP "
                   "mode DEFAULT group default qlen 10\n"
-                  "    link/can  promiscuity 0\n"
-                  "    can state ERROR-ACTIVE (berr-counter tx 0 rx 0) restart-ms 0\n"
+                  "    link/can  promiscuity 0 minmtu 0 maxmtu 0\n"
+                  "    can <LISTEN-ONLY> state ERROR-ACTIVE (berr-counter tx 0 rx 0) "
+                  "restart-ms 0\n"
                   "    bitrate 500000 sample-point 0.875\n"
                   "    tq 250 prop-seg 6 phase-seg1 7 phase-seg2 2 sjw 1\n"
                   "    clock 8000000\n"
                   "    re-started bus-errors arbit-lost error-warn error-pass bus-off\n"
-                  "    listen-only on")
+                  "    numtxqueues 1 numrxqueues 1")
         runner = _RecordingRunner(results=[_result(0, stdout=output)])
         state = SocketCanLink("can0", runner=runner).state()
         self.assertTrue(state.exists)
@@ -115,11 +121,59 @@ class ReadOperationsAreUnprivilegedTests(unittest.TestCase):
         self.assertIs(state.listen_only, True)
         self.assertEqual(state.bitrate, 500000)
 
-    def test_state_parses_listen_only_off(self):
+    def test_state_parses_listen_only_on_alongside_other_ctrlmode_flags(self):
+        # The bracket is a comma-separated list -- LISTEN-ONLY must still be
+        # recognized when it is not the only active flag, in any position.
+        for bracket in ("<LISTEN-ONLY,LOOPBACK>", "<LOOPBACK,LISTEN-ONLY>"):
+            with self.subTest(bracket=bracket):
+                output = "can0: <UP> state UP\n    can {} state ERROR-ACTIVE".format(bracket)
+                runner = _RecordingRunner(results=[_result(0, stdout=output)])
+                state = SocketCanLink("can0", runner=runner).state()
+                self.assertIs(state.listen_only, True)
+
+    def test_state_parses_listen_only_off_when_bracket_omits_it(self):
+        # No ctrlmode bit set at all -- iproute2 omits the bracket entirely
+        # rather than printing an empty `<>` or "listen-only off".
         runner = _RecordingRunner(results=[
-            _result(0, stdout="can0: <NOARP> state DOWN\n    listen-only off")])
+            _result(0, stdout="can0: <NOARP> state DOWN\n    can state STOPPED "
+                              "restart-ms 0\n    bitrate 0")])
         state = SocketCanLink("can0", runner=runner).state()
         self.assertIs(state.listen_only, False)
+
+    def test_state_parses_listen_only_off_when_a_different_flag_is_set(self):
+        runner = _RecordingRunner(results=[
+            _result(0, stdout="can0: <UP> state UP\n    can <LOOPBACK> state "
+                              "ERROR-ACTIVE")])
+        state = SocketCanLink("can0", runner=runner).state()
+        self.assertIs(state.listen_only, False)
+
+    def test_state_listen_only_is_unknown_when_no_can_details_line_is_present(self):
+        # Regression: an earlier version of this parser fell through a bare
+        # `"listen-only" in text` check for output like this and reported
+        # False (verified disabled) rather than None (unverifiable) -- this
+        # must never happen. Unparseable output is UNKNOWN, not DISABLED.
+        runner = _RecordingRunner(results=[
+            _result(0, stdout="3: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 "
+                              "state UP\n    link/ether aa:bb:cc:dd:ee:ff")])
+        state = SocketCanLink("can0", runner=runner).state()
+        self.assertIsNone(state.listen_only)
+
+    def test_state_listen_only_case_and_separator_insensitive(self):
+        for bracket in ("<Listen-Only>", "<listen_only>", "<LISTEN-ONLY>"):
+            with self.subTest(bracket=bracket):
+                output = "can0: <UP> state UP\n    can {} state ERROR-ACTIVE".format(bracket)
+                runner = _RecordingRunner(results=[_result(0, stdout=output)])
+                state = SocketCanLink("can0", runner=runner).state()
+                self.assertIs(state.listen_only, True)
+
+    def test_state_parses_legacy_free_text_listen_only_as_a_fallback_only(self):
+        # Defensive only -- see _LEGACY_LISTEN_ONLY_ON_RE/_OFF_RE's docstring
+        # in cansniff/socketcan.py. Only applies when no `can ... state` line
+        # is found at all.
+        runner = _RecordingRunner(results=[
+            _result(0, stdout="can0: <UP> state UP\n    listen-only on")])
+        state = SocketCanLink("can0", runner=runner).state()
+        self.assertIs(state.listen_only, True)
 
     def test_state_reports_missing_interface(self):
         runner = _RecordingRunner(results=[
@@ -131,6 +185,29 @@ class ReadOperationsAreUnprivilegedTests(unittest.TestCase):
     def test_is_listen_only_none_when_undeterminable(self):
         runner = _RecordingRunner(raises=FileNotFoundError())
         self.assertIsNone(SocketCanLink("can0", runner=runner).is_listen_only())
+
+    def test_is_listen_only_logs_the_raw_output_on_a_genuine_parse_failure(self):
+        # Regression: an unparseable-but-successful `ip -details` read must
+        # not be a silent dead end -- see is_listen_only's own docstring.
+        raw = "3: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 state UP"
+        runner = _RecordingRunner(results=[_result(0, stdout=raw)])
+        with self.assertLogs("cansniff.socketcan", level="WARNING") as ctx:
+            result = SocketCanLink("can0", runner=runner).is_listen_only()
+        self.assertIsNone(result)
+        self.assertTrue(any(raw in message for message in ctx.output))
+
+    def test_is_listen_only_does_not_log_a_warning_for_a_definite_result(self):
+        import logging as _logging
+        runner = _RecordingRunner(results=[
+            _result(0, stdout="can0: <UP> state UP\n    can <LISTEN-ONLY> state "
+                              "ERROR-ACTIVE")])
+        with self.assertLogs("cansniff.socketcan", level="DEBUG") as ctx:
+            # assertLogs requires at least one record; emit a harmless
+            # sentinel so a *lack* of a WARNING can still be asserted below.
+            _logging.getLogger("cansniff.socketcan").debug("sentinel")
+            result = SocketCanLink("can0", runner=runner).is_listen_only()
+        self.assertIs(result, True)
+        self.assertFalse(any(record.startswith("WARNING") for record in ctx.output))
 
     def test_module_level_is_listen_only_never_raises(self):
         # The public helper used by LiveSource's own preflight check must
@@ -185,7 +262,8 @@ class MutationGoesThroughTheHelperTests(unittest.TestCase):
 
     def test_configure_returns_the_verified_state(self):
         runner = _RecordingRunner(results=[
-            _result(0, stdout="can0: <UP> state UP\n    listen-only on")])
+            _result(0, stdout="can0: <UP> state UP\n    can <LISTEN-ONLY> state "
+                              "ERROR-ACTIVE\n    bitrate 500000")])
         state = SocketCanLink("can0", runner=runner).configure(500000)
         self.assertTrue(state.up)
         self.assertIs(state.listen_only, True)
@@ -295,14 +373,21 @@ class StructuredErrorTests(unittest.TestCase):
         self.assertEqual(ctx.exception.kind, SocketCanErrorKind.BITRATE_REJECTED)
         self.assertFalse(ctx.exception.systemic)
 
-    def test_listen_only_unconfirmed_is_reported_distinctly_and_not_systemic(self):
+    def test_listen_only_unconfirmed_is_reported_distinctly_and_is_systemic(self):
+        # Systemic (not per-candidate): see SYSTEMIC_ERROR_KINDS's own
+        # docstring in cansniff/socketcan.py -- listen-only is one CAN
+        # controller-mode bit, unrelated to which bitrate was just set, so a
+        # genuine failure to confirm it will recur identically at every
+        # remaining candidate (most often because of a state-parser mismatch
+        # against this system's actual `ip -details` rendering, not because
+        # of the bitrate under test).
         runner = _RecordingRunner(results=[
             _result(7, stderr="socketcan-helper: listen-only could not be "
                               "confirmed on can0 after configuration")])
         with self.assertRaises(SocketCanError) as ctx:
             SocketCanLink("can0", runner=runner).configure(500000)
         self.assertEqual(ctx.exception.kind, SocketCanErrorKind.LISTEN_ONLY_UNCONFIRMED)
-        self.assertFalse(ctx.exception.systemic)
+        self.assertTrue(ctx.exception.systemic)
         self.assertIn("Capture was not started", str(ctx.exception))
 
     def test_timeout_is_reported_distinctly(self):
@@ -329,13 +414,13 @@ class SystemicClassificationTests(unittest.TestCase):
                      SocketCanErrorKind.INTERFACE_MISSING,
                      SocketCanErrorKind.PERMISSION_DENIED,
                      SocketCanErrorKind.HELPER_UNAVAILABLE,
-                     SocketCanErrorKind.VALIDATION_ERROR):
+                     SocketCanErrorKind.VALIDATION_ERROR,
+                     SocketCanErrorKind.LISTEN_ONLY_UNCONFIRMED):
             with self.subTest(kind=kind):
                 self.assertTrue(SocketCanError(kind, "x").systemic)
 
     def test_non_systemic_kinds(self):
         for kind in (SocketCanErrorKind.BITRATE_REJECTED,
-                     SocketCanErrorKind.LISTEN_ONLY_UNCONFIRMED,
                      SocketCanErrorKind.TIMEOUT,
                      SocketCanErrorKind.UNKNOWN):
             with self.subTest(kind=kind):
