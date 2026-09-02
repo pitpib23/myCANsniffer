@@ -73,14 +73,18 @@ DEFAULTS: Dict[str, Any] = {
             "bitrate": 500000,          # manual bitrate, used as-is by Start
             "data_bitrate": 2000000,     # CAN FD only
             "fd": False,
-            # No longer read anywhere. Start always deterministically
-            # applies "bitrate" above to the interface; automatic detection
-            # is the separate, explicit Auto Scan action (main window
-            # button / F8) -- never a Settings toggle -- see
-            # cansniff/ui/main_window.py and cansniff/session.py. Kept only
-            # so an older config file that still has this key continues to
-            # load without incident; safe to delete by hand.
-            "auto_bitrate": True,
+            # Provenance of "bitrate" above, for the main window's source
+            # chip only -- never a Settings toggle, and never read to decide
+            # *behavior* (Start always deterministically applies "bitrate"
+            # as-is regardless of this flag; automatic detection is the
+            # separate, explicit Auto Scan action -- main window button /
+            # F8). Set True only by a successful Auto Scan DETECTED result
+            # (cansniff/ui/main_window.py's _on_discovery_result), set False
+            # by any explicit manual edit through Settings
+            # (cansniff/ui/config_dialog.py's accept()). Defaults False: a
+            # fresh/default bitrate was never auto-detected, so the chip
+            # must not claim it was.
+            "auto_bitrate": False,
             # Safe default: refuse unless listen-only is confirmed. Operators
             # may explicitly set false to allow clearly-labelled unverified
             # receive-only operation on other interfaces.
@@ -101,11 +105,20 @@ DEFAULTS: Dict[str, Any] = {
             10000, 20000, 33333, 50000, 83333, 100000,
             125000, 250000, 500000, 800000, 1000000,
         ],
-        "observation_window": 1.5,
+        # Per-candidate listen time. Longer is more reliable (more time for
+        # real traffic to prove itself, and -- since minimum_traffic_span
+        # below scales with this via minimum_window_coverage -- a
+        # proportionally longer continuous span is demanded before a
+        # candidate can be called STABLE) at the cost of total scan time
+        # (roughly observation_window * number of candidates). Raised from
+        # 1.5s to 4.0s after real-hardware testing showed 1.5s let multiple
+        # wrong candidates look STABLE at once (AMBIGUOUS every time); see
+        # tests/test_discovery.py for the scoring this feeds.
+        "observation_window": 4.0,
         "receive_timeout": 0.05,
         "minimum_valid_frames": 6,
         "minimum_repeated_ids": 1,
-        "minimum_traffic_span": 0.5,
+        "minimum_traffic_span": 1.5,
         "minimum_window_coverage": 0.5,
         "maximum_error_ratio": 0.2,
     },

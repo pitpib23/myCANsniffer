@@ -1394,8 +1394,13 @@ class MainWindow(QMainWindow):
         if result.status == DiscoveryStatus.DETECTED:
             # Persisted so BUS/status reflect it, and so a manual Start
             # later falls back to the last detected rate rather than the
-            # stale default.
+            # stale default. auto_bitrate=True marks this bitrate's
+            # provenance for the source chip only (" (auto)" -- see
+            # _update_source_chip); it is cleared back to False the moment
+            # the operator edits the bitrate by hand in Settings (see
+            # config_dialog.py's accept()).
             self.config.set("source.live.bitrate", int(result.selected_bitrate))
+            self.config.set("source.live.auto_bitrate", True)
             try:
                 self.config.save()
             except Exception:

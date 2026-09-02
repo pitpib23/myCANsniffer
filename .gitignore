@@ -1,32 +1,67 @@
-.venv/
-venv/
+# Python bytecode/cache -- rebuilt automatically, never needed to run or
+# review the project.
 __pycache__/
 *.py[cod]
-CLAUDE.md
-baseline.asc
-Break_and_fog_light_attack.log
-pyproject.toml
+*.pyo
 
-# Runtime output
-sniffer_config.json
-captures/
+# Virtual environments. venv/ also carries its own self-generated
+# venv/.gitignore (newer `python -m venv`), but this is listed explicitly
+# too so it stays ignored even without that.
+venv/
+.venv/
+env/
+ENV/
 
-#pyinstaller
+# Packaging/build output (pyproject.toml uses setuptools -- these appear
+# after `pip install -e .` / `python -m build`, never hand-authored). *.spec
+# and .eggs/ are legacy PyInstaller/setuptools leftovers kept from this
+# project's previous .gitignore even though nothing currently packages that
+# way -- harmless to keep ignoring if that ever comes back.
 build/
 dist/
+*.egg-info/
+*.egg
+.eggs/
 *.spec
 
-# Test / build artifacts
+# Test/tool caches.
 .pytest_cache/
-*.egg-info/
-.eggs/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
 
-# Editor / OS
+# Editor/OS cruft.
 .vscode/
 .idea/
 .DS_Store
 Thumbs.db
 
-testslcan.py
+# Claude Code's own local session/config state -- never project content.
 .claude/
+CLAUDE.md
 
+# Scratch state the test suite writes into the repo root (a QSettings-style
+# workspace/session file per UI test module) when the TEMP env var isn't set
+# -- see e.g. tests/test_bus_overview.py, tests/test_clear.py,
+# tests/test_sources.py. Anchored to the repo root only: does not match the
+# cansniff/ package itself.
+/cansniff_*
+
+# A specific stray scratch script from earlier in this project's history --
+# not part of the test suite (see tests/), kept out on purpose.
+testslcan.py
+
+# Runtime/output files an operator generates by using the app, never needed
+# to run or review the project itself:
+#   - sniffer_config.json: main.py's own default config path when run from
+#     the repo root (see cansniff/config.py's default_config_path()).
+#   - baseline.asc: the default (placeholder, not-committed) live-source
+#     file path in cansniff/config.py's DEFAULTS.
+#   - captures/: source.logging.directory's default output folder.
+# Break_and_fog_light_attack.log at the repo root is the committed example
+# capture and is deliberately NOT covered by any of this -- it is a
+# different, tracked file outside captures/.
+sniffer_config.json
+baseline.asc
+/captures/

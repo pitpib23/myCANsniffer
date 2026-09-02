@@ -323,14 +323,18 @@ class ConfigDialog(ResponsiveDialog):
             "bitrate": int(self.live_bitrate.value()),
             "data_bitrate": int(self.live_data_bitrate.value()),
             "fd": bool(self.live_fd.isChecked()),
-            # No longer surfaced in this dialog -- there is no "auto
-            # bitrate" workflow toggle; Auto Scan (the main window's own
-            # button) is a separate, explicit action -- see
-            # cansniff/ui/main_window.py and cansniff/config.py's own note
-            # on this key. Carried over as-is rather than silently reset to
-            # the DEFAULTS value, for an older config file that still has
-            # it; nothing reads it anymore either way.
-            "auto_bitrate": self.config.get("source.live.auto_bitrate", True),
+            # Not surfaced as its own toggle in this dialog -- there is no
+            # "auto bitrate" workflow setting; Auto Scan (the main window's
+            # own button) is a separate, explicit action -- see
+            # cansniff/ui/main_window.py. This key is provenance only, for
+            # the main window's source chip's " (auto)" suffix
+            # (_update_source_chip): a successful Auto Scan sets it True
+            # (_on_discovery_result); saving Settings, right here, is the
+            # one place an operator explicitly hand-edits "bitrate" above,
+            # so it always clears back to False -- even if the value typed
+            # happens to match a previously auto-detected one, this save is
+            # a manual action and the chip must not keep claiming otherwise.
+            "auto_bitrate": False,
             "require_listen_only": bool(self.require_listen_only.isChecked()),
             "extra_kwargs": extra,
         }
