@@ -57,10 +57,18 @@ sudo sh packaging/linux/install-helper.sh
 ./venv/bin/python main.py --capture baseline.asc
 ./venv/bin/python main.py --monitor             # configured live interface (can0 by default)
 ./venv/bin/python main.py --reset-config        # restore defaults
+./venv/bin/python main.py --lite                # Lite edition: Messages/Trace, 800x480
 ```
 
 (`.\venv\Scripts\python.exe` on Windows.) On first run `sniffer_config.json` is
 created next to `main.py`.
+
+`--lite` is a presentation-only edition for a 7-inch/800x480 Raspberry Pi
+touchscreen: the primary navigation is trimmed to Messages and Trace, and
+the Auto Scan popup's results show only Bitrate and Score. Every retained
+control keeps its full-edition behavior (capture, filtering, scoring,
+worker lifecycle, listen-only safety) — see `cansniff/ui/main_window.py`'s
+and `cansniff/ui/auto_scan_dialog.py`'s own `lite` parameter docstrings.
 
 ---
 

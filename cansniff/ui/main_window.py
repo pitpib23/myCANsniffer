@@ -312,11 +312,24 @@ class MainWindow(QMainWindow):
     #: (a real Pause right after a real Start) never feels delayed.
     _INTERACTION_LOCK_MS = 400
 
-    def __init__(self, config: Config, theme: Theme):
+    def __init__(self, config: Config, theme: Theme, lite: bool = False):
+        """``lite``: the 7-inch/800x480 Lite edition (see main.py's ``--lite``
+        flag). Presentation-only -- it trims the NavRail down to Messages/
+        Trace (see _build_ui) and simplifies AutoScanDialog's result columns
+        (see start_auto_scan), but every retained control, worker, model and
+        signal/slot path below is built and wired exactly as the full
+        edition's; ISO-TP/Protocols/Compare/Matches are still constructed
+        and still live on self.top_stack, simply unreachable from the
+        rail -- see _build_ui's own docstring note. Defaults to False so
+        every existing call site (tests included) is completely unaffected.
+        """
         super().__init__()
         self.config = config
         self.theme = theme
-        self.setWindowTitle("CAN Sniffer — passive receive-only")
+        self.lite = lite
+        self.setWindowTitle(
+            "CAN Sniffer Lite — passive receive-only" if lite
+            else "CAN Sniffer — passive receive-only")
 
         # Set once, at the top of closeEvent -- guards every slot below that
         # would otherwise pop a modal QMessageBox in response to a
@@ -535,10 +548,24 @@ class MainWindow(QMainWindow):
         # not just inside the Messages/Trace packet-list sidebar — so ISO-TP
         # is always one click away and never a detour through Messages. See
         # self.top_stack below for the two sections it switches between.
-        self.nav = NavRail(
-            [
-                ("list", "Messages", "One row per CAN ID, with rate and the latest payload"),
-                ("stream", "Trace", "Every received frame in arrival order"),
+        #
+        # Lite (self.lite): the rail exposes only Messages/Trace -- the
+        # 800x480 edition's whole point. _NAV_MESSAGES/_NAV_TRACE (0/1) stay
+        # correct either way since they are always the first two entries;
+        # _on_nav_clicked's ISO-TP/Protocols/Compare/Matches branches simply
+        # never fire because the rail never hands out those indices. Every
+        # page below (isotp_page, protocols_view, compare_view,
+        # profile_matches_view, self.top_stack) is still built and wired
+        # exactly as the full edition's -- only reachability through this
+        # rail changes -- so nothing that reads them (including a project
+        # saved outside Lite with one of them as its active_workspace; see
+        # _restore_project_context) has to special-case Lite at all.
+        nav_destinations = [
+            ("list", "Messages", "One row per CAN ID, with rate and the latest payload"),
+            ("stream", "Trace", "Every received frame in arrival order"),
+        ]
+        if not self.lite:
+            nav_destinations += [
                 ("chain", "ISO-TP", "Reassembled multi-frame transfers across "
                                     "the whole capture — every CAN ID, not "
                                     "just the one selected in Messages or "
@@ -549,7 +576,9 @@ class MainWindow(QMainWindow):
                                           "without semantic guesses"),
                 ("match", "Matches", "Explainable structural suggestions from "
                                        "local profiles; never auto-applied"),
-            ],
+            ]
+        self.nav = NavRail(
+            nav_destinations,
             self.theme,
             # Messages/Trace double as a collapse toggle for the packet list
             # beside them (see _on_nav_clicked); ISO-TP has no such panel to
@@ -1411,7 +1440,8 @@ class MainWindow(QMainWindow):
         default_duration = float(
             discovery_config.get("scan_duration_default_s", DEFAULT_SCAN_DURATION))
 
-        dialog = AutoScanDialog(interface, candidates, self.theme, default_duration, self)
+        dialog = AutoScanDialog(
+            interface, candidates, self.theme, default_duration, self, lite=self.lite)
         # Cancel/Close, the popup's own window-close (X), and this window's
         # Stop button all funnel into exactly this one path -- never a
         # second, independent cancellation mechanism. The identity check

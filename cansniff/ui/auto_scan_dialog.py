@@ -35,6 +35,11 @@ Cancel while scanning, Close otherwise) and by closing the window (the X).
 ``MainWindow`` connects it to ``stop_capture``, the same slot the main
 window's own Stop button uses -- there is no second, dialog-local
 cancellation mechanism.
+
+``lite=True`` (see ``__init__``) is the 800x480 edition's own presentation:
+the results table shows only Bitrate/Score, sized for a small touchscreen.
+It changes none of the above -- same validation, same worker signals, same
+score, same selection/Start Listening/cancellation semantics.
 """
 
 from __future__ import annotations
@@ -56,6 +61,18 @@ _TABLE_HEADERS = (
     "Bitrate", "Score", "Persistent ID", "Bucket Stability", "Singleton/Churn",
     "Error", "Remote", "Format", "Structural", "Payload-ID", "Details",
 )
+
+#: Lite (800x480) result columns -- the same two leading columns
+#: _TABLE_HEADERS already has, in the same order, so _append_row's Bitrate/
+#: Score cell logic below never needs to differ by edition, only whether it
+#: keeps going past them. See AutoScanDialog.__init__'s ``lite`` parameter.
+_LITE_TABLE_HEADERS = ("Bitrate", "Score")
+
+#: Touch-height floor for Lite's own result rows/primary buttons -- see the
+#: module-level docstring's 7-inch display requirement. Comfortably above
+#: the 40px density floor responsive.py already guarantees everywhere else.
+_LITE_ROW_HEIGHT = 48
+_LITE_BUTTON_HEIGHT = 44
 
 
 def _kbit(bitrate: int) -> str:
@@ -102,12 +119,29 @@ class AutoScanDialog(ResponsiveDialog):
     def __init__(
         self, interface: str, candidate_bitrates: Sequence[int], theme: Theme,
         default_duration: float = DEFAULT_SCAN_DURATION, parent=None,
+        lite: bool = False,
     ):
+        """``lite``: show only the Bitrate/Score result columns and size for
+        an 800x480 display (see main_window.py's own ``lite``) -- purely a
+        presentation choice. Every scan/scoring/selection/cancellation code
+        path below (validate_scan_request, scanRequested, on_progress,
+        on_result, on_error, selected_bitrate, startListening) runs
+        identically regardless of it; only which cells _append_row writes
+        and this dialog's own initial geometry/row height/button height
+        change. Defaults to False so every existing call site (including
+        the full edition's own) is completely unaffected.
+        """
         super().__init__(parent)
         self.theme = theme
         self.interface = interface
+        self.lite = lite
         self.setWindowTitle("Auto Scan — {}".format(interface))
-        self.resize(720, 640)
+        # Still just the *initial* size -- ResponsiveDialog.showEvent (see
+        # widgets.fit_top_level_to_screen) clamps it to whatever screen this
+        # actually opens on either way, exactly as the full edition's does.
+        # Lite's own target is smaller up front so it starts out actually
+        # fitting an 800x480 panel instead of relying on that clamp alone.
+        self.resize(760, 420) if lite else self.resize(720, 640)
         # Non-modal for the same reason as every other non-blocking popup in
         # this project (see BusOverviewDialog): Start/Stop/Auto Scan are
         # already disabled for the whole popup's lifetime (see MainWindow.
@@ -194,12 +228,27 @@ class AutoScanDialog(ResponsiveDialog):
         self.progress_group.setVisible(False)
 
         # -- results -----------------------------------------------------------
-        self.table = QTableWidget(0, len(_TABLE_HEADERS))
-        self.table.setHorizontalHeaderLabels(list(_TABLE_HEADERS))
+        # Lite shows only Bitrate/Score -- the same two leading columns the
+        # full table's own first two are, in the same order (see
+        # _LITE_TABLE_HEADERS) -- so _append_row's score computation and
+        # text never differ by edition, only how many cells it writes.
+        # Diagnostics (Persistent ID, Bucket Stability, ...) are never
+        # computed differently or dropped from the underlying
+        # ScoredCandidate -- see cansniff/discovery/scoring.py -- only left
+        # off *this table*.
+        headers = _LITE_TABLE_HEADERS if self.lite else _TABLE_HEADERS
+        self.table = QTableWidget(0, len(headers))
+        self.table.setHorizontalHeaderLabels(list(headers))
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(len(_TABLE_HEADERS) - 1, QHeaderView.Stretch)
+        header.setSectionResizeMode(len(headers) - 1, QHeaderView.Stretch)
         self.table.verticalHeader().setVisible(False)
+        if self.lite:
+            # A row is exactly as tall as the score it shows -- selecting it
+            # is tapping anywhere across its full width (SelectRows below),
+            # never a small checkbox/glyph -- see the module's touch-target
+            # requirement.
+            self.table.verticalHeader().setDefaultSectionSize(_LITE_ROW_HEIGHT)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SingleSelection)
@@ -220,6 +269,15 @@ class AutoScanDialog(ResponsiveDialog):
         self.action_button.clicked.connect(self.close)
         bottom_row.addWidget(self.action_button)
         outer.addLayout(bottom_row)
+
+        if self.lite:
+            # Comfortable-touch floor for the buttons an operator actually
+            # taps on this popup -- a *minimum*, same spirit as
+            # MainWindow._bar_button's, so nothing about a button's normal
+            # shown size shrinks, only its hard floor grows.
+            for button in (self.start_scan_button, self.start_listening_button,
+                           self.action_button):
+                button.setMinimumHeight(_LITE_BUTTON_HEIGHT)
 
         self._update_start_scan_enabled()
 
@@ -352,7 +410,18 @@ class AutoScanDialog(ResponsiveDialog):
             if candidate.reasons:
                 details += " — " + "; ".join(candidate.reasons)
 
-        self.table.setItem(row, 1, QTableWidgetItem(score_text))
+        # score_text above is the one number this dialog ever shows for a
+        # candidate's score, computed identically in both editions -- Lite
+        # only makes it more prominent (bold, larger, its own full-width
+        # column), never a different value, rounding, or scale. See the
+        # module docstring's score-compatibility requirement.
+        score_item = QTableWidgetItem(score_text)
+        if self.lite:
+            score_item.setFont(self.theme.ui_font(size_delta=3.0, bold=True))
+            self.table.setItem(row, 1, score_item)
+            return
+
+        self.table.setItem(row, 1, score_item)
         for offset, text in enumerate(cells, start=2):
             self.table.setItem(row, offset, QTableWidgetItem(text))
         details_item = QTableWidgetItem(details)
