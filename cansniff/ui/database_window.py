@@ -322,6 +322,7 @@ class DatabaseWindow(ResponsiveDialog):
     def _build_profiles(self) -> QWidget:
         panel = QWidget()
         panel.setMinimumWidth(140)
+        self._profiles_panel = panel
         column = QVBoxLayout(panel)
         column.setContentsMargins(0, 0, 0, 0)
         column.setSpacing(SPACE_SM)
@@ -354,6 +355,7 @@ class DatabaseWindow(ResponsiveDialog):
     def _build_messages(self) -> QWidget:
         panel = QWidget()
         panel.setMinimumWidth(220)
+        self._messages_panel = panel
         column = QVBoxLayout(panel)
         column.setContentsMargins(0, 0, 0, 0)
         column.setSpacing(SPACE_SM)
@@ -396,6 +398,7 @@ class DatabaseWindow(ResponsiveDialog):
     def _build_workspace(self) -> QWidget:
         panel = QWidget()
         panel.setMinimumWidth(280)
+        self._workspace_panel = panel
         column = QVBoxLayout(panel)
         column.setContentsMargins(0, 0, 0, 0)
         column.setSpacing(SPACE_MD)
@@ -546,6 +549,32 @@ class DatabaseWindow(ResponsiveDialog):
         header.setStretchLastSection(True)
         header.setSectionResizeMode(QHeaderView.Interactive)
         return table
+
+    def restyle(self) -> None:
+        """Density-driven master/detail floors -- shares MainWindow's own
+        Theme instance (see _edit_database_window), so this dialog's
+        panels respond to the exact same responsive density the main
+        window does, via the same findChildren(QWidget) restyle sweep
+        (this window is parented to MainWindow -- see its own __init__
+        call site -- so that sweep already reaches it).
+
+        This window is not itself given the full responsive treatment
+        (no auto-collapsing a panel, no FlowLayout reflow) -- the existing
+        three-panel splitter plus ResponsiveDialog's own screen-fit
+        (fit_top_level_to_screen) is judged sufficient here: shrinking
+        the floors is what actually matters for a genuinely small screen,
+        the splitter already does proportional reflow on top of that.
+        """
+        density = self._theme.density
+        if density.name == "normal":
+            widths = (140, 220, 280)
+        elif density.name == "compact":
+            widths = (110, 170, 200)
+        else:
+            widths = (90, 140, 160)
+        self._profiles_panel.setMinimumWidth(widths[0])
+        self._messages_panel.setMinimumWidth(widths[1])
+        self._workspace_panel.setMinimumWidth(widths[2])
 
     # ------------------------------------------------------------------
     # profiles: list <-> store

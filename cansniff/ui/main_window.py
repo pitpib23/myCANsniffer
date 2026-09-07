@@ -44,7 +44,8 @@ from ..analysis.store import FrameStore
 from ..capture import CaptureWorker, FrameLogger
 from ..config import Config
 from ..discovery import (
-    DEFAULT_BITRATES, DEFAULT_INTERFACE, DiscoveryStatus, DiscoveryThresholds,
+    DEFAULT_BITRATES, DEFAULT_INTERFACE, DEFAULT_SCAN_DURATION, DEFAULT_SETTLE_SECONDS,
+    ScoringConfig,
 )
 from ..export import (
     FORMAT_ORDER, FORMATS, ExportError, describe_losses, export, format_for_path,
@@ -68,7 +69,7 @@ from .config_dialog import ConfigDialog
 from .compare_view import CompareView
 from .bus_overview import BusOverviewDialog
 from .database_window import DatabaseWindow
-from .discovery_worker import SocketCanDiscoveryWorker
+from .discovery_worker import BitrateScanWorker
 from .filter_bar import FilterBar
 from .filter_dialog import FilterDialog
 from .interpret_view import MESSAGES, TRACE, InterpretView
@@ -80,9 +81,13 @@ from .tables import (
     ByteHighlightDelegate, IdFilterProxy, IdTableModel, KEY_ROLE, TraceTableModel,
     exemplar_widths,
 )
-from .theme import ROW_HEIGHT_COMPACT, SPACE_LG, SPACE_MD, SPACE_SM, Theme
+from .responsive import (
+    NORMAL_STATE, ResponsiveState, SizeClass, compute_responsive_state,
+    interpolated_density,
+)
+from .theme import ROW_HEIGHT_COMPACT, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XS, Theme
 from .widgets import (
-    Chip, CurrentPageStack, MetricChip, NavRail, SectionLabel,
+    Chip, CurrentPageStack, FlowLayout, MetricChip, NavRail, SectionLabel,
     fit_top_level_to_screen, scrollable,
 )
 
@@ -94,6 +99,20 @@ log = logging.getLogger(__name__)
 #: capture that often would make the window stutter for a result nobody can
 #: read that fast.
 _ISOTP_MIN_INTERVAL = 1.5
+
+#: Responsive floors for the two panes on either side of the main splitter,
+#: keyed by responsive.SizeClass (width axis only -- see MainWindow.
+#: _apply_responsive_state). NORMAL matches this project's original,
+#: unconditional 220/280 exactly, so nothing changes for an existing
+#: desktop-width window. Centralized here rather than inlined at every call
+#: site, per this module's own existing browser_panel/interpret_view
+#: minimums it replaces.
+_SIDEBAR_MIN_BY_WIDTH_CLASS = {
+    SizeClass.NORMAL: 220, SizeClass.COMPACT: 180, SizeClass.ULTRA: 150,
+}
+_WORKSPACE_MIN_BY_WIDTH_CLASS = {
+    SizeClass.NORMAL: 280, SizeClass.COMPACT: 220, SizeClass.ULTRA: 180,
+}
 
 
 class _ProtocolSurveyWorker(QObject):
@@ -313,28 +332,46 @@ class MainWindow(QMainWindow):
         # try/except can catch. Once closing, these slots still update
         # state/logs -- they just skip the dialog.
         self._window_closing = False
+        #: Current responsive classification (see responsive.py) and whether
+        #: the packet-list sidebar is currently hidden *because of* it
+        #: (never because the operator asked -- that is _sidebar_collapsed/
+        #: _selector_on, both untouched by this). Recomputed by
+        #: _apply_responsive_state, called once from showEvent and again on
+        #: every meaningful resizeEvent. Starting at NORMAL_STATE matches
+        #: what a window not yet shown/measured, or a headless test that
+        #: never resizes it, should behave as -- i.e. exactly today's fixed
+        #: desktop layout.
+        self._responsive = NORMAL_STATE
+        self._sidebar_auto_collapsed = False
+        #: Reentrancy guard for _apply_responsive_state -- see resizeEvent's
+        #: own docstring on why this runs synchronously (no QTimer
+        #: debounce): applying a responsive change can itself change a
+        #: widget's minimum size enough to trigger *another* resizeEvent
+        #: (most plausibly restoring a larger density's floors while the
+        #: window is still at a smaller size) before the first call has
+        #: returned. Without this, that nested call runs the same
+        #: findChildren(QWidget) restyle sweep a second time reentrantly,
+        #: which is wasted work at best; with it, the nested call is a
+        #: harmless no-op and the *outer* call's own already-in-flight work
+        #: is what actually finishes the job.
+        self._applying_responsive_state = False
+        #: The QScreen currently wired to _on_available_geometry_changed --
+        #: see _connect_screen_signal, called from showEvent. None until
+        #: this window has actually been shown once.
+        self._connected_screen = None
         self._thread: Optional[QThread] = None
         self._worker: Optional[CaptureWorker] = None
-        #: Owns the passive SocketCAN bitrate scan the explicit Auto Scan
-        #: button triggers -- see start_auto_scan. Mutually exclusive with
-        #: self._thread/self._worker by construction: capture state is only
-        #: ever Idle, Discovering, Running, Paused or Stopping.
-        self._discovery_thread: Optional[QThread] = None
-        self._discovery_worker: Optional[SocketCanDiscoveryWorker] = None
-        #: Set by _on_discovery_result/_on_discovery_error, read once by
-        #: _on_discovery_thread_finished: whether a DETECTED result should
-        #: chain straight into _start_capture_now(), and the final status
-        #: text to show afterward (set again there since _apply_capture_state
-        #: unconditionally writes its own generic per-state text first --
-        #: the same two-step pattern _on_thread_finished already uses).
-        self._pending_start_after_discovery = False
-        self._discovery_status_message = ""
-        #: The DiscoveryStatus of the just-finished scan, or "error" for a
-        #: worker-level exception -- read once by _on_discovery_thread_finished
-        #: to decide whether the Auto Scan popup auto-closes (success or
-        #: cancellation) or stays open showing results (everything else --
-        #: see AutoScanDialog's own docstring).
-        self._discovery_outcome: Optional[str] = None
+        #: Owns the passive, numerically-scored SocketCAN bitrate scan the
+        #: explicit Auto Scan button triggers -- see start_auto_scan.
+        #: Mutually exclusive with self._thread/self._worker by
+        #: construction: capture state is only ever Idle, Discovering,
+        #: Running, Paused or Stopping. Created only once the operator
+        #: actually clicks Start Scan inside the popup (AutoScanDialog.
+        #: scanRequested) -- opening the popup alone never starts a scan --
+        #: so these stay None for as long as the popup is only being
+        #: configured or is showing a finished scan's results.
+        self._scan_thread: Optional[QThread] = None
+        self._scan_worker: Optional[BitrateScanWorker] = None
         self._auto_scan_dialog: Optional[AutoScanDialog] = None
         self._bus_overview: Optional[BusOverviewDialog] = None
         #: Idle / Running / Paused / Stopping — see _apply_capture_state.
@@ -745,12 +782,25 @@ class MainWindow(QMainWindow):
         rows = QVBoxLayout(bar)
         rows.setContentsMargins(SPACE_LG, SPACE_MD, SPACE_LG, SPACE_MD)
         rows.setSpacing(SPACE_SM)
+        #: Kept for responsive density changes -- see _apply_density_to_chrome.
+        self._top_bar_rows = rows
         primary_row = QHBoxLayout()
         primary_row.setSpacing(SPACE_SM)
-        secondary_row = QHBoxLayout()
-        secondary_row.setSpacing(SPACE_SM)
+        self._primary_row = primary_row
         rows.addLayout(primary_row)
-        rows.addLayout(secondary_row)
+
+        # Secondary actions (Database/Export/Filters/Settings/...) live in a
+        # FlowLayout, not a second fixed QHBoxLayout: at normal width they
+        # sit on one line exactly as before: at a width too narrow for all
+        # seven, they wrap onto additional lines purely from the actual
+        # width offered, rather than a horizontal scrollbar or a hand-built
+        # overflow menu. Start/Stop/Pause/Auto Scan/Clear above never do
+        # this -- see this method's own trailing loop and the module's
+        # README section on why primary capture controls stay fixed.
+        secondary_container = QWidget()
+        secondary_row = FlowLayout(secondary_container, margin=0, spacing=SPACE_SM)
+        self._secondary_flow = secondary_row
+        rows.addWidget(secondary_container)
 
         title_block = QVBoxLayout()
         title_block.setSpacing(0)
@@ -1179,14 +1229,16 @@ class MainWindow(QMainWindow):
         before this opens it. It is True for every ordinary manual Start
         (Settings' bitrate must always be applied, never assumed already in
         effect -- see SocketCanSessionController's and LiveSource's own
-        module docstrings), and False only when this is called right after
-        a successful Auto Scan (_on_discovery_thread_finished), which has
-        already configured the winning bitrate itself, verified, as its own
-        final step (cansniff/discovery/bitrate.py's "Winner
-        Reconfiguration"); reconfiguring a second time here would be
-        redundant and would bounce the link again immediately before
-        capture begins -- see the "CRITICAL WINNER RACE" this guards
-        against, and tests/test_socketcan_lifecycle.py's regression
+        module docstrings) and also True for Auto Scan's own "Start
+        Listening" (_on_scan_start_listening): cansniff/discovery/scan.py's
+        scan_bitrate_candidates always leaves the interface back down at
+        the end of a scan (it never selects -- let alone leaves configured
+        -- a winner), so the interface genuinely needs reconfiguring there
+        too. False remains supported for callers that already know the
+        interface is correctly configured and verified -- reconfiguring a
+        second time would be redundant and would bounce the link again
+        immediately before capture begins -- see the "CRITICAL WINNER RACE"
+        this guards against, and tests/test_socketcan_lifecycle.py's regression
         coverage for it.
 
         The configuration itself never runs here, on the Qt UI thread --
@@ -1301,15 +1353,26 @@ class MainWindow(QMainWindow):
         if self._interaction_locked:
             return
         if self._capture_state == self._DISCOVERING:
-            # Stop doubles as Cancel while a scan is in progress -- see
-            # _refresh_capture_controls. discover_socketcan_bitrate leaves
-            # the interface in a deterministic (down) state on cancellation;
-            # _on_discovery_thread_finished returns the window to Idle once
-            # the worker actually confirms it has stopped.
-            if self._discovery_worker is not None:
-                self._discovery_worker.cancel()
-            self.status_message.setText("Cancelling…")
-            self._lock_interactions()
+            # Stop doubles as Cancel/Close for the whole Auto Scan popup --
+            # see _refresh_capture_controls -- covering all three of its
+            # phases: configuring (no worker exists yet -- there is nothing
+            # to cancel, just close the popup and return to Idle directly),
+            # actively scanning (cancel the worker; _on_scan_thread_finished
+            # tears it down, but -- unlike the legacy engine -- never itself
+            # returns the window to Idle, since the popup stays open
+            # showing results even after that), and showing finished
+            # results while awaiting a Start Listening click (again no
+            # worker exists). scan_bitrate_candidates always leaves the
+            # interface down on cancellation.
+            if self._scan_worker is not None:
+                self._scan_worker.cancel()
+                self.status_message.setText("Cancelling…")
+                self._lock_interactions()
+                return
+            if self._auto_scan_dialog is not None:
+                self._auto_scan_dialog.close()
+                self._auto_scan_dialog = None
+            self._apply_capture_state(self._IDLE)
             return
         if self._capture_state not in (self._RUNNING, self._PAUSED):
             return
@@ -1318,17 +1381,17 @@ class MainWindow(QMainWindow):
         self._apply_capture_state(self._STOPPING)
         self._lock_interactions()
 
-    # -- automatic SocketCAN bitrate discovery ("Auto Scan") --------------
+    # -- automatic SocketCAN bitrate scanning ("Auto Scan") ----------------
 
     def start_auto_scan(self) -> None:
         """The Auto Scan button/shortcut's entry point -- a distinct action
         from Start (start_capture), never triggered implicitly by it and
         never gated by a Settings toggle (there is none -- see
-        cansniff/ui/config_dialog.py). Opens a dedicated, non-blocking
-        progress dialog (AutoScanDialog) and runs the same
-        SocketCanDiscoveryWorker/discover_socketcan_bitrate engine Start
-        used to trigger implicitly; only how it is reached, and the
-        dedicated popup, are new.
+        cansniff/ui/config_dialog.py). Only opens the dedicated, non-modal
+        AutoScanDialog: nothing is scanned yet, and nothing on the physical
+        link is touched, until the operator ticks candidate bitrates inside
+        it and explicitly clicks its own Start Scan button -- see
+        _on_scan_requested.
         """
         if self._capture_state != self._IDLE or self._interaction_locked:
             return
@@ -1345,151 +1408,166 @@ class MainWindow(QMainWindow):
         discovery_config = self.config.get("discovery", {}) or {}
         candidates = tuple(
             discovery_config.get("classic_bitrates", DEFAULT_BITRATES) or DEFAULT_BITRATES)
-        thresholds = DiscoveryThresholds.from_mapping(discovery_config)
+        default_duration = float(
+            discovery_config.get("scan_duration_default_s", DEFAULT_SCAN_DURATION))
 
-        dialog = AutoScanDialog(interface, len(candidates), self.theme, self)
-        # Cancel, the popup's own window-close (X), and this window's Stop
-        # button all funnel into exactly this one path -- never a second,
-        # independent cancellation mechanism. The identity check discards a
-        # close arriving from a *previous*, already-finished scan's dialog
-        # that the operator left open to read its results (see
-        # _on_discovery_thread_finished): without it, closing that stale
-        # window could cancel a *different*, currently-running scan started
-        # afterward.
+        dialog = AutoScanDialog(interface, candidates, self.theme, default_duration, self)
+        # Cancel/Close, the popup's own window-close (X), and this window's
+        # Stop button all funnel into exactly this one path -- never a
+        # second, independent cancellation mechanism. The identity check
+        # discards a close arriving from a *previous*, already-finished
+        # scan's dialog that the operator left open to read its results:
+        # without it, closing that stale window could cancel a *different*,
+        # currently-running scan started afterward.
         dialog.cancelled.connect(
             lambda d=dialog: self.stop_capture() if d is self._auto_scan_dialog else None)
+        dialog.scanRequested.connect(
+            lambda candidates, duration, d=dialog: self._on_scan_requested(
+                d, candidates, duration))
+        dialog.startListening.connect(self._on_scan_start_listening)
         self._auto_scan_dialog = dialog
 
-        worker = SocketCanDiscoveryWorker(
-            interface, candidates=candidates, thresholds=thresholds)
+        self._apply_capture_state(self._DISCOVERING)
+        self.status_message.setText(
+            "Auto Scan: select candidate bitrates and a duration, then Start Scan.")
+        self._lock_interactions()
+        dialog.show()
+
+    def _on_scan_requested(self, dialog: AutoScanDialog, candidates, duration: float) -> None:
+        """AutoScanDialog.scanRequested: the operator already picked
+        candidates and a duration and the popup already validated both --
+        this only builds and starts the worker/thread, exactly like
+        start_capture hands CaptureWorker to one. Ignored for a stale
+        dialog (mirrors the identity check on the cancelled signal)."""
+        if dialog is not self._auto_scan_dialog or self._scan_worker is not None:
+            return
+        interface = dialog.interface
+        discovery_config = self.config.get("discovery", {}) or {}
+        settle_seconds = float(
+            discovery_config.get("scan_settle_s", DEFAULT_SETTLE_SECONDS))
+        scoring_config = ScoringConfig.from_mapping(discovery_config)
+
+        worker = BitrateScanWorker(
+            interface, candidates=tuple(candidates), duration=float(duration),
+            settle_seconds=settle_seconds, scoring_config=scoring_config)
         thread = QThread(self)
         worker.moveToThread(thread)
 
         thread.started.connect(worker.run)
-        worker.progressChanged.connect(self._on_discovery_progress)
+        worker.progressChanged.connect(self._on_scan_progress)
         worker.progressChanged.connect(dialog.on_progress)
-        worker.resultReady.connect(self._on_discovery_result)
         worker.resultReady.connect(dialog.on_result)
-        worker.errorOccurred.connect(self._on_discovery_error)
+        worker.resultReady.connect(self._on_scan_result)
+        worker.errorOccurred.connect(self._on_scan_error)
         worker.errorOccurred.connect(dialog.on_error)
         worker.finished.connect(thread.quit, Qt.DirectConnection)
-        thread.finished.connect(self._on_discovery_thread_finished)
+        thread.finished.connect(self._on_scan_thread_finished)
 
-        self._discovery_worker = worker
-        self._discovery_thread = thread
-        self._pending_start_after_discovery = False
-        self._discovery_status_message = ""
-        self._discovery_outcome = None
-        self._apply_capture_state(self._DISCOVERING)
+        self._scan_worker = worker
+        self._scan_thread = thread
+        dialog.set_scanning(True)
         self.status_message.setText("Checking {}…".format(interface))
-        self._lock_interactions()
-        dialog.show()
         thread.start()
 
-    def _on_discovery_progress(self, item) -> None:
+    def _on_scan_progress(self, item) -> None:
         self.status_message.setText(item.message)
 
-    def _on_discovery_result(self, result) -> None:
-        self._discovery_outcome = result.status
-        if result.status == DiscoveryStatus.DETECTED:
-            # Persisted so BUS/status reflect it, and so a manual Start
-            # later falls back to the last detected rate rather than the
-            # stale default. auto_bitrate=True marks this bitrate's
-            # provenance for the source chip only (" (auto)" -- see
-            # _update_source_chip); it is cleared back to False the moment
-            # the operator edits the bitrate by hand in Settings (see
-            # config_dialog.py's accept()).
-            self.config.set("source.live.bitrate", int(result.selected_bitrate))
-            self.config.set("source.live.auto_bitrate", True)
-            try:
-                self.config.save()
-            except Exception:
-                pass
-            self._update_source_chip()
-            self._discovery_status_message = "Detected {:g} kbit/s — listening on {}".format(
-                result.selected_bitrate / 1000.0, result.interface)
-            self._pending_start_after_discovery = True
+    def _on_scan_result(self, result) -> None:
+        """Only handles cancellation -- an ordinary finished scan leaves
+        _capture_state at Discovering and the popup open, showing results,
+        for as long as the operator wants (see _on_scan_thread_finished's
+        own docstring); AutoScanDialog.on_result (connected alongside this)
+        is what actually renders those results. A cancelled scan, in
+        contrast, must not linger -- it closes the popup and returns to
+        Idle immediately, exactly like the pre-scan/no-worker-yet branch of
+        stop_capture already does for a cancel that arrives before any
+        worker existed.
+        """
+        if not result.cancelled:
             return
+        self.status_message.setText("Auto Scan cancelled")
+        dialog = self._auto_scan_dialog
+        self._auto_scan_dialog = None
+        if dialog is not None:
+            dialog.close()
+        self._apply_capture_state(self._IDLE)
 
-        self._pending_start_after_discovery = False
-        if result.status == DiscoveryStatus.CANCELLED:
-            self._discovery_status_message = "Auto Scan cancelled"
-            return
-        self._discovery_status_message = "Auto Scan: {}".format(result.status.value)
-        # The popup itself (AutoScanDialog.on_result, connected alongside
-        # this) is where results/reasons are shown now -- see its own
-        # "POPUP — NO TRAFFIC"/"AMBIGUOUS"/"ERROR" behavior. This is only a
-        # safety net for the (should-not-happen) case of no popup existing,
-        # and skipped entirely while closing -- see _window_closing.
-        if self._auto_scan_dialog is None and not self._window_closing:
-            reasons = "\n".join("- " + reason for reason in result.reasons) or (
-                "No further detail is available.")
-            QMessageBox.warning(
-                self, "Auto Scan",
-                "Could not determine a Classic CAN bitrate for {}.\n\n{}".format(
-                    result.interface, reasons))
+    def _on_scan_error(self, message: str) -> None:
+        self.status_message.setText("Auto Scan failed")
+        log.error("Auto Scan worker failed: %s", message)
 
-    def _on_discovery_error(self, message: str) -> None:
-        self._pending_start_after_discovery = False
-        self._discovery_status_message = "Auto Scan failed"
-        self._discovery_outcome = "error"
-        if self._auto_scan_dialog is None and not self._window_closing:
-            QMessageBox.critical(self, "Auto Scan failed", message)
-
-    def _on_discovery_thread_finished(self) -> None:
+    def _on_scan_thread_finished(self) -> None:
+        """Only tears down the worker/thread -- unlike the legacy engine's
+        equivalent, this never touches _capture_state or _auto_scan_dialog:
+        the popup keeps showing results (AutoScanDialog.on_result already
+        populated them) and _capture_state stays Discovering for as long as
+        the popup itself stays open, so the operator can take as long as
+        they like deciding whether to select a row and click Start
+        Listening. See stop_capture's Discovering branch and
+        _on_scan_start_listening for the two ways that phase actually ends.
+        """
         thread = self.sender()
         if not isinstance(thread, QThread):
-            thread = self._discovery_thread
-        if thread is None or thread is not self._discovery_thread:
+            thread = self._scan_thread
+        if thread is None or thread is not self._scan_thread:
             return
-        self._discovery_worker = None
-        self._discovery_thread = None
+        self._scan_worker = None
+        self._scan_thread = None
         thread.deleteLater()
-        proceed = self._pending_start_after_discovery
-        message = self._discovery_status_message
-        outcome = self._discovery_outcome
-        dialog = self._auto_scan_dialog
-        self._pending_start_after_discovery = False
-        self._discovery_status_message = ""
-        self._discovery_outcome = None
-        self._auto_scan_dialog = None
-        if proceed:
-            # discover_socketcan_bitrate already brought the interface down,
-            # applied the winning bitrate + listen-only, and verified it as
-            # its own last step (see cansniff/discovery/bitrate.py's
-            # "Winner Reconfiguration") -- do not reconfigure it a second
-            # time here. Capture is started first, so the popup only closes
-            # once capture is actually live -- matching "close the progress
-            # popup automatically" once a winner transitions into capture.
-            # self._auto_scan_dialog is already None above, so the close
-            # below cannot re-trigger cancellation through the identity
-            # check in start_auto_scan's lambda.
-            self._start_capture_now(configure_link=False)
-            if dialog is not None:
-                dialog.close()
-            return
-        self._apply_capture_state(self._IDLE)
-        if message:
-            self.status_message.setText(message)
-        if dialog is not None:
-            if outcome == DiscoveryStatus.CANCELLED:
-                dialog.close()
-            # else: leave it open, showing whatever on_result/on_error
-            # already populated, with its own Cancel button now reading
-            # Close -- see "POPUP — NO TRAFFIC"/"AMBIGUOUS"/"ERROR".
+        if self._auto_scan_dialog is not None:
+            self._auto_scan_dialog.set_scanning(False)
 
-    def _teardown_discovery_thread(self) -> None:
+    def _on_scan_start_listening(self, bitrate: int) -> None:
+        """AutoScanDialog.startListening: the operator selected one
+        completed candidate row and explicitly asked to listen on it -- the
+        bitrate used is exactly the one on that row, never automatically
+        the highest score (see AutoScanDialog._on_start_listening_clicked).
+        """
+        dialog = self._auto_scan_dialog
+        # Cleared *before* dialog.close() below so the identity check on
+        # the cancelled-signal lambda in start_auto_scan treats this as a
+        # no-op rather than re-cancelling through stop_capture -- the same
+        # established pattern the legacy engine's success path used.
+        self._auto_scan_dialog = None
+        if dialog is not None:
+            dialog.close()
+        # Store it as the selected listening bitrate. auto_bitrate=True
+        # marks this bitrate's provenance for the source chip only (" (auto)"
+        # -- see _update_source_chip); it is cleared back to False the
+        # moment the operator edits the bitrate by hand in Settings (see
+        # config_dialog.py's accept()).
+        self.config.set("source.live.bitrate", int(bitrate))
+        self.config.set("source.live.auto_bitrate", True)
+        try:
+            self.config.save()
+        except Exception:
+            pass
+        self._update_source_chip()
+        # Reuses the existing live-scanning workflow exactly as manual
+        # Start does -- configure_link=True because, unlike the legacy
+        # engine's own winner-reconfiguration step, scan_bitrate_candidates
+        # never leaves the interface configured for any one candidate (it
+        # always ends by bringing it back down -- see cansniff/discovery/
+        # scan.py): the interface genuinely needs reconfiguring here, via
+        # the same SocketCanSessionController.prepare_manual call manual
+        # Start already uses. If that reconfiguration fails, CaptureWorker's
+        # existing prepare-failure handling reports it through the normal
+        # errorOccurred -> _on_error path below (a plain, non-crashing error
+        # report) and returns the window to Idle -- Auto Scan can simply be
+        # reopened from there, exactly like any other failed Start.
+        self._start_capture_now(configure_link=True)
+
+    def _teardown_scan_thread(self) -> None:
         """Synchronous cancel-and-join, used by closeEvent -- mirrors
         _teardown_thread's handling of an in-flight capture."""
-        thread = self._discovery_thread
-        if thread is None:
-            return
-        if self._discovery_worker is not None:
-            self._discovery_worker.cancel()
-        thread.quit()
-        thread.wait()
-        self._discovery_worker = None
-        self._discovery_thread = None
+        thread = self._scan_thread
+        if thread is not None:
+            if self._scan_worker is not None:
+                self._scan_worker.cancel()
+            thread.quit()
+            thread.wait()
+            self._scan_worker = None
+            self._scan_thread = None
         if self._auto_scan_dialog is not None:
             self._auto_scan_dialog.close()
             self._auto_scan_dialog = None
@@ -1881,11 +1959,19 @@ class MainWindow(QMainWindow):
         already_open = (self.top_stack.currentIndex() == self._STACK_BROWSER
                         and index == self.browser_stack.currentIndex())
         if already_open:
-            # Flip *only* this page's own remembered state — collapsed
-            # becomes its current on-state, since set_sidebar_collapsed's
-            # own "collapsed" argument is what set_sidebar_collapsed(...,
-            # remember=True) will write back as the new (inverted) state.
-            self.set_sidebar_collapsed(self._selector_on[index], remember=True)
+            # Flip the sidebar's own *current on-screen* state -- reading
+            # self._sidebar_collapsed directly here (not self._selector_on[
+            # index], which is only the operator's last *remembered*
+            # preference) matters now that a responsive auto-collapse (see
+            # _reconcile_sidebar_width) can leave the two genuinely
+            # different: this window's sidebar can be visually collapsed
+            # right now for a page _selector_on still says should be open.
+            # Before that existed the two were always identical for
+            # whichever page is current (every remember=True write already
+            # keeps them in lockstep), so this is exactly equivalent to the
+            # previous self._selector_on[index] for every window this
+            # project shipped before responsive auto-collapse existed.
+            self.set_sidebar_collapsed(not self._sidebar_collapsed, remember=True)
         else:
             # A different page (including arriving from ISO-TP): open it
             # and restore *its* remembered selector state — never mutate
@@ -1948,6 +2034,13 @@ class MainWindow(QMainWindow):
         self.top_stack.setCurrentIndex(self._STACK_BROWSER)
         self._on_view_changed(index)
         self.set_sidebar_collapsed(not self._selector_on[index], remember=False)
+        # The operator's own remembered preference above may not actually
+        # fit the window's current width (most commonly: arriving here for
+        # the first time in an already-narrow window) -- reconcile against
+        # the responsive floor right away rather than waiting for the next
+        # resize to notice. See _reconcile_sidebar_width's own docstring.
+        self._sidebar_auto_collapsed = False
+        self._reconcile_sidebar_width()
 
     def _on_view_changed(self, index: int) -> None:
         self.browser_stack.setCurrentIndex(index)
@@ -3213,15 +3306,71 @@ class MainWindow(QMainWindow):
             mono_size=base + 0.5,
             mono_family=str(self.config.get("ui.font_family", "") or ""),
         )
+        self._apply_theme_and_restyle(reapply_stylesheet=True)
+
+    def _apply_theme_and_restyle(self, reapply_stylesheet: bool) -> None:
+        """The actual "re-derive everything from self.theme" sweep -- shared
+        by apply_fonts (a Settings font change) and _apply_responsive_state
+        (a responsive Density change, see theme.py's Theme.density). Both
+        already mutate self.theme in place first (set_fonts/set_density)
+        and then need the same walk: call every widget's own restyle()
+        (where NavRail/PayloadStrip/BitMatrix/InterpretView/FilterBar/etc.
+        each re-derive their own density-driven *structural* sizing --
+        margins, row/nav/strip heights, FlowLayout wrapping -- all done
+        through direct Qt calls, never CSS) and recompute the two browser
+        tables' font-derived column widths.
+
+        ``reapply_stylesheet``: QApplication.setStyleSheet() re-polishes
+        every widget in the whole application against the full QSS text --
+        on this project's target hardware that measured ~3 seconds, real
+        enough to freeze an interactive resize drag or an on-screen
+        keyboard opening/closing for that long, which is exactly what the
+        responsive brief's own "avoid recalculating/rebuilding large UI
+        trees continuously" and "debounce" requirements rule out. A real
+        font change (apply_fonts, a deliberate, rare Settings action) still
+        pays that cost -- $ui_size/$ui_size_sm/$mono_size and the QSS-driven
+        button/input/header/cell padding tokens (see theme.py's stylesheet())
+        genuinely need it. A responsive density change alone does not: every
+        size that actually determines whether content *fits* (row heights,
+        margins, nav rail/button size, payload strip height, sidebar
+        floors) is already applied above via direct widget calls, not
+        CSS -- only the QSS padding tokens' own cosmetic refresh is skipped,
+        and app.setFont() (cheap: an application-wide default, not a full
+        stylesheet re-polish) still carries density's font_delta to every
+        widget that does not set its own font explicitly.
+        """
         app = QApplication.instance()
         if app is not None:
-            app.setStyleSheet(self.theme.stylesheet())
+            if reapply_stylesheet:
+                app.setStyleSheet(self.theme.stylesheet())
             app.setFont(self.theme.ui_font())
         for widget in self.findChildren(QWidget):
             restyle = getattr(widget, "restyle", None)
             if callable(restyle):
                 restyle()
         for view, payload_column in ((self.id_view, 6), (self.trace_view, 5)):
+            view.verticalHeader().setDefaultSectionSize(self.theme.density.row_height)
+            if not reapply_stylesheet:
+                # A pure responsive-density transition: row height above
+                # (a plain setDefaultSectionSize -- a direct, idempotent
+                # value set with no further layout consequence of its own)
+                # is the density lever that actually matters for fitting
+                # more rows on screen. The column-width recompute below
+                # reacts to a real font *change* (density's own font_delta
+                # is a deliberately small -0.5pt nudge, not what this
+                # exists for -- see theme.py's Theme.density) by resizing
+                # each QHeaderView section, which -- observed on real
+                # hardware, reproduced in
+                # tests/test_window_state.py's own geometry-stability
+                # suite -- can leave a pending Qt layout request that only
+                # resolves on a *later*, unrelated event-loop turn,
+                # perturbing browser_panel's width (and so the main
+                # splitter's proportions) by a few pixels well after this
+                # call returns. Skipping it here removes that risk for the
+                # frequent, density-only path entirely; a real font change
+                # (apply_fonts, a rare, deliberate Settings action) still
+                # gets the full column-width refresh below.
+                continue
             for column in range(view.model().columnCount()):
                 delegate = view.itemDelegateForColumn(column)
                 invalidate = getattr(delegate, "invalidate_fonts", None)
@@ -3230,8 +3379,26 @@ class MainWindow(QMainWindow):
             # Column widths come from the font metrics, so they have to be
             # recomputed rather than left at the previous face's sizes.
             self._size_table_columns(view, payload_column)
-        self.id_model.layoutChanged.emit()
-        self.trace_model.layoutChanged.emit()
+        if reapply_stylesheet:
+            # A real font change only -- never the responsive-density path,
+            # which calls this far more often (every density transition,
+            # potentially mid-resize/mid-repaint) than the rare, deliberate
+            # Settings action this was written for. id_model backs
+            # id_proxy, a QSortFilterProxyModel with its own deferred
+            # re-sort (see tables.IdFilterProxy._schedule_resort); emitting
+            # a bare layoutChanged() here -- without the paired
+            # layoutAboutToBeChanged()/changePersistentIndexList() dance
+            # QAbstractItemModel documents for it -- raced that proxy's own
+            # pending invalidate() and the table's own live selection model
+            # during a real-world resize, and crashed inside Qt's C++
+            # QSortFilterProxyModel/QItemSelectionModel (a real, reproduced
+            # segfault, not a hypothetical) -- see
+            # tests/test_responsive_layout.py's regression test for this.
+            # The column font/width refresh above already reaches the view
+            # through direct, targeted calls; nothing here needs the full
+            # model-reset a real font change still legitimately wants.
+            self.id_model.layoutChanged.emit()
+            self.trace_model.layoutChanged.emit()
 
     # ------------------------------------------------------------------
     # status & shutdown
@@ -3290,6 +3457,245 @@ class MainWindow(QMainWindow):
                 )
             )
 
+    # ------------------------------------------------------------------
+    # responsive layout
+    # ------------------------------------------------------------------
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        # Applied synchronously, not deferred to a later event-loop turn:
+        # a queued (even 0ms) QTimer callback fires on whatever *next*
+        # processEvents() call happens to come along first, which is not
+        # necessarily the next one this resize itself causes -- in
+        # practice, any unrelated action in between (observed: toggling
+        # Pause) ends up "blamed" for a geometry/splitter change that
+        # actually belongs to this resize finally settling. That is
+        # exactly the class of bug this project's own geometry-stability
+        # tests exist to catch (see test_window_state.py's module
+        # docstring) -- so this can only run right here, inside the
+        # resizeEvent it belongs to. The actual expensive step
+        # (findChildren(QWidget) + restyle()) still only runs when
+        # _apply_responsive_state's own classification check finds a real
+        # threshold crossing, which is what keeps this cheap on every
+        # intermediate pixel of a drag -- a debounce timer was never
+        # actually needed for that part. _applying_responsive_state guards
+        # the one real risk synchronous application adds: this call
+        # itself changing a widget's minimum size enough to trigger a
+        # *nested* resizeEvent before this one returns.
+        self._apply_responsive_state()
+
+    def _connect_screen_signal(self) -> None:
+        """Wire up availableGeometryChanged on whichever screen this window
+        is currently on -- see _on_available_geometry_changed for why this
+        exists alongside resizeEvent, not instead of it. Called once from
+        showEvent, and again on windowHandle().screenChanged so dragging
+        this window to a different (e.g. differently-sized) screen keeps
+        watching the right one.
+        """
+        handle = self.windowHandle()
+        if handle is None:
+            return
+        try:
+            handle.screenChanged.connect(self._on_screen_changed)
+        except (RuntimeError, TypeError):
+            pass
+        self._on_screen_changed(handle.screen())
+
+    def _on_screen_changed(self, screen) -> None:
+        if self._connected_screen is not None:
+            try:
+                self._connected_screen.availableGeometryChanged.disconnect(
+                    self._on_available_geometry_changed)
+            except (RuntimeError, TypeError):
+                pass
+        self._connected_screen = screen
+        if screen is not None:
+            screen.availableGeometryChanged.connect(self._on_available_geometry_changed)
+
+    def _on_available_geometry_changed(self, geometry) -> None:
+        """A cooperating on-screen keyboard (one that reserves screen space
+        through the compositor, e.g. squeekboard/onboard in docked mode)
+        shrinks the *screen's* available geometry, not this window's size
+        directly -- resizeEvent alone would only find out once something
+        (the window manager, or fit_top_level_to_screen below) actually
+        resizes this window in response, but Qt will not shrink a window
+        past its current minimumSizeHint, which was computed at whatever
+        density this window was already at. Without this, a maximized
+        window already at NORMAL density can be too tall to ever reach a
+        genuinely small available height at all -- a real chicken-and-egg
+        deadlock, not a hypothetical one (see this method's own regression
+        test). Reclassifying and lowering density *here*, directly from the
+        new available geometry rather than this window's current (still
+        stale) size, breaks that: a lower density means a smaller
+        minimumSizeHint, so the resize this triggers next can actually
+        succeed down to where the keyboard scenario needs it.
+
+        Only acts pre-emptively toward *more* compact -- never overrides an
+        operator's own smaller manual resize by snapping back up when a
+        keyboard closes again; growing back to NORMAL, like every other
+        direction, is left to the ordinary resizeEvent/_apply_responsive_
+        state path once the window's actual size has caught up.
+        """
+        proactive_width = max(1, geometry.width())
+        proactive_height = max(1, geometry.height())
+        proactive = compute_responsive_state(proactive_width, proactive_height)
+        if proactive.overall > self._responsive.overall:
+            self._responsive = proactive
+            changed = self.theme.set_density(
+                interpolated_density(proactive_width, proactive_height))
+            if changed:
+                self._apply_theme_and_restyle(reapply_stylesheet=False)
+            self._apply_density_to_chrome()
+            self.interpret_view.apply_responsive(proactive)
+            self.filter_bar.apply_responsive(proactive)
+            self._min_sidebar = _SIDEBAR_MIN_BY_WIDTH_CLASS[proactive.width_class]
+            self._min_workspace = _WORKSPACE_MIN_BY_WIDTH_CLASS[proactive.width_class]
+            self.interpret_view.setMinimumWidth(self._min_workspace)
+        # Only a maximized/fullscreen window is expected to track the
+        # screen's usable area at all -- an operator's own deliberately
+        # smaller, floating window is left exactly where they put it, the
+        # same restraint fit_top_level_to_screen's own docstring describes.
+        if self.isMaximized() or self.isFullScreen():
+            fit_top_level_to_screen(self)
+        # fit_top_level_to_screen above may itself have just resized this
+        # window (resizeEvent already calls _apply_responsive_state
+        # synchronously in that case, via _applying_responsive_state's
+        # guard against double-running); calling it again here is what
+        # settles the case where geometry did *not* need to change.
+        self._apply_responsive_state()
+
+    def _apply_responsive_state(self) -> None:
+        """Recompute (and, on a real change, apply) the current responsive
+        classification from actual current geometry -- never a hard-coded
+        resolution, never the physical screen size, just the content area
+        MainWindow itself currently has (which is exactly what shrinks when
+        an on-screen keyboard eats vertical space, with no keyboard
+        detection needed at all: Qt already delivered a resizeEvent for
+        that shrink like any other).
+
+        Applied synchronously from resizeEvent (see its own docstring) --
+        never deferred to a later event-loop turn. Reapplies nothing and
+        touches no widget when the classification has not actually changed
+        since last time, which is what keeps this cheap to call on every
+        resizeEvent unconditionally.
+        """
+        if self._applying_responsive_state:
+            return
+        self._applying_responsive_state = True
+        try:
+            self._apply_responsive_state_impl()
+        finally:
+            self._applying_responsive_state = False
+
+    def _apply_responsive_state_impl(self) -> None:
+        central = self.centralWidget()
+        width = max(1, (central or self).width())
+        height = max(1, (central or self).height())
+        state = compute_responsive_state(width, height)
+        state_changed = state != self._responsive
+        # Density is recomputed on every call now, not only on a discrete
+        # tier crossing: interpolated_density is continuous, so "NORMAL" is
+        # no longer a hard ceiling a window can grow arbitrarily past
+        # without its controls/spacing ever changing again. This stays
+        # cheap regardless -- a couple of clamped lerps plus a frozen-
+        # dataclass == comparison -- and that == comparison (see Theme.
+        # set_density's own docstring) is exactly what keeps the *expensive*
+        # part, the findChildren(QWidget) restyle sweep, skipped for the
+        # overwhelming majority of calls, same as the three-tier scheme
+        # this replaces already guaranteed. See resizeEvent's own docstring
+        # on why that sweep must stay rare.
+        density_changed = self.theme.set_density(interpolated_density(width, height))
+        if state_changed:
+            self._responsive = state
+            self.interpret_view.apply_responsive(state)
+            self.filter_bar.apply_responsive(state)
+
+            self._min_sidebar = _SIDEBAR_MIN_BY_WIDTH_CLASS[state.width_class]
+            self._min_workspace = _WORKSPACE_MIN_BY_WIDTH_CLASS[state.width_class]
+            # The workspace pane's own Qt-enforced floor -- unlike
+            # browser_panel's (refreshed just below, when open), this one
+            # is never otherwise touched after _build_ui's initial,
+            # unconditional 280.
+            self.interpret_view.setMinimumWidth(self._min_workspace)
+            if not self._sidebar_collapsed:
+                # The floors actually changed and the sidebar is currently
+                # open -- refresh browser_panel's own Qt-enforced minimum
+                # for the new floor, so the window can actually shrink
+                # (or must stop shrinking) by however much the floor just
+                # moved. Deliberately *only* the minimum, not a full
+                # set_sidebar_collapsed(False, ...) call: that additionally
+                # recomputes and reapplies the splitter's exact pixel sizes
+                # from _current_content_width() and _remember_width()'s own
+                # snapshot of "whatever the splitter currently is" -- Qt's
+                # own layout system already enforces a widget's
+                # minimumWidth against whichever proportions the splitter
+                # currently has, without this needing to recompute those
+                # proportions itself.
+                self.browser_panel.setMinimumWidth(self._min_sidebar)
+        if density_changed:
+            self._apply_theme_and_restyle(reapply_stylesheet=False)
+            self._apply_density_to_chrome()
+        self._reconcile_sidebar_width()
+
+    def _apply_density_to_chrome(self) -> None:
+        """The handful of MainWindow's *own* layouts/widgets that are not
+        reached by _apply_theme_and_restyle's findChildren(QWidget) sweep
+        (that sweep calls restyle() on every descendant that has one --
+        this is for the few density-driven things that live directly on
+        MainWindow itself: the top bar's own margins/spacing and the
+        source/DBC chips' width ceiling).
+        """
+        density = self.theme.density
+        self._top_bar_rows.setContentsMargins(
+            density.margin + SPACE_XS, density.spacing, density.margin + SPACE_XS,
+            density.spacing)
+        self._top_bar_rows.setSpacing(density.tight_spacing)
+        self._primary_row.setSpacing(density.spacing)
+        self._secondary_flow.set_spacing(density.tight_spacing)
+        chip_width = min(self._CHIP_MAX_WIDTH, density.chip_max_width)
+        self.source_chip.setMaximumWidth(chip_width)
+        self.dbc_chip.setMaximumWidth(chip_width)
+
+    def _reconcile_sidebar_width(self) -> None:
+        """Auto-collapse (and later auto-restore) the packet-list sidebar
+        purely because the window is currently too narrow for both panes to
+        have their responsive floor (_min_sidebar + _min_workspace) --
+        *never* because the operator asked. set_sidebar_collapsed(...,
+        remember=False) is the same call a width-driven collapse always
+        used (see that method's own docstring); the only thing new here is
+        deciding *when* to make it automatically, tracked by
+        self._sidebar_auto_collapsed so this can tell its own past decision
+        apart from the operator's real, persisted one (self._selector_on)
+        and never fight a deliberate close.
+
+        Only meaningful while Messages/Trace (the page with a sidebar to
+        collapse at all) is actually showing; ISO-TP/Protocols/Compare/
+        Matches have no such panel, so this is a deliberate no-op there --
+        the next time the operator switches back to Messages/Trace,
+        _activate_browser's own set_sidebar_collapsed call already applies
+        whatever self._min_sidebar/_min_workspace currently are.
+        """
+        if self.top_stack.currentIndex() != self._STACK_BROWSER:
+            return
+        fits = self._current_content_width() >= (self._min_sidebar + self._min_workspace)
+        if not fits:
+            if not self._sidebar_collapsed:
+                self.set_sidebar_collapsed(True, remember=False)
+                self._sidebar_auto_collapsed = True
+            return
+        if self._sidebar_auto_collapsed:
+            self.set_sidebar_collapsed(False, remember=False)
+            self._sidebar_auto_collapsed = False
+        # else: already fits, already open (or already a deliberate manual
+        # close -- see the module-level docstring on never fighting that),
+        # and the floors have not changed since the last time they were
+        # applied (a genuine floor change is refreshed once, right where it
+        # happens, in _apply_responsive_state_impl) -- nothing to do.
+        # Deliberately does NOT recompute/reapply the splitter's pixel
+        # sizes here unconditionally on every resize; see this method's own
+        # docstring update and _apply_responsive_state_impl's comment on
+        # the incidental-drift regression that caused.
+
     def showEvent(self, event) -> None:
         fit_top_level_to_screen(self)
         super().showEvent(event)
@@ -3303,6 +3709,15 @@ class MainWindow(QMainWindow):
         # state -- not Trace's -- is the one that applies here.
         self.set_sidebar_collapsed(
             not self._selector_on[self._NAV_MESSAGES], remember=False)
+        # Real geometry exists now (see _current_content_width's own
+        # docstring on why that matters) -- establish the initial
+        # responsive classification from it, exactly as every later resize
+        # will, rather than leaving the window at NORMAL_STATE until the
+        # first resize happens to arrive.
+        self._apply_responsive_state()
+        # A window handle -- and so a screen() to watch -- only reliably
+        # exists once the window has actually been shown once.
+        self._connect_screen_signal()
 
     def closeEvent(self, event) -> None:
         if not self._confirm_project_transition():
@@ -3315,7 +3730,7 @@ class MainWindow(QMainWindow):
         self._cancel_compare_workers(wait=True)
         self._profile_match_closing = True
         self._cancel_profile_matching(wait=True)
-        self._teardown_discovery_thread()
+        self._teardown_scan_thread()
         if self._bus_overview is not None:
             self._bus_overview.close()
             self._bus_overview = None

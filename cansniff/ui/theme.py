@@ -37,6 +37,13 @@ ROW_HEIGHT = 30
 ROW_HEIGHT_COMPACT = 27
 HEADER_HEIGHT = 32
 
+#: Smallest a responsive Density.font_delta (see responsive.py) is ever
+#: allowed to shrink text to, regardless of how small the user's own
+#: configured base size already is -- a touchability/readability floor, not
+#: a preference. Single source of truth: responsive.py imports this rather
+#: than duplicating it.
+MIN_RESPONSIVE_FONT_PT = 7.0
+
 _UI_FONTS = ["Segoe UI Variable Text", "Segoe UI", "Inter", "Noto Sans", "Arial"]
 _MONO_FONTS = ["Cascadia Mono", "JetBrains Mono", "Consolas", "DejaVu Sans Mono", "Courier New"]
 
@@ -104,6 +111,15 @@ class Theme:
         self.mono_family = mono_family or _first_available(_MONO_FONTS, "Courier New")
         self._font_cache: Dict[tuple, QFont] = {}
         self._color_cache: Dict[tuple, QColor] = {}
+        # Local import: cansniff.ui.responsive imports plain constants from
+        # this module, so importing it back at module scope here would be
+        # circular. By the time __init__ runs this module is already fully
+        # defined, so a deferred import is safe. self.density is *never*
+        # the persisted font/spacing preference -- see set_density's own
+        # docstring and ui_font/mono_font below, which layer it on top of
+        # self.ui_size/mono_size without ever writing back to them.
+        from .responsive import DENSITY_NORMAL
+        self.density = DENSITY_NORMAL
 
     def set_fonts(self, ui_size: float = 0.0, mono_size: float = 0.0,
                   mono_family: str = "") -> None:
@@ -115,6 +131,30 @@ class Theme:
         if mono_family:
             self.mono_family = _first_available([mono_family] + _MONO_FONTS, self.mono_family)
         self._font_cache.clear()
+
+    def set_density(self, density) -> bool:
+        """Switch which named Density bundle (see responsive.py) this theme's
+        fonts/stylesheet apply -- a purely presentational, temporary layer on
+        top of the user's actual configured font size, never a replacement
+        for it: ``self.ui_size``/``self.mono_size`` (set only by set_fonts,
+        i.e. the user's Settings) are untouched by this call, and returning
+        to Density normal (font_delta 0.0) restores exactly what the user
+        configured, byte for byte.
+
+        Returns whether the density actually changed, so callers (see
+        MainWindow's resize handling) can skip a restyle sweep when it did
+        not. Compared by value (Density is a frozen dataclass), not
+        identity: interpolated_density (responsive.py) builds a fresh
+        instance on every call rather than handing back one of a fixed set
+        of singletons, so two calls that land on the same actual density
+        must still compare equal for the "skip the expensive sweep" case to
+        ever trigger.
+        """
+        if density == self.density:
+            return False
+        self.density = density
+        self._font_cache.clear()
+        return True
 
     # -- token access ---------------------------------------------------
 
@@ -149,21 +189,21 @@ class Theme:
     # -- fonts ----------------------------------------------------------
 
     def ui_font(self, size_delta: float = 0.0, bold: bool = False) -> QFont:
-        key = ("ui", size_delta, bold)
+        key = ("ui", size_delta, bold, self.density.font_delta)
         font = self._font_cache.get(key)
         if font is None:
             font = QFont(self.ui_family)
-            font.setPointSizeF(self.ui_size + size_delta)
+            font.setPointSizeF(self.responsive_size(self.ui_size + size_delta))
             font.setBold(bold)
             self._font_cache[key] = font
         return font
 
     def mono_font(self, size_delta: float = 0.0, bold: bool = False) -> QFont:
-        key = ("mono", size_delta, bold)
+        key = ("mono", size_delta, bold, self.density.font_delta)
         font = self._font_cache.get(key)
         if font is None:
             font = QFont(self.mono_family)
-            font.setPointSizeF(self.mono_size + size_delta)
+            font.setPointSizeF(self.responsive_size(self.mono_size + size_delta))
             font.setBold(bold)
             # Digits keep a constant advance so columns of numbers line up.
             font.setStyleHint(QFont.Monospace)
@@ -173,16 +213,24 @@ class Theme:
 
     def label_font(self) -> QFont:
         """Small uppercase label used for section headers."""
-        key = ("label",)
+        key = ("label", self.density.font_delta)
         font = self._font_cache.get(key)
         if font is None:
             font = QFont(self.ui_family)
-            font.setPointSizeF(self.ui_size - 0.5)
+            font.setPointSizeF(self.responsive_size(self.ui_size - 0.5))
             font.setBold(True)
             font.setCapitalization(QFont.AllUppercase)
             font.setLetterSpacing(QFont.PercentageSpacing, 108)
             self._font_cache[key] = font
         return font
+
+    def responsive_size(self, base_pt: float) -> float:
+        """``base_pt`` (already derived from the user's own configured size)
+        with the current density's temporary adjustment layered on top, never
+        below the readability/touch floor. See set_density's docstring: this
+        never changes what ``base_pt`` itself was computed from.
+        """
+        return max(MIN_RESPONSIVE_FONT_PT, base_pt + self.density.font_delta)
 
     # -- application palette --------------------------------------------
 
@@ -211,13 +259,14 @@ class Theme:
     # -- stylesheet ------------------------------------------------------
 
     def stylesheet(self) -> str:
+        density = self.density
         values = dict(self.tokens)
         values.update({
             "ui_family": self.ui_family,
             "mono_family": self.mono_family,
-            "ui_size": "{:g}pt".format(self.ui_size),
-            "ui_size_sm": "{:g}pt".format(self.ui_size - 1),
-            "mono_size": "{:g}pt".format(self.mono_size),
+            "ui_size": "{:g}pt".format(self.responsive_size(self.ui_size)),
+            "ui_size_sm": "{:g}pt".format(self.responsive_size(self.ui_size - 1)),
+            "mono_size": "{:g}pt".format(self.responsive_size(self.mono_size)),
             "radius_sm": "{}px".format(RADIUS_SM),
             "radius_md": "{}px".format(RADIUS_MD),
             "radius_lg": "{}px".format(RADIUS_LG),
@@ -226,6 +275,15 @@ class Theme:
             "space_md": "{}px".format(SPACE_MD),
             "row_height": "{}px".format(ROW_HEIGHT),
             "header_height": "{}px".format(HEADER_HEIGHT),
+            # Density-driven: identical to the NORMAL bundle's own values
+            # (see responsive.py's DENSITY_NORMAL) when density is normal,
+            # so this substitution is a no-op for every existing desktop
+            # user until a window actually goes compact/ultra.
+            "btn_pad": "{}px {}px".format(density.button_pad_v, density.button_pad_h),
+            "input_pad": "{}px {}px".format(density.input_pad_v, density.input_pad_h),
+            "header_pad": "{}px {}px".format(density.header_pad_v, density.header_pad_h),
+            "cell_pad": "{}px {}px".format(density.cell_pad_v, density.cell_pad_h),
+            "nav_button_height": "{}px".format(density.nav_button_height),
         })
         return Template(_QSS).safe_substitute(values)
 
@@ -307,7 +365,7 @@ QPushButton#NavButton {
     border: none;
     padding: 0px;
     margin: 0px;
-    min-height: 58px;
+    min-height: $nav_button_height;
     text-align: center;
 }
 
@@ -428,7 +486,7 @@ QPushButton {
     color: $text;
     border: 1px solid $border;
     border-radius: $radius_md;
-    padding: 6px 14px;
+    padding: $btn_pad;
     min-height: 18px;
 }
 QPushButton:hover  { background-color: $hover; border-color: $border_strong; }
@@ -467,7 +525,7 @@ QToolButton {
     background-color: $raised;
     border: 1px solid $border;
     border-radius: $radius_md;
-    padding: 5px 10px;
+    padding: $btn_pad;
     color: $text;
 }
 QToolButton:hover { background-color: $hover; }
@@ -502,7 +560,7 @@ QLineEdit, QPlainTextEdit, QTextEdit, QSpinBox, QDoubleSpinBox, QComboBox {
     color: $text;
     border: 1px solid $border;
     border-radius: $radius_md;
-    padding: 5px 8px;
+    padding: $input_pad;
     selection-background-color: $selection;
     selection-color: $text;
 }
@@ -563,14 +621,14 @@ QTableView {
     selection-color: $text;
     outline: none;
 }
-QTableView::item { padding: 5px 10px; border: none; }
+QTableView::item { padding: $cell_pad; border: none; }
 QTableView::item:selected { background-color: $selection; color: $text; }
 
 QHeaderView { background-color: $raised; }
 QHeaderView::section {
     background-color: $raised;
     color: $text_secondary;
-    padding: 8px 10px;
+    padding: $header_pad;
     border: none;
     border-right: 1px solid $border_subtle;
     border-bottom: 2px solid $border;

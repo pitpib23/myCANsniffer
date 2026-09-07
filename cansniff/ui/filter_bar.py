@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (
 
 from ..filters import FRAME_TYPES, DisplayFilter, parse_int
 from .theme import SPACE_MD, SPACE_SM, SPACE_XS, Theme
-from .widgets import FilterChip, SectionLabel
+from .widgets import FilterChip, FlowLayout, SectionLabel
 
 #: Typing should not re-filter on every keystroke; this matches the cadence
 #: the capture pipeline already refreshes the views at.
@@ -53,6 +53,7 @@ class FilterBar(QWidget):
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(SPACE_SM)
+        self._root_layout = root
         root.addWidget(self._build_primary_row())
         root.addWidget(self._build_advanced_row())
         root.addWidget(self._build_chip_row())
@@ -95,15 +96,46 @@ class FilterBar(QWidget):
         self.match_label.setObjectName("Muted")
         return container
 
-    def _labelled_row(self, grid: QGridLayout, row: int, text: str) -> QHBoxLayout:
-        """One filter per line: a fixed-width caption, then its controls."""
+    def _filter_group(self, text: str) -> QHBoxLayout:
+        """One filter's caption + controls, packaged as a single container
+        widget so the whole group can be relocated inside the advanced
+        grid as one item -- see _reflow_advanced, which is what actually
+        moves these between a one-column (one filter per row) and
+        two-column (two filters sharing a row) arrangement as width allows.
+        """
+        container = QWidget()
+        row = QHBoxLayout(container)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(SPACE_XS)
         label = SectionLabel(text, self.theme)
-        label.setMinimumWidth(96)
-        grid.addWidget(label, row, 0, Qt.AlignLeft | Qt.AlignVCenter)
+        label.setMinimumWidth(72)
+        row.addWidget(label)
         controls = QHBoxLayout()
         controls.setSpacing(SPACE_XS)
-        grid.addLayout(controls, row, 1)
+        row.addLayout(controls, 1)
+        self._filter_groups.append(container)
         return controls
+
+    def _reflow_advanced(self, columns: int) -> None:
+        """Lay the filter-group widgets out across ``columns`` grid columns
+        instead of always one-per-row. At the default single column, CAN
+        ID/Channel/Frame type/Payload size stack four rows tall regardless
+        of how much horizontal room is available -- on a width-constrained
+        window that is four rows the table underneath does not get. Two
+        columns halves that to two rows for exactly the same controls; Qt's
+        QGridLayout supports re-adding a widget already in the layout at a
+        new cell, which is what lets this run again on every responsive
+        change rather than needing to tear the grid down and rebuild it.
+        """
+        columns = max(1, columns)
+        if columns == self._advanced_columns:
+            return
+        self._advanced_columns = columns
+        grid = self._advanced_grid
+        for index, group in enumerate(self._filter_groups):
+            grid.addWidget(group, index // columns, index % columns)
+        for col in range(columns):
+            grid.setColumnStretch(col, 1)
 
     def _build_advanced_row(self) -> QWidget:
         self.advanced = QFrame()
@@ -112,9 +144,11 @@ class FilterBar(QWidget):
         grid.setContentsMargins(SPACE_MD, SPACE_SM, SPACE_MD, SPACE_SM)
         grid.setHorizontalSpacing(SPACE_SM)
         grid.setVerticalSpacing(SPACE_SM)
-        grid.setColumnStretch(1, 1)
+        self._advanced_grid = grid
+        self._filter_groups: List[QWidget] = []
+        self._advanced_columns = 0  # forces _reflow_advanced(1) to actually run once below
 
-        id_group = self._labelled_row(grid, 0, "CAN ID")
+        id_group = self._filter_group("CAN ID")
         self.id_min = QLineEdit()
         self.id_min.setPlaceholderText("any")
         self.id_min.setToolTip("Lowest CAN ID to show, e.g. 0x100 or 256")
@@ -133,7 +167,7 @@ class FilterBar(QWidget):
         self.id_max.editingFinished.connect(self._commit)
         id_group.addWidget(self.id_max, 1)
 
-        channel_group = self._labelled_row(grid, 1, "Channel")
+        channel_group = self._filter_group("Channel")
         self.channel_combo = QComboBox()
         self.channel_combo.setToolTip("Show only frames received on this interface channel")
         self.channel_combo.setAccessibleName("Channel")
@@ -141,7 +175,7 @@ class FilterBar(QWidget):
         self.channel_combo.currentIndexChanged.connect(self._commit)
         channel_group.addWidget(self.channel_combo, 1)
 
-        type_group = self._labelled_row(grid, 2, "Frame type")
+        type_group = self._filter_group("Frame type")
         self.type_combo = QComboBox()
         self.type_combo.setToolTip("Show only frames of this kind")
         self.type_combo.setAccessibleName("Frame type")
@@ -150,7 +184,7 @@ class FilterBar(QWidget):
         self.type_combo.currentIndexChanged.connect(self._commit)
         type_group.addWidget(self.type_combo, 1)
 
-        size_group = self._labelled_row(grid, 3, "Payload size")
+        size_group = self._filter_group("Payload size")
         self.len_min = QSpinBox()
         self.len_min.setRange(_ANY, 64)
         self.len_min.setSpecialValueText("any")
@@ -173,35 +207,38 @@ class FilterBar(QWidget):
         self.len_max.valueChanged.connect(self._commit)
         size_group.addWidget(self.len_max, 1)
 
+        self._reflow_advanced(1)
         # Filters are shown by default now that they live in the sidebar,
         # where there is room for them to stay visible.
         self.advanced.setVisible(True)
         return self.advanced
 
     def _build_chip_row(self) -> QWidget:
+        # A single FlowLayout for the whole row -- label, every active chip,
+        # Clear all, and the match count all wrap together, purely from the
+        # actual width available, rather than a fixed-height QHBoxLayout
+        # that would either clip chips or force the bar wider than the
+        # window. See widgets.FlowLayout; this replaces what used to be a
+        # QHBoxLayout holding a nested chip_container QHBoxLayout.
         self.chip_row = QWidget()
-        layout = QHBoxLayout(self.chip_row)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(SPACE_XS)
+        self.chip_flow = FlowLayout(self.chip_row, margin=0, spacing=SPACE_XS)
 
         self.chip_label = QLabel("Filters")
         self.chip_label.setObjectName("Muted")
-        layout.addWidget(self.chip_label)
-
-        self.chip_container = QHBoxLayout()
-        self.chip_container.setSpacing(SPACE_XS)
-        self.chip_container.setContentsMargins(0, 0, 0, 0)
-        layout.addLayout(self.chip_container, 1)
+        self.chip_flow.addWidget(self.chip_label)
 
         self.clear_button = QPushButton("Clear all")
         self.clear_button.setObjectName("Ghost")
         self.clear_button.setCursor(Qt.PointingHandCursor)
         self.clear_button.setToolTip("Remove every filter and show all rows")
         self.clear_button.clicked.connect(self.clear)
-        layout.addWidget(self.clear_button)
+        # Chips are inserted between the label and this button (see
+        # _rebuild_chips) -- both this button and match_label are appended
+        # to the flow last, once, here.
+        self.chip_flow.addWidget(self.clear_button)
         # Lives on the chip row so the "showing N of M" count appears exactly
         # when something is filtered, and takes no space otherwise.
-        layout.addWidget(self.match_label)
+        self.chip_flow.addWidget(self.match_label)
 
         # Only shown once something is actually filtered.
         self.chip_row.setVisible(False)
@@ -340,18 +377,44 @@ class FilterBar(QWidget):
 
     def _rebuild_chips(self) -> None:
         for chip in self._chips:
-            self.chip_container.removeWidget(chip)
+            self.chip_flow.removeWidget(chip)
             chip.deleteLater()
         self._chips.clear()
 
+        # Inserted right after the label (index 1) and in filter order, so
+        # the flow reads "Filters, chip, chip, ..., Clear all, N of M" --
+        # clear_button and match_label were added once, last, in
+        # _build_chip_row, and stay the flow's own last two items.
+        insert_at = 1
         for field, name, value in self._filter.active_chips():
             chip = FilterChip(field, name, value, self.theme)
             chip.removed.connect(self.remove_field)
-            self.chip_container.addWidget(chip)
+            self.chip_flow.insert_widget(insert_at, chip)
             self._chips.append(chip)
+            insert_at += 1
 
         self.chip_row.setVisible(bool(self._chips))
+
+    def apply_responsive(self, state) -> None:
+        """Reflow CAN ID/Channel/Frame type/Payload size across two grid
+        columns (two rows instead of four) once width is genuinely
+        constrained -- see _reflow_advanced. Width alone, like the sidebar
+        auto-collapse this mirrors (see responsive.py's own module
+        docstring): a short-but-wide window does not need this, a
+        narrow-but-tall one does.
+        """
+        self._reflow_advanced(2 if state.narrow else 1)
 
     def restyle(self) -> None:
         for chip in self._chips:
             chip.restyle()
+        # Density-driven spacing -- see theme.py's Theme.density and
+        # MainWindow's restyle sweep, which calls this after every font
+        # *and* every responsive-mode change alike.
+        density = self.theme.density
+        self._root_layout.setSpacing(density.tight_spacing)
+        self.chip_flow.set_spacing(density.tight_spacing)
+        self._advanced_grid.setHorizontalSpacing(density.tight_spacing)
+        self._advanced_grid.setVerticalSpacing(density.tight_spacing)
+        self._advanced_grid.setContentsMargins(
+            density.margin, density.spacing, density.margin, density.spacing)

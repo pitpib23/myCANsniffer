@@ -545,6 +545,9 @@ class IsoTpView(QWidget):
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(SPACE_SM)
+        #: Kept for responsive density changes -- see restyle(). Margins
+        #: are already 0 (nothing to reduce); spacing is what shrinks.
+        self._root_layout = root
 
         self.tabs = QTabWidget()
         self.tabs.currentChanged.connect(self._on_diagnostic_selection_changed)
@@ -583,6 +586,16 @@ class IsoTpView(QWidget):
         self.tabs.addTab(self._build_dids(), "DIDs")
         self.tabs.addTab(self._build_dtcs(), "DTCs")
         root.addWidget(self.tabs, 1)
+
+    def restyle(self) -> None:
+        """Density-driven spacing only -- the splitter/tab architecture
+        itself (see this class's own docstring and the README's "ISO-TP
+        stays a full-width workspace" section) is the responsive strategy
+        here; each pane already shrinks/grows with the splitter regardless
+        of density. Called by MainWindow's restyle sweep, same as every
+        other widget's restyle() in this project.
+        """
+        self._root_layout.setSpacing(self._theme.density.spacing)
 
     def _remember_splitter_sizes(self, *_args) -> None:
         self.config.set(_SPLITTER_CONFIG_KEY, list(self.splitter.sizes()))

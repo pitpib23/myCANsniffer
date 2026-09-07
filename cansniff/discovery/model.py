@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional, Tuple
 
+from .scoring import ScoreComponents
+
 
 class CandidateStatus(str, Enum):
     NO_TRAFFIC = "no-traffic"
@@ -70,3 +72,60 @@ class DiscoveryProgress:
     completed: int = 0
     total: int = 0
     candidate: Optional[BitrateCandidateResult] = None
+
+
+# -- numerically-scored manual scan ("Auto Scan" popup) -------------------
+#
+# A deliberately separate model from BitrateCandidateResult/DiscoveryResult
+# above: those back the untouched, auto-selecting discover_socketcan_bitrate
+# engine (cansniff/discovery/bitrate.py), which stays exactly as it was and
+# stays independently tested (tests/test_discovery.py). Nothing below
+# selects a bitrate for the operator -- see cansniff/discovery/scan.py and
+# cansniff/ui/auto_scan_dialog.py's "Start Listening".
+
+
+@dataclass(frozen=True)
+class ScoredCandidate:
+    """One scanned candidate's full result: the exact score breakdown from
+    ``cansniff.discovery.scoring`` when the observation actually ran, or
+    ``None`` with a technical reason when it could not (interface
+    configuration was rejected, the scan was cancelled mid-candidate, ...).
+
+    ``total_score`` is always populated -- 0.0 in both the "no components"
+    and the "observed but zero traffic" cases -- so a result table can
+    sort/display every row uniformly without special-casing ``None``.
+    """
+
+    bitrate: int
+    requested_duration: float
+    observed_duration: float
+    settle_seconds: float
+    #: True only once this candidate's full observation window actually ran
+    #: to completion (not cancelled, not rejected at configuration).
+    completed: bool
+    total_score: float
+    components: Optional[ScoreComponents]
+    reasons: Tuple[str, ...] = field(default_factory=tuple)
+
+
+@dataclass(frozen=True)
+class ScanProgress:
+    stage: str
+    message: str
+    completed: int = 0
+    total: int = 0
+    bitrate: Optional[int] = None
+    #: Seconds into the current candidate's observation window / the
+    #: requested duration for it -- for a live "elapsed / total" readout.
+    #: Both 0.0 outside the observation stages.
+    candidate_elapsed: float = 0.0
+    candidate_duration: float = 0.0
+    candidate: Optional[ScoredCandidate] = None
+
+
+@dataclass(frozen=True)
+class ScanResult:
+    interface: str
+    candidates: Tuple[ScoredCandidate, ...] = field(default_factory=tuple)
+    cancelled: bool = False
+    reasons: Tuple[str, ...] = field(default_factory=tuple)

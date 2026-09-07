@@ -67,6 +67,7 @@ def main(argv=None) -> int:
         config.set("source.type", "live")
 
     try:
+        from PySide6.QtGui import QIcon
         from PySide6.QtWidgets import QApplication
     except ImportError:
         sys.stderr.write(
@@ -80,6 +81,8 @@ def main(argv=None) -> int:
 
     app = QApplication(sys.argv[:1])
     app.setApplicationName("CAN Sniffer")
+    app.setDesktopFileName("CANbus-sniffer")
+    app.setWindowIcon(QIcon("/home/pi/.local/share/icons/hicolor/256x256/apps/CANbus-sniffer.png"))
 
     # The font database is only queryable once a QApplication exists, so the
     # theme is resolved here rather than at import time.

@@ -134,6 +134,10 @@ class SignalPlot(QWidget):
         self.view.setRenderHint(QPainter.Antialiasing, True)
         self.view.setRubberBand(QChartView.RectangleRubberBand)
         self.view.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        #: Normal-density floor -- see restyle() for the responsive
+        #: alternative. A chart genuinely needs *some* height to be
+        #: readable, but 220px on top of everything else above it can be
+        #: the difference between a short window fitting or not.
         self.view.setMinimumHeight(220)
         root.addWidget(self.view, 1)
 
@@ -329,3 +333,11 @@ class SignalPlot(QWidget):
             pen = QPen(self._colour(index))
             pen.setWidthF(1.6)
             line.setPen(pen)
+        if self.chart is not None:
+            # Density-driven floor -- a chart still needs to be tall enough
+            # to read, just less so at ULTRA than the normal-desktop 220px;
+            # never touches the chart's own data/zoom state (see this
+            # class's own docstring on redraw cost -- this is layout only).
+            name = self._theme.density.name
+            self.view.setMinimumHeight(
+                220 if name == "normal" else (170 if name == "compact" else 130))

@@ -121,6 +121,20 @@ DEFAULTS: Dict[str, Any] = {
         "minimum_traffic_span": 1.5,
         "minimum_window_coverage": 0.5,
         "maximum_error_ratio": 0.2,
+        # -- Auto Scan popup (cansniff/discovery/scan.py + scoring.py) --
+        # Distinct from the fields above, which belong to the older,
+        # auto-selecting discover_socketcan_bitrate engine that stays
+        # unused by the UI but otherwise untouched. These configure the
+        # numerically-scored, operator-selects-a-row workflow instead.
+        "scan_duration_default_s": 30,
+        "scan_duration_min_s": 10,
+        "scan_settle_s": 0.2,
+        "scan_bucket_count": 10,
+        "scan_error_rate_threshold": 0.05,
+        "scan_remote_rate_threshold": 0.20,
+        "scan_format_rate_threshold": 0.20,
+        "scan_expected_format": "standard",
+        "scan_protocol_id_low_byte_heuristic": False,
     },
     "interpret": {
         "word_size": 2,             # bytes per word; 4 unlocks the 32-bit decoders

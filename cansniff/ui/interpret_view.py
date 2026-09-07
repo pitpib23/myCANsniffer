@@ -37,8 +37,8 @@ from .theme import (
 )
 from .widgets import (
     CELL_PADDING, MONO_ROLE, TONE_ROLE, ActivityLegend, BitMatrix, Chip,
-    CurrentPageStack, EmptyState, InterpretCellDelegate, PayloadStrip,
-    SectionLabel, Segmented, scrollable,
+    CurrentPageStack, EmptyState, FlowLayout, InterpretCellDelegate,
+    PayloadStrip, SectionLabel, Segmented, scrollable,
 )
 
 _BLOCK_SIZES = [1, 2, 4, 8]
@@ -140,6 +140,8 @@ class InterpretView(QWidget):
         self._stats: Optional[FrameStats] = None
         self._time_base = 0.0
         self._frozen = False
+        #: See set_bits_responsive_hidden -- never the persisted preference.
+        self._bits_responsive_hidden = False
         self._result: Optional[Interpretation] = None
         #: Selection is tracked by block identity, never by row index.
         self._selected_block: Optional[BlockKey] = None
@@ -161,6 +163,10 @@ class InterpretView(QWidget):
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(SPACE_MD)
+        #: Kept for responsive density changes -- see apply_responsive. Their
+        #: *contents* margins/spacing are what shrinks; root's own margins
+        #: are already 0 and stay that way (nothing to reduce further).
+        self._root_layout = root
 
         # Card 1: what this message is, and its raw bytes.
         summary = QFrame()
@@ -173,6 +179,7 @@ class InterpretView(QWidget):
         summary_layout.setHorizontalSpacing(SPACE_XL)
         summary_layout.setVerticalSpacing(SPACE_SM)
         summary_layout.setColumnStretch(1, 1)
+        self._summary_layout = summary_layout
         self._build_identity(summary_layout)
         self.payload_detail = self._build_payload_detail()
         # Column 1 only, matching the strip exactly. Spanning into the actions
@@ -205,6 +212,7 @@ class InterpretView(QWidget):
         table_layout = QVBoxLayout(interpretation)
         table_layout.setContentsMargins(SPACE_LG, SPACE_MD, SPACE_LG, SPACE_MD)
         table_layout.setSpacing(SPACE_MD)
+        self._table_layout = table_layout
 
         tab_row = QHBoxLayout()
         tab_row.setSpacing(SPACE_SM)
@@ -428,64 +436,108 @@ class InterpretView(QWidget):
         return container
 
     def _on_bits_toggled(self, shown: bool) -> None:
+        """The operator's own explicit preference -- persisted, exactly as
+        before. See set_bits_responsive_hidden for the separate, never-
+        persisted concept of a short window temporarily hiding this without
+        touching what this preference actually is.
+        """
         shown = bool(shown)
         self.bits_toggle.setText(_BITS_LABEL.format("▾" if shown else "▸"))
+        self.config.set("ui.show_bit_activity", shown)
+        self._apply_bits_visibility()
+
+    def set_bits_responsive_hidden(self, hidden: bool) -> None:
+        """Temporarily hide the bit-activity matrix because the window is
+        currently too short for it -- distinct from the operator's own
+        checked/unchecked preference on bits_toggle (see _on_bits_toggled),
+        which this never reads from config nor writes to. The toggle button
+        itself stays visible but disabled while hidden this way, so the
+        feature is discoverable ("still here, just needs more room") rather
+        than silently missing; re-enabling it here restores exactly whatever
+        the operator's real preference (bits_toggle.isChecked()) already
+        says, never forcing it open.
+        """
+        hidden = bool(hidden)
+        if hidden == self._bits_responsive_hidden:
+            return
+        self._bits_responsive_hidden = hidden
+        self.bits_toggle.setEnabled(not hidden)
+        self.bits_toggle.setToolTip(
+            "Enlarge the window to show bit activity here again" if hidden
+            else "How often each bit flipped over recent frames")
+        self._apply_bits_visibility()
+
+    def _apply_bits_visibility(self) -> None:
+        shown = self.bits_toggle.isChecked() and not self._bits_responsive_hidden
         for widget in (self.matrix_scroll, self.bits_caption, self.bits_legend):
             widget.setVisible(shown)
-        self.config.set("ui.show_bit_activity", shown)
 
     def _build_controls(self) -> QWidget:
+        # A FlowLayout, not a QHBoxLayout: at normal width every group below
+        # sits on one line exactly as before (three groups comfortably fit
+        # any realistic window, so this is a no-op there); on a narrow
+        # window it wraps a group at a time onto additional lines purely
+        # from the actual width offered to it, rather than being pushed
+        # into a horizontal scrollbar or measured against a hand-picked
+        # breakpoint. See widgets.FlowLayout.
         container = QWidget()
-        row = QHBoxLayout(container)
-        row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(SPACE_MD)
+        flow = FlowLayout(container, margin=0, spacing=SPACE_MD)
+        #: Kept for responsive density changes -- see apply_responsive.
+        self._controls_flow = flow
 
-        size_group = QHBoxLayout()
-        size_group.setSpacing(SPACE_SM)
-        size_group.addWidget(SectionLabel("Block size", self.theme))
+        size_group = QWidget()
+        size_row = QHBoxLayout(size_group)
+        size_row.setContentsMargins(0, 0, 0, 0)
+        size_row.setSpacing(SPACE_SM)
+        size_row.addWidget(SectionLabel("Block size", self.theme))
         self.size_segmented = Segmented([str(n) for n in _BLOCK_SIZES], 1)
         self.size_segmented.setToolTip(
             "Bytes per block.\n4 enables the 32-bit and float decoders."
         )
         self.size_segmented.changed.connect(self._on_block_size)
-        size_group.addWidget(self.size_segmented)
-        row.addLayout(size_group)
+        size_row.addWidget(self.size_segmented)
+        flow.addWidget(size_group)
 
-        range_group = QHBoxLayout()
-        range_group.setSpacing(SPACE_SM)
-        range_group.addWidget(SectionLabel("Bytes", self.theme))
+        range_group = QWidget()
+        range_row = QHBoxLayout(range_group)
+        range_row.setContentsMargins(0, 0, 0, 0)
+        range_row.setSpacing(SPACE_SM)
+        range_row.addWidget(SectionLabel("Bytes", self.theme))
         self.range_start = QSpinBox()
         self.range_start.setRange(0, 63)
         self.range_start.setFixedWidth(58)
         self.range_start.setToolTip("First payload byte to decode")
         self.range_start.valueChanged.connect(self._on_range)
-        range_group.addWidget(self.range_start)
+        range_row.addWidget(self.range_start)
         dash = QLabel("to")
         dash.setObjectName("Muted")
-        range_group.addWidget(dash)
+        range_row.addWidget(dash)
         self.range_end = QSpinBox()
         self.range_end.setRange(0, 63)
         self.range_end.setFixedWidth(58)
         self.range_end.setToolTip("Last payload byte to decode")
         self.range_end.valueChanged.connect(self._on_range)
-        range_group.addWidget(self.range_end)
-        row.addLayout(range_group)
+        range_row.addWidget(self.range_end)
+        flow.addWidget(range_group)
 
-        row.addStretch(1)
-
+        columns_group = QWidget()
+        columns_row = QHBoxLayout(columns_group)
+        columns_row.setContentsMargins(0, 0, 0, 0)
+        columns_row.setSpacing(SPACE_SM)
         self.decoder_button = QPushButton("Columns")
         self.decoder_button.setCursor(Qt.PointingHandCursor)
         self.decoder_button.setToolTip(
             "Choose which decodings get a column, and drag to reorder them"
         )
         self.decoder_button.clicked.connect(self._open_columns)
-        row.addWidget(self.decoder_button)
+        columns_row.addWidget(self.decoder_button)
 
         self.columns_badge = QLabel("0")
         self.columns_badge.setObjectName("CountBadge")
         self.columns_badge.setAlignment(Qt.AlignCenter)
         self.columns_badge.setToolTip("Columns currently shown")
-        row.addWidget(self.columns_badge)
+        columns_row.addWidget(self.columns_badge)
+        flow.addWidget(columns_group)
         return container
 
     def _open_columns(self) -> None:
@@ -1134,8 +1186,7 @@ class InterpretView(QWidget):
         shown = bool(self.config.get("ui.show_bit_activity", True))
         self.bits_toggle.setChecked(shown)
         self.bits_toggle.setText(_BITS_LABEL.format("▾" if shown else "▸"))
-        for widget in (self.matrix_scroll, self.bits_caption, self.bits_legend):
-            widget.setVisible(shown)
+        self._apply_bits_visibility()
 
         block_size = int(self.config.get("interpret.word_size", 2))
         self.size_segmented.set_current(
@@ -1200,10 +1251,17 @@ class InterpretView(QWidget):
         self.refresh(force=True)
 
     def restyle(self) -> None:
-        """Re-apply token-derived styling after a font change."""
+        """Re-apply token-derived styling after a font *or* density change --
+        the same restyle sweep MainWindow's apply_fonts already ran for
+        fonts alone now also runs after a responsive density change (see
+        MainWindow._apply_theme_and_restyle), so this has read
+        self.theme.density for its own row height/margins/spacing right
+        alongside the font work all along, rather than needing a second,
+        parallel "restyle for density" method.
+        """
         self.id_label.setFont(self.theme.mono_font(5.0, bold=True))
         self.selection_label.setFont(self.theme.mono_font(0.5, bold=True))
-        self.table.verticalHeader().setDefaultSectionSize(ROW_HEIGHT)
+        self.table.verticalHeader().setDefaultSectionSize(self.theme.density.row_height)
         self.strip.restyle()
         self.bit_matrix.restyle()
         self.bits_legend.restyle()
@@ -1212,7 +1270,28 @@ class InterpretView(QWidget):
         # Column widths are derived from the delegate's cached font metrics,
         # so those have to go before the next rebuild measures anything.
         self.cell_delegate.invalidate_fonts()
+
+        density = self.theme.density
+        self._summary_layout.setContentsMargins(
+            density.margin + SPACE_XS, density.margin, density.margin + SPACE_XS, density.margin)
+        self._summary_layout.setVerticalSpacing(density.tight_spacing)
+        self._table_layout.setContentsMargins(
+            density.margin + SPACE_XS, density.margin, density.margin + SPACE_XS, density.margin)
+        self._table_layout.setSpacing(density.spacing)
+        self._root_layout.setSpacing(density.spacing)
+        self._controls_flow.set_spacing(density.spacing)
+
         self.refresh(force=True)
+
+    def apply_responsive(self, state) -> None:
+        """The height-driven part of responsive behaviour that is not just a
+        density token -- see set_bits_responsive_hidden. ``state`` is a
+        responsive.ResponsiveState; only its height axis matters here (a
+        narrow-but-tall window should not lose bit activity -- see that
+        method's own docstring and responsive.py's module docstring on why
+        width/height are judged independently).
+        """
+        self.set_bits_responsive_hidden(state.very_short)
 
     # ------------------------------------------------------------------
     # content

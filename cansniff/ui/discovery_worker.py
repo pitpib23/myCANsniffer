@@ -15,7 +15,10 @@ from typing import Callable, Iterable, Optional
 from PySide6.QtCore import QObject, Signal, Slot
 
 from .. import discovery as discovery_module
-from ..discovery import DEFAULT_BITRATES, DiscoveryResult, DiscoveryThresholds
+from ..discovery import (
+    DEFAULT_BITRATES, DEFAULT_SCAN_DURATION, DEFAULT_SETTLE_SECONDS, DiscoveryResult,
+    DiscoveryThresholds, ScanResult, ScoringConfig,
+)
 
 
 class SocketCanDiscoveryWorker(QObject):
@@ -66,4 +69,63 @@ class SocketCanDiscoveryWorker(QObject):
             self.finished.emit()
 
 
-__all__ = ["SocketCanDiscoveryWorker"]
+class BitrateScanWorker(QObject):
+    """Qt worker for the numerically-scored Auto Scan popup -- the same
+    QThread-marshaling role ``SocketCanDiscoveryWorker`` plays for the
+    older, auto-selecting engine, wrapping ``cansniff.discovery.scan.
+    scan_bitrate_candidates`` instead of ``discover_socketcan_bitrate``.
+    Owned and torn down by MainWindow -- see ``_start_scan``/
+    ``_teardown_scan_thread``.
+    """
+
+    progressChanged = Signal(object)   # ScanProgress
+    resultReady = Signal(object)       # ScanResult
+    errorOccurred = Signal(str)
+    finished = Signal()
+
+    def __init__(
+        self,
+        interface: str,
+        candidates: Iterable[int],
+        duration: float = DEFAULT_SCAN_DURATION,
+        settle_seconds: float = DEFAULT_SETTLE_SECONDS,
+        scoring_config: ScoringConfig = ScoringConfig(),
+        scanner: Optional[Callable[..., ScanResult]] = None,
+    ):
+        super().__init__()
+        self.interface = interface
+        self.candidates = tuple(candidates)
+        self.duration = duration
+        self.settle_seconds = settle_seconds
+        self.scoring_config = scoring_config
+        # Resolved lazily in run(), same reasoning as SocketCanDiscoveryWorker
+        # above: a plain default-argument value is bound once at class
+        # definition time and would be invisible to a test that patches
+        # cansniff.discovery.scan_bitrate_candidates afterwards.
+        self._scanner = scanner
+        self.cancel_event = threading.Event()
+
+    def cancel(self) -> None:
+        self.cancel_event.set()
+
+    @Slot()
+    def run(self) -> None:
+        scanner = self._scanner or discovery_module.scan_bitrate_candidates
+        try:
+            result = scanner(
+                self.interface,
+                candidates=self.candidates,
+                duration=self.duration,
+                settle_seconds=self.settle_seconds,
+                scoring_config=self.scoring_config,
+                cancel_event=self.cancel_event,
+                progress=self.progressChanged.emit,
+            )
+            self.resultReady.emit(result)
+        except Exception as exc:
+            self.errorOccurred.emit(str(exc))
+        finally:
+            self.finished.emit()
+
+
+__all__ = ["BitrateScanWorker", "SocketCanDiscoveryWorker"]

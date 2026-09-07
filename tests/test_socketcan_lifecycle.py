@@ -53,7 +53,7 @@ class _WindowTestCase(unittest.TestCase):
         self.window = MainWindow(self.config, Theme())
 
     def tearDown(self):
-        self.window._teardown_discovery_thread()
+        self.window._teardown_scan_thread()
         self.window._teardown_thread()
         self.window.close()
         self.window.deleteLater()

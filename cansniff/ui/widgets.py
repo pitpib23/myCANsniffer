@@ -7,17 +7,17 @@ payload byte strip, and the delegates that paint the interpretation table.
 
 from __future__ import annotations
 
-from typing import Dict, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
-from PySide6.QtCore import QPointF, QRectF, QSize, Qt, Signal
+from PySide6.QtCore import QPointF, QRect, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import (
     QColor, QFont, QFontMetrics, QFontMetricsF, QPainter, QPainterPath, QPen,
 )
 from PySide6.QtWidgets import (
     QApplication, QButtonGroup, QDialog, QFrame, QHBoxLayout, QLabel,
-    QPushButton, QScrollArea,
+    QLayout, QPushButton, QScrollArea,
     QSizePolicy, QStackedWidget, QStyle, QStyledItemDelegate,
-    QStyleOptionViewItem, QVBoxLayout, QWidget,
+    QStyleOptionViewItem, QVBoxLayout, QWidget, QWidgetItem,
 )  # noqa: F401  (QSizePolicy used by NavRail and PayloadStrip)
 
 from .theme import RADIUS_MD, RADIUS_SM, ROW_HEIGHT, SPACE_SM, SPACE_XS, Theme
@@ -60,7 +60,8 @@ class Chip(QLabel):
             "border-radius: {r}px; padding: 2px 8px; font-size: {size:g}pt;"
             "font-weight: 600;".format(
                 bg=theme.hex(background), fg=theme.hex(foreground),
-                bd=theme.hex(border), r=RADIUS_SM, size=theme.ui_size - 1,
+                bd=theme.hex(border), r=RADIUS_SM,
+                size=theme.responsive_size(theme.ui_size - 1),
             )
         )
 
@@ -216,6 +217,117 @@ class ResponsiveDialog(QDialog):
         super().showEvent(event)
 
 
+class FlowLayout(QLayout):
+    """Lays out its items left-to-right, wrapping to a new line -- like text
+    -- whenever the next item would not fit in the remaining width.
+
+    This is the responsive answer to "a row of secondary controls/chips that
+    must reflow, never horizontally scroll, when the window narrows": add
+    each control (or a small QWidget wrapping a labelled group of controls)
+    with ``addWidget`` exactly as with any other layout, and it wraps purely
+    from the *actual* width offered to it at layout time -- no responsive
+    mode/breakpoint plumbing needed at the call site, and nothing to update
+    when the window is resized: Qt already calls this layout's own
+    ``setGeometry`` on every resize like any other.
+
+    Adapted from Qt's own "Flow Layout" example (also QLayout-based, same
+    ``doLayout``/``heightForWidth`` shape); trimmed to what this project
+    actually uses -- one direction, no per-item alignment flags -- and
+    commented in this codebase's own voice rather than Qt's.
+    """
+
+    def __init__(self, parent: Optional[QWidget] = None,
+                 margin: int = 0, spacing: int = SPACE_SM):
+        super().__init__(parent)
+        if parent is not None:
+            self.setContentsMargins(margin, margin, margin, margin)
+        self._items: List[QWidgetItem] = []
+        self._spacing = spacing
+
+    def set_spacing(self, spacing: int) -> None:
+        """Reapply a new gap between items -- see responsive Density.spacing.
+        Does not itself trigger a layout pass; the caller's own resize
+        handling already will."""
+        self._spacing = max(0, int(spacing))
+        self.invalidate()
+
+    def addItem(self, item) -> None:
+        self._items.append(item)
+
+    def insert_widget(self, index: int, widget: QWidget) -> None:
+        """Like ``addWidget``, but at a specific position -- for a caller
+        that keeps a couple of fixed trailing items (e.g. filter_bar.py's
+        "Clear all"/match count) and inserts a variable, rebuilt-from-
+        scratch middle section (its filter chips) before them, rather than
+        always appending to the end.
+        """
+        self.addChildWidget(widget)
+        self._items.insert(index, QWidgetItem(widget))
+        self.invalidate()
+
+    def count(self) -> int:
+        return len(self._items)
+
+    def itemAt(self, index: int):
+        return self._items[index] if 0 <= index < len(self._items) else None
+
+    def takeAt(self, index: int):
+        return self._items.pop(index) if 0 <= index < len(self._items) else None
+
+    def expandingDirections(self) -> Qt.Orientations:
+        return Qt.Orientation(0)
+
+    def hasHeightForWidth(self) -> bool:
+        return True
+
+    def heightForWidth(self, width: int) -> int:
+        return self._do_layout(QRect(0, 0, width, 0), test_only=True)
+
+    def setGeometry(self, rect) -> None:
+        super().setGeometry(rect)
+        self._do_layout(rect, test_only=False)
+
+    def sizeHint(self) -> QSize:
+        return self.minimumSize()
+
+    def minimumSize(self) -> QSize:
+        size = QSize()
+        for item in self._items:
+            size = size.expandedTo(item.minimumSize())
+        margins = self.contentsMargins()
+        size += QSize(margins.left() + margins.right(),
+                      margins.top() + margins.bottom())
+        return size
+
+    def _do_layout(self, rect, test_only: bool) -> int:
+        margins = self.contentsMargins()
+        effective = rect.adjusted(
+            margins.left(), margins.top(), -margins.right(), -margins.bottom())
+        x, y = effective.x(), effective.y()
+        line_height = 0
+
+        for item in self._items:
+            widget = item.widget()
+            if widget is not None and not widget.isVisibleTo(widget.parentWidget() or widget):
+                # A hidden item (e.g. a secondary control the current
+                # responsive/data state turned off) takes no space and does
+                # not force a wrap on its account.
+                continue
+            hint = item.sizeHint()
+            next_x = x + hint.width() + self._spacing
+            if next_x - self._spacing > effective.right() + 1 and line_height > 0:
+                x = effective.x()
+                y = y + line_height + self._spacing
+                next_x = x + hint.width() + self._spacing
+                line_height = 0
+            if not test_only:
+                item.setGeometry(QRect(x, y, hint.width(), hint.height()))
+            x = next_x
+            line_height = max(line_height, hint.height())
+
+        return y + line_height - rect.y() + margins.bottom()
+
+
 class MetricChip(QWidget):
     """Label + value pair for the status bar."""
 
@@ -239,7 +351,7 @@ class MetricChip(QWidget):
         theme = self._theme
         self.label.setStyleSheet(
             "color: {}; font-size: {:g}pt;".format(
-                theme.hex("text_muted"), theme.ui_size - 1
+                theme.hex("text_muted"), theme.responsive_size(theme.ui_size - 1)
             )
         )
         self.value.setFont(theme.mono_font(-0.5, bold=True))
@@ -302,7 +414,23 @@ class NavRail(QFrame):
 
     changed = Signal(int)
 
+    #: Default (normal-density) width -- see restyle() for the responsive
+    #: alternative. Kept as a class constant too: several call sites (e.g.
+    #: MainWindow._current_content_width) read NavRail.WIDTH before an
+    #: instance necessarily exists, or expect "the rail's width" to mean
+    #: the *current* one -- self.WIDTH shadows this per-instance once
+    #: restyle() has run, so both keep working.
     WIDTH = 76
+
+    #: This rail's own layout's left+right content margins combined -- see
+    #: __init__'s column.setContentsMargins below. _NavButton.restyle()
+    #: subtracts this from density.nav_width so a button's own sizeHint
+    #: width, not just this frame's setFixedWidth, actually shrinks: a
+    #: parent layout sizes NavRail from the *larger* of its explicit fixed
+    #: width and what its (button) children's sizeHint says they need, so
+    #: leaving the buttons at their normal-density width would silently
+    #: cap how far this rail could ever actually narrow.
+    NAV_MARGIN = (SPACE_XS + 2) * 2
 
     def __init__(self, destinations: Sequence[Tuple[str, str, str]],
                  theme: Theme, current: int = 0, parent=None,
@@ -328,6 +456,7 @@ class NavRail(QFrame):
         column = QVBoxLayout(self)
         column.setContentsMargins(SPACE_XS + 2, SPACE_SM, SPACE_XS + 2, SPACE_SM)
         column.setSpacing(SPACE_XS)
+        self._column = column
 
         self.group = QButtonGroup(self)
         self.group.setExclusive(True)
@@ -394,6 +523,22 @@ class NavRail(QFrame):
             button.setAccessibleDescription(hint)
 
     def restyle(self) -> None:
+        """Re-apply token-derived styling -- including, now, the current
+        responsive Density's rail width/button height (self._theme.density;
+        see theme.py/responsive.py). Reading it fresh here rather than
+        keeping a separate "am I compact" flag means this is idempotent and
+        always reflects whatever the theme's density currently is, the same
+        way every other restyle() in this module already re-derives its own
+        appearance from the theme rather than from locally cached state.
+        Called from MainWindow's density-change sweep exactly like a font
+        change already calls it (see apply_fonts/_apply_theme_and_restyle).
+        """
+        self.WIDTH = self._theme.density.nav_width
+        self.setFixedWidth(self.WIDTH)
+        density = self._theme.density
+        margin = SPACE_XS + 2 if density.name == "normal" else max(2, density.tight_spacing)
+        self._column.setContentsMargins(margin, margin, margin, margin)
+        self._column.setSpacing(density.tight_spacing)
         for button in self.group.buttons():
             button.restyle()
 
@@ -401,7 +546,16 @@ class NavRail(QFrame):
 class _NavButton(QPushButton):
     """One nav destination: a simple painted glyph above a short caption."""
 
+    #: Normal-density height/width -- the scale paintEvent computes its
+    #: glyph/caption offsets from. See restyle() for the responsive
+    #: alternative. WIDTH matters here, not just NavRail.WIDTH: a QWidget's
+    #: setFixedWidth only *caps* what a parent layout allocates it -- Qt
+    #: still takes the max of that and this sizeHint's own width when a
+    #: containing layout (content_row, in main_window.py) asks NavRail how
+    #: small it can go, so a button sizeHint stuck at the NORMAL width would
+    #: silently keep the whole rail from ever actually narrowing.
     HEIGHT = 58
+    WIDTH = 64
 
     def __init__(self, glyph: str, label: str, theme: Theme, parent=None):
         super().__init__(parent)
@@ -411,6 +565,8 @@ class _NavButton(QPushButton):
         #: The leading-edge bar -- independent of isChecked() (which page is
         #: current). See set_indicator.
         self._show_indicator = False
+        self._height = self.HEIGHT
+        self._width = self.WIDTH
         self.setCheckable(True)
         self.setCursor(Qt.PointingHandCursor)
         self.setFlat(True)
@@ -422,10 +578,20 @@ class _NavButton(QPushButton):
         self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
 
     def sizeHint(self) -> QSize:
-        return QSize(64, self.HEIGHT)
+        return QSize(self._width, self._height)
 
     def minimumSizeHint(self) -> QSize:
         return self.sizeHint()
+
+    def restyle(self) -> None:
+        density = self._theme.density
+        self._height = density.nav_button_height
+        # NavRail.NAV_MARGIN: its own layout's left+right content margins,
+        # so this button's width plus those margins lands exactly on
+        # density.nav_width -- see NavRail.restyle().
+        self._width = max(32, density.nav_width - NavRail.NAV_MARGIN)
+        self.updateGeometry()
+        self.update()
 
     def set_indicator(self, shown: bool) -> None:
         """The leading-edge bar -- a *second*, independent thing from
@@ -439,9 +605,6 @@ class _NavButton(QPushButton):
         if shown != self._show_indicator:
             self._show_indicator = shown
             self.update()
-
-    def restyle(self) -> None:
-        self.update()
 
     def paintEvent(self, event) -> None:
         theme = self._theme
@@ -476,12 +639,18 @@ class _NavButton(QPushButton):
 
         pen = theme.color("accent") if current else theme.color("text_secondary")
         painter.setPen(QPen(pen, 1.6))
-        self._paint_glyph(painter, QRectF(rect.center().x() - 9, rect.top() + 11, 18, 18))
+        # Both offsets scale with the button's current (normal or
+        # set_compact-reduced) height, keeping the glyph/caption pair
+        # proportioned the same way at either size rather than the caption
+        # clipping against a shorter button's bottom edge.
+        scale = self._height / float(self.HEIGHT)
+        self._paint_glyph(painter, QRectF(
+            rect.center().x() - 9, rect.top() + 11 * scale, 18, 18))
 
         painter.setFont(theme.ui_font(-1.5, bold=current))
         painter.setPen(pen)
         painter.drawText(
-            QRectF(rect.left(), rect.top() + 33, rect.width(), 18),
+            QRectF(rect.left(), rect.top() + 33 * scale, rect.width(), 18),
             Qt.AlignCenter, self._label,
         )
         painter.end()
@@ -728,7 +897,23 @@ class PayloadStrip(QWidget):
         self.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
         self._metrics = QFontMetrics(theme.mono_font(1.0))
         self._cell_width = payload_cell_width(theme)
-        self.setMinimumHeight(74)
+        #: Ruler-row and byte-cell heights -- normal-density defaults, see
+        #: restyle() for the responsive alternative. Bytes must stay
+        #: prominent and readable at every density (see this class's own
+        #: docstring and the README's "payload strip stays visible"
+        #: philosophy), so these only ever shrink modestly, never approach
+        #: BitMatrix's own much larger reduction -- that one is responsively
+        #: hidden outright rather than squeezed. See _total_height.
+        self._ruler_height = 16
+        self._cell_height = 32
+        self.setMinimumHeight(self._total_height())
+
+    def _total_height(self) -> int:
+        # ruler row, the +2 gap before the cell, the cell itself, then the
+        # bracket line + its optional label drawn below the cell (see
+        # paintEvent) -- 24 is exactly that trailing budget, derived from
+        # the original hard-coded 74 = 16 (ruler) + 2 + 32 (cell) + 24.
+        return self._ruler_height + 2 + self._cell_height + 24
 
     # -- content --------------------------------------------------------
 
@@ -750,11 +935,20 @@ class PayloadStrip(QWidget):
         self.update()
 
     def sizeHint(self) -> QSize:
-        return QSize(PAYLOAD_GUTTER + max(1, len(self._data)) * self._cell_width, 74)
+        return QSize(PAYLOAD_GUTTER + max(1, len(self._data)) * self._cell_width,
+                     self._total_height())
 
     def restyle(self) -> None:
         self._metrics = QFontMetrics(self._theme.mono_font(1.0))
         self._cell_width = payload_cell_width(self._theme)
+        density = self._theme.density
+        # A gentle reduction, not proportional to the density's own row
+        # height -- this is the one thing on screen that must stay legible
+        # and prominent even in ULTRA (see this class's own docstring).
+        self._ruler_height = 16 if density.name == "normal" else 13
+        self._cell_height = 32 if density.name == "normal" else (
+            28 if density.name == "compact" else 24)
+        self.setMinimumHeight(self._total_height())
         self.updateGeometry()
         self.update()
 
@@ -801,9 +995,9 @@ class PayloadStrip(QWidget):
 
         ruler_font = theme.ui_font(-1.5)
         byte_font = theme.mono_font(1.0)
-        ruler_height = 16
+        ruler_height = self._ruler_height
         cell_top = ruler_height + 2
-        cell_height = 32
+        cell_height = self._cell_height
         width = self._cell_width
 
         highlight_range = range(0)
