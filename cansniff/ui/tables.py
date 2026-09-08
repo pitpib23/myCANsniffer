@@ -13,6 +13,7 @@ from typing import Deque, Dict, List, Optional
 
 from PySide6.QtCore import (
     QAbstractTableModel, QModelIndex, QSize, QSortFilterProxyModel, Qt, QTimer,
+    Signal,
 )
 from PySide6.QtGui import QFontMetrics, QPainter
 from PySide6.QtWidgets import QStyle, QStyledItemDelegate, QStyleOptionViewItem
@@ -419,6 +420,16 @@ class TraceTableModel(QAbstractTableModel):
     _MONO_COLUMNS = {0, 2, 4, 5}
     _MUTED_COLUMNS = {1, 3}
 
+    #: Emitted whenever the *set* of distinct CanFrame.key values currently
+    #: retained (see distinct_frames) actually changes -- a genuinely new
+    #: key appears, or one is fully evicted/cleared. Never emitted for a
+    #: frame belonging to an already-tracked key (the overwhelming
+    #: majority of incoming frames in a running capture), so a listener
+    #: rebuilding a candidate list from this (see MainWindow's Lite-only
+    #: Trace CAN-ID filter) does so only when that list could actually
+    #: have changed, not on every batch.
+    idsChanged = Signal()
+
     def __init__(self, theme: Theme, max_rows: int = 200000, parent=None):
         super().__init__(parent)
         self._theme = theme
@@ -432,6 +443,15 @@ class TraceTableModel(QAbstractTableModel):
         self._max_rows = max(100, int(max_rows))
         self._time_base: Optional[float] = None
         self.relative_timestamps = True
+        #: Incremental bookkeeping for distinct_frames() -- how many
+        #: currently-retained frames (in _all, never _rows: a filter must
+        #: never shrink the candidate list it is itself built from) share
+        #: each CanFrame.key, and one representative frame per key (for
+        #: its formatted ID/channel/extended-flag). Updated in add_frames
+        #: (O(new frames), never a scan of _all) and clear() -- see
+        #: idsChanged above.
+        self._id_counts: Dict[str, int] = {}
+        self._id_examples: Dict[str, CanFrame] = {}
 
     def set_filter(self, display_filter: DisplayFilter) -> None:
         if display_filter == self._filter:
@@ -518,6 +538,14 @@ class TraceTableModel(QAbstractTableModel):
             self._rows.extend(matching)
             self.endInsertRows()
 
+        ids_changed = False
+        for frame in frames:
+            key = frame.key
+            if key not in self._id_counts:
+                ids_changed = True
+            self._id_counts[key] = self._id_counts.get(key, 0) + 1
+            self._id_examples[key] = frame
+
         overflow = len(self._all) - self._max_rows
         if overflow > 0:
             evicted = 0
@@ -525,10 +553,31 @@ class TraceTableModel(QAbstractTableModel):
                 oldest = self._all.popleft()
                 if not active or self._filter.matches(oldest):
                     evicted += 1
+                key = oldest.key
+                remaining = self._id_counts.get(key, 0) - 1
+                if remaining <= 0:
+                    self._id_counts.pop(key, None)
+                    self._id_examples.pop(key, None)
+                    ids_changed = True
+                else:
+                    self._id_counts[key] = remaining
             if evicted:
                 self.beginRemoveRows(QModelIndex(), 0, evicted - 1)
                 del self._rows[:evicted]
                 self.endRemoveRows()
+
+        if ids_changed:
+            self.idsChanged.emit()
+
+    def distinct_frames(self) -> Dict[str, CanFrame]:
+        """One representative CanFrame per distinct :attr:`CanFrame.key`
+        currently retained in the *full* history (``_all``), not the
+        currently filtered/displayed subset (``_rows``) -- so a CAN-ID
+        filter's own candidate list never shrinks just because a filter is
+        already narrowing what is shown. A copy: callers must not mutate
+        this model's own bookkeeping.
+        """
+        return dict(self._id_examples)
 
     def frame_at(self, row: int) -> Optional[CanFrame]:
         if 0 <= row < len(self._rows):
@@ -543,4 +592,9 @@ class TraceTableModel(QAbstractTableModel):
         self._all.clear()
         self._rows.clear()
         self._time_base = None
+        had_ids = bool(self._id_counts)
+        self._id_counts.clear()
+        self._id_examples.clear()
         self.endResetModel()
+        if had_ids:
+            self.idsChanged.emit()

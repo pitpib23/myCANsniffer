@@ -20,7 +20,7 @@ from typing import Dict, List, Optional
 from PySide6.QtCore import QObject, QThread, Qt, QTimer, Signal, Slot
 from PySide6.QtGui import QAction, QFontMetrics, QKeySequence
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QFileDialog, QFrame, QHBoxLayout,
+    QAbstractItemView, QApplication, QComboBox, QFileDialog, QFrame, QHBoxLayout,
     QHeaderView, QLabel, QMainWindow, QMessageBox, QPushButton, QScroller,
     QSizePolicy, QSplitter, QStackedWidget, QTableView, QVBoxLayout, QWidget,
 )
@@ -50,7 +50,7 @@ from ..discovery import (
 from ..export import (
     FORMAT_ORDER, FORMATS, ExportError, describe_losses, export, format_for_path,
 )
-from ..filters import FilterSet
+from ..filters import DisplayFilter, FilterSet
 from ..model import CanFrame
 from ..session import SocketCanSessionController
 from ..sources.live import LiveSource
@@ -938,6 +938,118 @@ class MainWindow(QMainWindow):
         if self.lite:
             self.lite_details_button.setEnabled(True)
 
+    # ------------------------------------------------------------------
+    # Lite: Trace-only CAN-ID filter (replaces FilterBar in Lite)
+    #
+    # Lite exposes no general display-filter UI (see _build_browser) --
+    # instead Trace alone gets a single touch-friendly CAN-ID dropdown.
+    # Internally it still drives trace_model's own existing DisplayFilter/
+    # set_filter machinery (never id_proxy/Messages, never a discarded
+    # frame -- set_filter only ever rebuilds the *displayed* subset from
+    # the same retained _all history), so nothing about Trace's retention,
+    # eviction, or follow-tail semantics changes.
+    # ------------------------------------------------------------------
+
+    def _build_trace_id_filter(self) -> QHBoxLayout:
+        """Builds the (initially empty, "All IDs"-only) label+combo pair.
+        Population and live updates are _refresh_trace_id_filter's job,
+        wired to trace_model.idsChanged once trace_model exists -- a few
+        lines below this call site in _build_browser.
+        """
+        row = QHBoxLayout()
+        row.setSpacing(SPACE_SM)
+        self.trace_id_filter_label = QLabel("CAN ID:")
+        self.trace_id_filter_label.setObjectName("Muted")
+        row.addWidget(self.trace_id_filter_label)
+        self.trace_id_filter = QComboBox()
+        self.trace_id_filter.setMinimumWidth(140)
+        self.trace_id_filter.setToolTip(
+            "Show only Trace frames for one CAN ID. Never discards "
+            "retained frames or affects Messages -- choose All IDs to "
+            "see everything again.")
+        self.trace_id_filter.addItem("All IDs", None)
+        self.trace_id_filter.currentIndexChanged.connect(
+            self._on_trace_id_filter_changed)
+        row.addWidget(self.trace_id_filter)
+        return row
+
+    def _refresh_trace_id_filter(self) -> None:
+        """Rebuild the dropdown from tables.TraceTableModel.distinct_
+        frames() -- called once at construction and on every
+        trace_model.idsChanged (a new ID appeared, or one was fully
+        evicted/cleared/reset). Numeric sort, never the label string (see
+        the module's own Lite section). Preserves the operator's current
+        selection when its key still exists; resets to All IDs -- and
+        actually clears trace_model's own filter, not just the combo's
+        displayed text -- only when it genuinely no longer does, never
+        merely because that ID has not received a fresh frame recently.
+        """
+        combo = self.trace_id_filter
+        previous_key = combo.currentData()
+
+        frames = self.trace_model.distinct_frames()
+        # (arb_id, is_extended, channel): numeric by ID first -- 0x18DAF110
+        # sorts after 0x7FF because it *is* the larger integer, never
+        # because of lexicographic string comparison.
+        entries = sorted(
+            frames.items(),
+            key=lambda item: (item[1].arb_id, item[1].is_extended, item[1].channel))
+
+        # A label collision is only possible between two distinct keys
+        # that would otherwise show the identical "0x<hex>" text -- same
+        # numeric ID *and* the same standard/extended-ness (id_hex already
+        # differs in width between those two), but a different channel.
+        # Disambiguating only those keeps the common case a plain "0x123".
+        label_counts: Dict[str, int] = {}
+        for _key, frame in entries:
+            label_counts[frame.id_hex] = label_counts.get(frame.id_hex, 0) + 1
+
+        combo.blockSignals(True)
+        try:
+            combo.clear()
+            combo.addItem("All IDs", None)
+            restored_index = 0
+            for key, frame in entries:
+                label = "0x" + frame.id_hex
+                if label_counts[frame.id_hex] > 1:
+                    label += " · ch {}".format(frame.channel or "?")
+                combo.addItem(label, key)
+                if key == previous_key:
+                    restored_index = combo.count() - 1
+            combo.setCurrentIndex(restored_index)
+        finally:
+            combo.blockSignals(False)
+
+        if previous_key is not None and restored_index == 0:
+            self._on_trace_id_filter_changed(0)
+
+    def _on_trace_id_filter_changed(self, index: int) -> None:
+        """Apply (index > 0) or clear (index == 0, "All IDs") Trace's own
+        CAN-ID filter. Never touches id_proxy/Messages. Reconstructs the
+        exact equivalent of "CanFrame.key == the selected one" from
+        DisplayFilter's own existing fields (id_min==id_max==that arb_id,
+        channel, frame_type "std"/"ext" for is_extended) rather than
+        adding a new filtering mechanism -- see the module's own Lite
+        section for why that is exactly equivalent, never a broader or
+        narrower match. A model reset (see TraceTableModel.set_filter)
+        clears trace_view's own current selection for free, so a
+        now-hidden selected row is never left looking selected.
+        """
+        key = self.trace_id_filter.itemData(index)
+        if key is None:
+            self.trace_model.set_filter(DisplayFilter())
+            return
+        frame = self.trace_model.distinct_frames().get(key)
+        if frame is None:
+            # Stale combo entry (a rebuild is already pending) -- fail
+            # safe to All IDs rather than filter against nothing.
+            self.trace_model.set_filter(DisplayFilter())
+            return
+        self.trace_model.set_filter(DisplayFilter(
+            id_min=frame.arb_id, id_max=frame.arb_id, channel=frame.channel,
+            frame_type="ext" if frame.is_extended else "std",
+        ))
+
     def _build_top_bar(self) -> QWidget:
         bar = QFrame()
         bar.setObjectName("TopBar")
@@ -1094,6 +1206,17 @@ class MainWindow(QMainWindow):
         header.setSpacing(SPACE_SM)
         self.section_label = SectionLabel("Messages", self.theme)
         header.addWidget(self.section_label)
+        if self.lite:
+            # Lite's own single retained filter -- see _build_trace_id_
+            # filter. Trace-only: _on_view_changed shows/hides this whole
+            # row depending on which section (Messages/Trace) is current,
+            # so it never appears while Messages is open.
+            self.trace_id_filter_row = self._build_trace_id_filter()
+            header.addLayout(self.trace_id_filter_row)
+            self.trace_id_filter_row_widgets = (
+                self.trace_id_filter_label, self.trace_id_filter)
+            for widget in self.trace_id_filter_row_widgets:
+                widget.setVisible(False)
         header.addStretch(1)
         if self.lite:
             # Lite's own "open interpretation" affordance -- the mirror
@@ -1111,9 +1234,19 @@ class MainWindow(QMainWindow):
             header.addWidget(self.lite_details_button)
         layout.addLayout(header)
 
-        self.filter_bar = FilterBar(self.theme)
-        self.filter_bar.changed.connect(self._on_filter_changed)
-        layout.addWidget(self.filter_bar)
+        if not self.lite:
+            # Lite exposes no general-purpose display-filter UI at all (see
+            # this module's own Lite section) -- a search box/CAN-ID range/
+            # channel/frame-type/payload-size UI needs an on-screen
+            # keyboard and crowds the 800x480 panel; Lite gets the
+            # dedicated Trace-only CAN-ID dropdown above instead. Nothing
+            # about FilterBar itself changes, nor the shared display-
+            # filter infrastructure (DisplayFilter, id_proxy/trace_model
+            # filtering) it drives for the full edition -- it is simply
+            # never constructed here.
+            self.filter_bar = FilterBar(self.theme)
+            self.filter_bar.changed.connect(self._on_filter_changed)
+            layout.addWidget(self.filter_bar)
 
         self.id_model = IdTableModel(
             self.theme, int(self.config.get("interpret.bit_window", 512)), self
@@ -1140,6 +1273,8 @@ class MainWindow(QMainWindow):
         self._configure_table(self.trace_view, payload_column=5)
         self.trace_view.selectionModel().selectionChanged.connect(self._on_trace_selection)
         self.trace_view.verticalScrollBar().valueChanged.connect(self._on_trace_scrolled)
+        if self.lite:
+            self.trace_model.idsChanged.connect(self._refresh_trace_id_filter)
 
         self.browser_stack = QStackedWidget()
         self.browser_stack.addWidget(self.id_view)
@@ -1271,13 +1406,18 @@ class MainWindow(QMainWindow):
         bar.addPermanentWidget(container, 1)
 
     def _build_shortcuts(self) -> None:
-        for text, sequence, slot in (
+        shortcuts = [
             ("Start", "F5", self.start_capture),
             ("Stop", "F6", self.stop_capture),
             ("Auto Scan", "F8", self.start_auto_scan),
             ("Clear", "Ctrl+L", self.clear_views),
-            ("Focus search", "Ctrl+F", lambda: self.filter_bar.search_box.setFocus()),
-        ):
+        ]
+        if not self.lite:
+            # Lite has no FilterBar/search box to focus -- see
+            # _build_browser's own Lite section.
+            shortcuts.append(
+                ("Focus search", "Ctrl+F", lambda: self.filter_bar.search_box.setFocus()))
+        for text, sequence, slot in shortcuts:
             action = QAction(text, self)
             action.setShortcut(QKeySequence(sequence))
             action.triggered.connect(slot)
@@ -2111,7 +2251,8 @@ class MainWindow(QMainWindow):
             channels = {f.channel for f in frames if f.channel}
             if channels - self._seen_channels:
                 self._seen_channels |= channels
-                self.filter_bar.known_channels(sorted(self._seen_channels))
+                if not self.lite:
+                    self.filter_bar.known_channels(sorted(self._seen_channels))
 
             if self._follow_trace and self.browser_stack.currentIndex() == 1:
                 self.trace_view.scrollToBottom()
@@ -2284,6 +2425,14 @@ class MainWindow(QMainWindow):
         self.section_label.setText("Messages" if index == 0 else "Trace")
         self.nav.update_hints(self._sidebar_collapsed)
         self._update_match_count()
+        if self.lite:
+            # Trace-only, per the module's own Lite section -- hidden while
+            # Messages is the current section rather than removed, so its
+            # own selection (and the trace_model filter it drives) survives
+            # switching back and forth.
+            trace_active = index == self._NAV_TRACE
+            for widget in self.trace_id_filter_row_widgets:
+                widget.setVisible(trace_active)
         # The only primary navigation concept in the window: which analysis
         # children InterpretView even offers follows this same Messages/
         # Trace choice, rather than exposing an unrelated second selector.
@@ -2300,15 +2449,17 @@ class MainWindow(QMainWindow):
 
     def _update_match_count(self) -> None:
         if self.browser_stack.currentIndex() == 0:
-            self.filter_bar.set_match_count(self.id_proxy.rowCount(),
-                                            self.id_model.id_count)
+            if not self.lite:
+                self.filter_bar.set_match_count(self.id_proxy.rowCount(),
+                                                self.id_model.id_count)
             self.browser_count.setText(
                 "{:,} message IDs".format(self.id_model.id_count)
                 if self.id_model.id_count else ""
             )
         else:
-            self.filter_bar.set_match_count(self.trace_model.rowCount(),
-                                            self.trace_model.total_rows)
+            if not self.lite:
+                self.filter_bar.set_match_count(self.trace_model.rowCount(),
+                                                self.trace_model.total_rows)
             self.browser_count.setText(
                 "{:,} frames".format(self.trace_model.total_rows)
                 if self.trace_model.total_rows else ""
@@ -3101,7 +3252,11 @@ class MainWindow(QMainWindow):
                                self._STACK_COMPARE: "Compare",
                                self._STACK_PROFILE_MATCHES: "Profile Matches"}
             fields["active_workspace"] = workspace_names.get(top_index, "Messages")
-        fields["display_filter"] = tuple(sorted(
+        # Lite has no FilterBar (see _build_browser's own Lite section) --
+        # its own Trace-only CAN-ID filter is a transient view preference,
+        # never persisted into a project, so this is simply empty there,
+        # same as a full-edition project with no active display filter.
+        fields["display_filter"] = () if self.lite else tuple(sorted(
             (str(k), str(v)) for k, v in self.filter_bar.project_state().items()))
         fields["diagnostic_selection"] = tuple(sorted(
             (str(k), str(v))
@@ -3132,7 +3287,12 @@ class MainWindow(QMainWindow):
             return
         if project.comparisons:
             self.compare_view.apply_project_intervals(project.comparisons[0])
-        self.filter_bar.apply_project_state(dict(project.display_filter))
+        if not self.lite:
+            # Lite has no FilterBar to apply this to (see _build_browser's
+            # own Lite section) -- a project's saved display filter,
+            # perhaps set from the full edition, is simply not applied
+            # here; Lite's own Trace CAN-ID filter is never persisted.
+            self.filter_bar.apply_project_state(dict(project.display_filter))
         self._selected_key = (project.selected_message_keys[0]
                               if project.selected_message_keys else None)
         self.isotp_view.apply_diagnostic_selection(
@@ -3788,13 +3948,24 @@ class MainWindow(QMainWindow):
         proactive = compute_responsive_state(proactive_width, proactive_height)
         if proactive.overall > self._responsive.overall:
             self._responsive = proactive
-            changed = self.theme.set_density(
-                interpolated_density(proactive_width, proactive_height))
+            proactive_density = interpolated_density(proactive_width, proactive_height)
+            if self.lite:
+                # Same floor as _apply_responsive_state_impl's own -- see
+                # its docstring; this is the same density-setting
+                # decision, just reached via the on-screen-keyboard path
+                # rather than an ordinary resize.
+                proactive_density = floor_density(proactive_density, DENSITY_NORMAL)
+            changed = self.theme.set_density(proactive_density)
             if changed:
                 self._apply_theme_and_restyle(reapply_stylesheet=False)
             self._apply_density_to_chrome()
-            self.interpret_view.apply_responsive(proactive)
-            self.filter_bar.apply_responsive(proactive)
+            if not self.lite:
+                # Lite never responsive-hides Bit Activity (see
+                # InterpretView.apply_responsive's only caller-visible
+                # effect, set_bits_responsive_hidden) or has a FilterBar
+                # to reflow -- see this module's own Lite section.
+                self.interpret_view.apply_responsive(proactive)
+                self.filter_bar.apply_responsive(proactive)
             self._min_sidebar = _SIDEBAR_MIN_BY_WIDTH_CLASS[proactive.width_class]
             self._min_workspace = _WORKSPACE_MIN_BY_WIDTH_CLASS[proactive.width_class]
             self.interpret_view.setMinimumWidth(self._min_workspace)
@@ -3866,8 +4037,20 @@ class MainWindow(QMainWindow):
         density_changed = self.theme.set_density(density)
         if state_changed:
             self._responsive = state
-            self.interpret_view.apply_responsive(state)
-            self.filter_bar.apply_responsive(state)
+            if not self.lite:
+                # Lite never responsive-hides Bit Activity: apply_
+                # responsive's only effect is set_bits_responsive_hidden
+                # (state.very_short), and Lite's own 800x480 target is
+                # short enough that this would otherwise permanently
+                # disable the toggle -- see InterpretView.apply_
+                # responsive's own docstring and the module's own Lite
+                # section. The operator's explicit bits_toggle checked
+                # state is the only thing that decides visibility in
+                # Lite; the page scrolls instead (see _build_ui's own
+                # scrollable() wrapping of interpret_view for Lite).
+                # Lite also has no FilterBar to reflow.
+                self.interpret_view.apply_responsive(state)
+                self.filter_bar.apply_responsive(state)
 
             self._min_sidebar = _SIDEBAR_MIN_BY_WIDTH_CLASS[state.width_class]
             self._min_workspace = _WORKSPACE_MIN_BY_WIDTH_CLASS[state.width_class]
