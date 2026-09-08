@@ -15,7 +15,7 @@ import os
 import tempfile
 import threading
 import time
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from PySide6.QtCore import QObject, QThread, Qt, QTimer, Signal, Slot
 from PySide6.QtGui import QAction, QFontMetrics, QKeySequence
@@ -1189,7 +1189,11 @@ class MainWindow(QMainWindow):
 
         self.id_view = QTableView()
         self.id_view.setModel(self.id_proxy)
-        self._configure_table(self.id_view, payload_column=6)
+        # Lite: ID + Payload only -- see _configure_table's own Lite
+        # section. Channel/Type/Rate/Last are never removed from the
+        # model, only hidden from this view; selecting a row still shows
+        # all of them in full, in InterpretView, directly below.
+        self._configure_table(self.id_view, payload_column=6, lite_visible_columns=(0, 6))
         self.id_view.setSortingEnabled(True)
         # Without this the header starts on descending, which reads as random.
         self.id_view.sortByColumn(0, Qt.AscendingOrder)
@@ -1203,7 +1207,12 @@ class MainWindow(QMainWindow):
         )
         self.trace_view = QTableView()
         self.trace_view.setModel(self.trace_model)
-        self._configure_table(self.trace_view, payload_column=5)
+        # Lite: Time + CAN ID + Payload -- Trace is chronological, so
+        # (unlike Messages, already grouped by ID) it needs both "when"
+        # and "which ID" alongside the payload. Channel/Type/Bytes are
+        # never removed from the model, only hidden from this view.
+        self._configure_table(
+            self.trace_view, payload_column=5, lite_visible_columns=(0, 2, 5))
         self.trace_view.selectionModel().selectionChanged.connect(self._on_trace_selection)
         self.trace_view.verticalScrollBar().valueChanged.connect(self._on_trace_scrolled)
         if self.lite:
@@ -1222,7 +1231,10 @@ class MainWindow(QMainWindow):
         layout.addLayout(footer)
         return panel
 
-    def _configure_table(self, view: QTableView, payload_column: int) -> None:
+    def _configure_table(
+        self, view: QTableView, payload_column: int,
+        lite_visible_columns: Tuple[int, ...] = (),
+    ) -> None:
         view.setSelectionBehavior(QAbstractItemView.SelectRows)
         view.setSelectionMode(QAbstractItemView.SingleSelection)
         view.setAlternatingRowColors(True)
@@ -1241,23 +1253,26 @@ class MainWindow(QMainWindow):
         # eat the whole sidebar and clip even the header text.
         header.setMinimumSectionSize(72)
         if self.lite:
-            # Lite's table keeps its own natural, non-shrinking column
-            # widths (see _size_table_columns) instead of stretching the
-            # payload column down to whatever room happens to be left --
-            # its natural total can then exceed the viewport. That is
-            # reached by scrolling the *page* horizontally (see
-            # _build_ui's own Lite section), not a horizontal scrollbar
-            # on the table itself -- a table is not its own independent
-            # horizontal workspace here, so this view never shows one;
-            # _size_table_columns below instead gives it a minimum width
-            # equal to its own natural total, which is what lets the
-            # enclosing QScrollArea's viewport-vs-content comparison
-            # decide whether the page needs to scroll horizontally at
-            # all. Its own vertical (row) scrolling is unaffected --
-            # still per-pixel, still normal row virtualization -- and
-            # still touch-draggable.
+            # Lite shows only the essential columns (lite_visible_columns
+            # -- e.g. ID + Payload for Messages, Time + CAN ID + Payload
+            # for Trace) at their own natural, non-shrinking widths (see
+            # _size_table_columns) -- never a stretched-down payload, and
+            # never a horizontal scrollbar on the table itself, on
+            # ordinary Classic CAN traffic. The hidden columns are a
+            # presentation choice only: nothing is dropped from
+            # id_model/trace_model, and every one of them is shown in
+            # full in InterpretView, directly below, once a row is
+            # selected -- see the two _configure_table call sites in
+            # _build_browser for exactly which columns each table keeps.
             for column in range(view.model().columnCount()):
                 header.setSectionResizeMode(column, QHeaderView.Interactive)
+                view.setColumnHidden(column, column not in lite_visible_columns)
+            # A CAN FD payload (64 bytes) can still be wider than the
+            # viewport even with only these columns shown -- the *page*
+            # (see _build_ui's own Lite section), not this table, scrolls
+            # horizontally to reach the rest of it in that case; ordinary
+            # Classic CAN traffic (8 bytes) fits without any horizontal
+            # scrolling at all with this reduced column set.
             view.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
             _enable_touch_scrolling(view)
             # A readable, touch-comfortable number of rows at a glance
@@ -1298,14 +1313,21 @@ class MainWindow(QMainWindow):
                 continue
             view.setColumnWidth(column, width)
         if self.lite:
-            # A *minimum* width equal to the table's own natural total (see
-            # _configure_table's own Lite section) -- not the table's own
-            # horizontal scrollbar, but this floor is what lets the
-            # enclosing QScrollArea (see _build_ui) correctly decide
-            # whether the page needs to scroll horizontally to reach the
-            # rest of it. Never a fixed width: nothing stops this table
-            # from simply filling more space on a wider host screen.
-            total = sum(view.columnWidth(c) for c in range(view.model().columnCount()))
+            # A *minimum* width equal to the sum of only the columns Lite
+            # actually shows (see _configure_table's own Lite section and
+            # its lite_visible_columns) -- read back from the view's own
+            # current hidden-column state rather than re-threaded through
+            # here, so every caller (a plain column-width refresh after a
+            # CAN FD toggle, a font change, ...) picks this up for free.
+            # Not the table's own horizontal scrollbar, but this floor is
+            # what lets the enclosing QScrollArea (see _build_ui) decide
+            # whether the *page* needs to scroll horizontally to reach
+            # the rest of it. Never a fixed width: nothing stops this
+            # table from simply filling more space on a wider host
+            # screen.
+            total = sum(
+                view.columnWidth(c) for c in range(view.model().columnCount())
+                if not view.isColumnHidden(c))
             total += view.verticalScrollBar().sizeHint().width()
             total += 2 * view.frameWidth()
             view.setMinimumWidth(total)

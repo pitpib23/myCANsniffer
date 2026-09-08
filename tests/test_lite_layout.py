@@ -195,19 +195,73 @@ class TableColumnWidthTests(_LiteLayoutTestCase):
         for column in range(6):
             self.assertEqual(header.sectionResizeMode(column), QHeaderView.Interactive)
 
+    def test_lite_messages_table_shows_only_id_and_payload(self):
+        """Secondary columns (Channel, Type, Rate, Last) are hidden, not
+        removed -- see the model-column-definitions test below for the
+        "not removed from the model" half, and
+        RetainedBehaviorUnchangedTests for "still reaches InterpretView"."""
+        window = self._window()
+        hidden = {c for c in range(window.id_model.columnCount())
+                 if window.id_view.isColumnHidden(c)}
+        self.assertEqual(hidden, {1, 2, 3, 4, 5})  # Ch, Type, Bytes, Rate, Last
+        self.assertFalse(window.id_view.isColumnHidden(0))  # ID
+        self.assertFalse(window.id_view.isColumnHidden(6))  # Payload
+
+    def test_lite_trace_table_shows_only_time_id_and_payload(self):
+        window = self._window()
+        hidden = {c for c in range(window.trace_model.columnCount())
+                 if window.trace_view.isColumnHidden(c)}
+        self.assertEqual(hidden, {1, 3, 4})  # Ch, Type, Bytes
+        self.assertFalse(window.trace_view.isColumnHidden(0))  # Time
+        self.assertFalse(window.trace_view.isColumnHidden(2))  # CAN ID
+        self.assertFalse(window.trace_view.isColumnHidden(5))  # Payload
+
+    def test_full_edition_hides_no_columns(self):
+        """Regression guard: Lite's reduced column set must not leak into
+        the full edition's own, unchanged all-columns table."""
+        window = self._window(lite=False)
+        for c in range(window.id_model.columnCount()):
+            self.assertFalse(window.id_view.isColumnHidden(c), "column {}".format(c))
+        for c in range(window.trace_model.columnCount()):
+            self.assertFalse(window.trace_view.isColumnHidden(c), "column {}".format(c))
+
+    def test_classic_can_traffic_needs_no_horizontal_scroll_at_all(self):
+        """The whole point of hiding the secondary columns: ordinary
+        8-byte Classic CAN traffic -- the common case -- must fit within
+        800x480 without any horizontal scrolling, on the table or on the
+        page, not just a narrower one."""
+        window = self._window()
+        window.id_model.add_frames(
+            [_frame(0x100 + i * 0x11, n_bytes=8) for i in range(10)])
+        window.trace_model.add_frames(
+            [_frame(0x100 + i * 0x11, n_bytes=8) for i in range(10)])
+        self.app.processEvents()
+        self.app.processEvents()
+        scroll = window.lite_workspace_scroll
+        self.assertEqual(scroll.horizontalScrollBar().maximum(), 0)
+        window.nav.group.button(window._NAV_TRACE).click()
+        self.app.processEvents()
+        self.assertEqual(scroll.horizontalScrollBar().maximum(), 0)
+
     def test_non_payload_columns_keep_their_exemplar_widths_in_lite(self):
         """Do NOT use column shrinking as the primary responsive strategy:
-        every non-payload column's width must still come from
+        every *visible* non-payload column's width must still come from
         exemplar_widths, byte-for-byte the same the full edition uses --
         never proportionally compressed to fit 800px. (Qt's own
         QHeaderView.minimumSectionSize -- 72px, set once in
         _configure_table for both editions alike -- can still floor an
         exemplar narrower than that; this is pre-existing, edition-
-        independent behavior, not compression introduced for Lite.)"""
+        independent behavior, not compression introduced for Lite.) The
+        columns Lite hides (see test_lite_messages_table_shows_only_id_
+        and_payload) are a presentation choice, not a width compromise --
+        Qt itself reports a hidden section's width as 0 regardless of
+        whatever _size_table_columns set it to, which is not a
+        regression to check for here.
+        """
         window = self._window()
         widths = exemplar_widths(window.id_model, window.theme)
         for column, expected in enumerate(widths):
-            if column == 6:
+            if column == 6 or window.id_view.isColumnHidden(column):
                 continue
             self.assertEqual(window.id_view.columnWidth(column), max(expected, 72),
                              "column {}".format(column))
@@ -235,13 +289,22 @@ class TableColumnWidthTests(_LiteLayoutTestCase):
     def test_wide_table_makes_the_enclosing_page_scroll_horizontally(self):
         """A CAN FD-sized payload column pushes the table's own natural
         (minimum) width well past 800px -- the *page*, not the table
-        itself, must offer horizontal scrolling to reach the rest of it."""
+        itself, must offer horizontal scrolling to reach the rest of it.
+        Even with only ID/Time + Payload shown (see
+        test_lite_messages_table_shows_only_id_and_payload) -- a 64-byte
+        payload alone is wider than 800px regardless of how many other
+        columns are hidden.
+        """
         window = self._window()
         window.config.set("source.live.fd", True)
         window._apply_config_to_widgets()
-        self.app.processEvents()
-        self.app.processEvents()
         scroll = window.lite_workspace_scroll
+        # The scroll area's own range can take a couple of event-loop
+        # turns to settle after a minimum-size change this large -- same
+        # "more than one turn" caveat _apply_responsive_state_impl's own
+        # docstring documents elsewhere in this codebase.
+        for _ in range(5):
+            self.app.processEvents()
         self.assertGreater(scroll.horizontalScrollBar().maximum(), 0)
 
     def test_trace_table_columns_are_also_natural_width_in_lite(self):
@@ -251,7 +314,7 @@ class TableColumnWidthTests(_LiteLayoutTestCase):
             self.assertEqual(header.sectionResizeMode(column), QHeaderView.Interactive)
         widths = exemplar_widths(window.trace_model, window.theme)
         for column, expected in enumerate(widths):
-            if column == 5:
+            if column == 5 or window.trace_view.isColumnHidden(column):
                 continue
             self.assertEqual(window.trace_view.columnWidth(column), max(expected, 72))
 
@@ -379,6 +442,26 @@ class PlotHeightTests(_LiteLayoutTestCase):
 class RetainedBehaviorUnchangedTests(_LiteLayoutTestCase):
     """The point of this whole file: presentation changed, retained
     Messages/Trace/InterpretView behavior did not."""
+
+    def test_columns_hidden_from_the_table_still_reach_interpretview(self):
+        """Channel/Type/Rate/Last-seen (Messages) and Channel/Type/Bytes
+        (Trace) are hidden from the table -- see TableColumnWidthTests --
+        but never dropped from the model: selecting a row still shows
+        every one of them in full via InterpretView's own identity card."""
+        window = self._window()
+        frame = _frame(0x123, n_bytes=8)
+        window.id_model.add_frames([frame])
+        self.app.processEvents()
+        window.id_view.selectRow(0)
+        self.app.processEvents()
+        shown = window.interpret_view.current_frame()
+        self.assertEqual(shown.channel, frame.channel)
+        self.assertEqual(shown.is_extended, frame.is_extended)
+        self.assertEqual(len(shown.data), len(frame.data))
+        # Still queryable straight from the (unmodified) model too.
+        stats = window.id_model.stats_for_key(frame.key)
+        self.assertIsNotNone(stats)
+        self.assertEqual(stats.frame.channel, frame.channel)
 
     def test_sorting_still_works_in_lite(self):
         window = self._window()
