@@ -3,17 +3,19 @@
 Follow-up to tests/test_lite_mode.py: that file covers Lite's nav trimming
 and Auto Scan column simplification; this one covers the layout rework that
 replaces the desktop-style narrow-sidebar-beside-InterpretView splitter with
-a full-width, horizontally-scrollable table plus an explicit Details/Back
-toggle to the interpretation pane -- see cansniff/ui/main_window.py's own
-"Lite: table-primary / details-on-demand" section and
-cansniff/ui/responsive.py's ``floor_density``.
+one continuous scrollable page -- the table (its own natural width, its own
+internal row scrolling only) directly above InterpretView (identity/payload
+strip, Bit Activity, Blocks/Signals/Range/Plot), both at their normal
+readable size, inside a single QScrollArea that owns whatever scrolling the
+page as a whole needs. See cansniff/ui/main_window.py's own Lite section
+in _build_ui and cansniff/ui/responsive.py's ``floor_density``.
 
 None of this changes retained behavior: the same CanFrame/FrameStats data,
 the same IdTableModel/TraceTableModel columns and sort/filter semantics, the
 same InterpretView.show_frame/set_section calls, the same SignalPlot zoom/
-pan/data. Only presentation -- which columns get how much width, whether the
-interpretation pane is on screen right now, how far density is allowed to
-shrink -- changes, and only for lite=True.
+pan/data. Only presentation -- which columns get how much width, how the
+page scrolls, how far density is allowed to shrink -- changes, and only for
+lite=True.
 """
 
 from __future__ import annotations
@@ -84,110 +86,86 @@ class _LiteLayoutTestCase(unittest.TestCase):
             os.remove(path)
 
 
-class TableIsPrimaryAndFullWidthTests(_LiteLayoutTestCase):
-    def test_lite_table_view_is_the_default_and_takes_the_whole_splitter(self):
-        window = self._window()
-        self.assertFalse(window._lite_detail_open)
-        self.assertTrue(window.browser_panel.isVisible())
-        self.assertFalse(window.workspace_panel.isVisible())
-        sizes = window.splitter.sizes()
-        self.assertGreater(sizes[0], 600)
-        self.assertEqual(sizes[1], 0)
+class SinglePageWorkspaceTests(_LiteLayoutTestCase):
+    """The core layout change: no more table/details toggle -- the table
+    and InterpretView are simultaneously present on one scrollable page.
+    """
 
-    def test_full_edition_still_uses_a_partial_split_by_default(self):
-        """Regression guard: Lite's table-primary layout must not leak
-        into the full edition's own, unchanged side-by-side splitter."""
-        window = self._window(lite=False)
+    def test_table_and_interpretation_are_both_visible_simultaneously(self):
+        window = self._window()
+        self.assertFalse(hasattr(window, "splitter"))
         self.assertTrue(window.browser_panel.isVisible())
-        self.assertTrue(window.workspace_panel.isVisible())
+        self.assertTrue(window.interpret_view.isVisible())
+
+    def test_full_edition_still_uses_its_own_side_by_side_splitter(self):
+        """Regression guard: Lite's single-page layout must not leak into
+        the full edition's own, unchanged splitter."""
+        window = self._window(lite=False)
+        self.assertTrue(hasattr(window, "splitter"))
+        self.assertTrue(window.browser_panel.isVisible())
+        self.assertTrue(window.interpret_view.isVisible())
         sizes = window.splitter.sizes()
         self.assertGreater(sizes[0], 0)
         self.assertGreater(sizes[1], 0)
 
-    def test_lite_details_button_disabled_until_a_frame_is_selected(self):
-        window = self._window()
-        self.assertFalse(window.lite_details_button.isEnabled())
-        window.id_model.add_frames([_frame(0x123)])
-        self.app.processEvents()
-        window.id_view.selectRow(0)
-        self.app.processEvents()
-        self.assertTrue(window.lite_details_button.isEnabled())
-
-    def test_lite_details_button_opens_the_interpretation_pane_full_width(self):
+    def test_selecting_a_row_updates_interpretation_without_any_toggle(self):
         window = self._window()
         window.id_model.add_frames([_frame(0x123)])
         self.app.processEvents()
         window.id_view.selectRow(0)
-        window.lite_details_button.click()
         self.app.processEvents()
-        self.assertTrue(window._lite_detail_open)
-        self.assertFalse(window.browser_panel.isVisible())
-        self.assertTrue(window.workspace_panel.isVisible())
-        sizes = window.splitter.sizes()
-        self.assertEqual(sizes[0], 0)
-        self.assertGreater(sizes[1], 600)
-        # The frame actually reached InterpretView -- opening Details never
-        # itself changes *what* is shown, only whether it is on screen.
         self.assertEqual(window.interpret_view.current_frame().arb_id, 0x123)
-
-    def test_lite_back_button_returns_to_the_full_width_table(self):
-        window = self._window()
-        window.id_model.add_frames([_frame(0x123)])
-        self.app.processEvents()
-        window.id_view.selectRow(0)
-        window.lite_details_button.click()
-        self.app.processEvents()
-        window.lite_back_button.click()
-        self.app.processEvents()
-        self.assertFalse(window._lite_detail_open)
+        # Still simultaneously visible -- selecting never hides the table
+        # or requires opening anything.
         self.assertTrue(window.browser_panel.isVisible())
-        self.assertFalse(window.workspace_panel.isVisible())
+        self.assertTrue(window.interpret_view.isVisible())
 
-    def test_lite_nav_reclick_toggles_table_and_details_like_the_buttons_do(self):
-        """_on_nav_clicked's own path to the same toggle (re-clicking the
-        already-open Messages/Trace destination) -- see
-        tests/test_lite_mode.py's nav-click test for the click-path
-        coverage; this checks the resulting splitter state matches the
-        explicit-button path exactly."""
+    def test_workspace_scroll_reaches_interpretation_below_the_table(self):
         window = self._window()
         window.id_model.add_frames([_frame(0x123)])
         self.app.processEvents()
-        window.id_view.selectRow(0)
+        scroll = window.lite_workspace_scroll
+        self.assertGreater(scroll.verticalScrollBar().maximum(), 0)
+        scroll.verticalScrollBar().setValue(scroll.verticalScrollBar().maximum())
         self.app.processEvents()
-        window.nav.group.button(window._NAV_MESSAGES).click()
-        self.app.processEvents()
-        self.assertTrue(window._lite_detail_open)
-        window.nav.group.button(window._NAV_MESSAGES).click()
-        self.app.processEvents()
-        self.assertFalse(window._lite_detail_open)
+        self.assertTrue(window.interpret_view.isVisibleTo(window))
 
-    def test_switching_to_trace_returns_to_its_own_table_view(self):
+    def test_nav_reclick_scrolls_the_page_back_to_top(self):
         window = self._window()
         window.id_model.add_frames([_frame(0x123)])
         self.app.processEvents()
-        window.id_view.selectRow(0)
-        window.lite_details_button.click()
+        scroll = window.lite_workspace_scroll
+        scroll.verticalScrollBar().setValue(scroll.verticalScrollBar().maximum())
         self.app.processEvents()
-        self.assertTrue(window._lite_detail_open)
+        self.assertGreater(scroll.verticalScrollBar().value(), 0)
+        window.nav.group.button(window._NAV_MESSAGES).click()
+        self.app.processEvents()
+        self.assertEqual(scroll.verticalScrollBar().value(), 0)
+
+    def test_switching_to_trace_shows_its_own_table_and_scrolls_to_top(self):
+        window = self._window()
+        window.id_model.add_frames([_frame(0x123)])
+        self.app.processEvents()
+        scroll = window.lite_workspace_scroll
+        scroll.verticalScrollBar().setValue(scroll.verticalScrollBar().maximum())
+        self.app.processEvents()
         window.nav.group.button(window._NAV_TRACE).click()
         self.app.processEvents()
-        self.assertFalse(window._lite_detail_open)
-        self.assertTrue(window.browser_panel.isVisible())
         self.assertEqual(window.browser_stack.currentIndex(), window._NAV_TRACE)
+        self.assertTrue(window.browser_panel.isVisible())
+        self.assertEqual(scroll.verticalScrollBar().value(), 0)
 
-    def test_clear_returns_to_table_view_and_disables_details(self):
+    def test_clear_leaves_table_and_interpretation_both_visible(self):
         window = self._window()
         window.id_model.add_frames([_frame(0x123)])
         window.trace_model.add_frames([_frame(0x123)])
         self.app.processEvents()
         window.id_view.selectRow(0)
-        window.lite_details_button.click()
         self.app.processEvents()
         window.clear_views()
         self.app.processEvents()
-        self.assertFalse(window._lite_detail_open)
         self.assertTrue(window.browser_panel.isVisible())
-        self.assertFalse(window.lite_details_button.isEnabled())
+        self.assertTrue(window.interpret_view.isVisible())
         # Clear's own documented data-clearing behavior is untouched --
         # spot check both tables are actually empty.
         self.assertEqual(window.id_model.rowCount(), 0)
@@ -195,8 +173,8 @@ class TableIsPrimaryAndFullWidthTests(_LiteLayoutTestCase):
 
 
 class TableColumnWidthTests(_LiteLayoutTestCase):
-    """Success criteria: natural (non-Stretch) column widths, horizontal
-    scroll enabled, natural width can exceed the viewport, payload never
+    """Success criteria: natural (non-Stretch) column widths, the *page*
+    (not the table itself) scrolls horizontally when needed, payload never
     compressed, existing model values/columns unchanged.
     """
 
@@ -244,14 +222,27 @@ class TableColumnWidthTests(_LiteLayoutTestCase):
         width_64 = window.id_view.columnWidth(6)
         self.assertGreater(width_64, width_8)
 
-    def test_messages_table_natural_width_can_exceed_the_viewport(self):
+    def test_table_itself_has_no_horizontal_scrollbar_in_lite(self):
+        """Not its own independent horizontal workspace: the *page*
+        (lite_workspace_scroll) owns horizontal scrolling instead -- see
+        _configure_table's own Lite section."""
         window = self._window()
-        total = sum(window.id_view.columnWidth(c)
-                    for c in range(window.id_model.columnCount()))
-        self.assertGreater(total, window.id_view.viewport().width())
         self.assertEqual(
-            window.id_view.horizontalScrollBarPolicy(), Qt.ScrollBarAsNeeded)
-        self.assertGreater(window.id_view.horizontalScrollBar().maximum(), 0)
+            window.id_view.horizontalScrollBarPolicy(), Qt.ScrollBarAlwaysOff)
+        self.assertEqual(
+            window.trace_view.horizontalScrollBarPolicy(), Qt.ScrollBarAlwaysOff)
+
+    def test_wide_table_makes_the_enclosing_page_scroll_horizontally(self):
+        """A CAN FD-sized payload column pushes the table's own natural
+        (minimum) width well past 800px -- the *page*, not the table
+        itself, must offer horizontal scrolling to reach the rest of it."""
+        window = self._window()
+        window.config.set("source.live.fd", True)
+        window._apply_config_to_widgets()
+        self.app.processEvents()
+        self.app.processEvents()
+        scroll = window.lite_workspace_scroll
+        self.assertGreater(scroll.horizontalScrollBar().maximum(), 0)
 
     def test_trace_table_columns_are_also_natural_width_in_lite(self):
         window = self._window()
@@ -274,6 +265,17 @@ class TableColumnWidthTests(_LiteLayoutTestCase):
             window.id_view.verticalHeader().defaultSectionSize(), ROW_HEIGHT_COMPACT)
         self.assertEqual(
             window.trace_view.verticalHeader().defaultSectionSize(), ROW_HEIGHT_COMPACT)
+
+    def test_table_keeps_its_own_normal_internal_row_virtualization(self):
+        """The table is not grown to fit every row's pixel height -- it
+        stays at a bounded, readable number of visible rows with its own
+        normal vertical scrollbar for the rest (never "hundreds of
+        thousands of pixels tall")."""
+        window = self._window()
+        window.id_model.add_frames([_frame(0x100 + i) for i in range(500)])
+        self.app.processEvents()
+        self.assertLess(window.id_view.height(), 2000)
+        self.assertGreater(window.id_view.verticalScrollBar().maximum(), 0)
 
 
 class DensityFloorTests(_LiteLayoutTestCase):
@@ -307,9 +309,9 @@ class InterpretationScrollTests(_LiteLayoutTestCase):
             widget = widget.parentWidget()
         return widget
 
-    def test_interpret_view_is_wrapped_in_a_scroll_area_in_lite(self):
+    def test_interpret_view_lives_inside_the_one_lite_scroll_area(self):
         window = self._window()
-        self.assertIsInstance(self._scroll_area(window), QScrollArea)
+        self.assertIs(self._scroll_area(window), window.lite_workspace_scroll)
 
     def test_full_edition_interpret_view_is_not_wrapped_in_a_scroll_area(self):
         """Regression guard: the desktop edition's own layout (a plain
@@ -317,22 +319,31 @@ class InterpretationScrollTests(_LiteLayoutTestCase):
         window = self._window(lite=False)
         self.assertIsNone(self._scroll_area(window))
 
+    def test_no_nested_scroll_area_around_interpretation_alone(self):
+        """One QScrollArea owns the whole Lite page -- a second, nested
+        one around InterpretView by itself would be redundant (see
+        _build_ui's own Lite section)."""
+        window = self._window()
+        outer = self._scroll_area(window)
+        inner = window.interpret_view.parentWidget()
+        while inner is not None and inner is not outer:
+            self.assertNotIsInstance(inner, QScrollArea)
+            inner = inner.parentWidget()
+
     def test_page_scrolls_vertically_when_shorter_than_its_own_minimum(self):
         window = self._window()
         window.id_model.add_frames([_frame(0x123)])
         self.app.processEvents()
         window.id_view.selectRow(0)
-        window.lite_details_button.click()
-        self.app.processEvents()
         window.interpret_view.view_tabs.set_current(PLOT)
         self.app.processEvents()
-        scroll = self._scroll_area(window)
-        # A viewport shorter than InterpretView's own reported minimum
-        # must produce a real, usable scroll range -- never silently clip
-        # or shrink content below its floor (see plot_view.SignalPlot's
-        # own 220px floor, checked separately below).
-        minimum = window.interpret_view.minimumSizeHint().height()
-        scroll.setFixedHeight(max(50, minimum - 40))
+        scroll = window.lite_workspace_scroll
+        # A viewport shorter than the page's own reported minimum must
+        # produce a real, usable scroll range -- never silently clip or
+        # shrink content below its floor (see plot_view.SignalPlot's own
+        # 220px floor, checked separately below).
+        minimum = scroll.widget().minimumSizeHint().height()
+        scroll.setFixedHeight(max(50, minimum - 100))
         self.app.processEvents()
         bar = scroll.verticalScrollBar()
         self.assertGreater(bar.maximum(), 0)
@@ -340,7 +351,6 @@ class InterpretationScrollTests(_LiteLayoutTestCase):
         # the plot's own data/zoom state.
         bar.setValue(bar.maximum())
         self.app.processEvents()
-        self.assertGreaterEqual(window.interpret_view.size().height(), minimum)
 
 
 class PlotHeightTests(_LiteLayoutTestCase):
@@ -349,7 +359,6 @@ class PlotHeightTests(_LiteLayoutTestCase):
         window.id_model.add_frames([_frame(0x123)])
         self.app.processEvents()
         window.id_view.selectRow(0)
-        window.lite_details_button.click()
         window.interpret_view.view_tabs.set_current(PLOT)
         self.app.processEvents()
         self.assertEqual(window.interpret_view.plot.view.minimumHeight(), 220)
@@ -451,17 +460,28 @@ class LayoutFitsAvailableGeometryTests(_LiteLayoutTestCase):
     def test_messages_table_gets_the_full_available_content_width(self):
         window = self._window()
         self.assertGreaterEqual(
-            window.browser_panel.width(), window.width() - window.nav.WIDTH - 40)
+            window.browser_panel.width(), window.width() - window.nav.WIDTH - 60)
 
-    def test_details_pane_also_gets_the_full_available_content_width(self):
+    def test_interpretation_also_gets_the_full_available_content_width(self):
         window = self._window()
         window.id_model.add_frames([_frame(0x123)])
         self.app.processEvents()
         window.id_view.selectRow(0)
-        window.lite_details_button.click()
         self.app.processEvents()
         self.assertGreaterEqual(
-            window.workspace_panel.width(), window.width() - window.nav.WIDTH - 40)
+            window.interpret_view.width(), window.width() - window.nav.WIDTH - 60)
+
+    def test_sidebar_stays_fixed_while_the_page_scrolls(self):
+        """The left nav rail lives outside lite_workspace_scroll -- see
+        _build_ui -- so scrolling the workspace must never move it."""
+        window = self._window()
+        window.id_model.add_frames([_frame(0x123)])
+        self.app.processEvents()
+        before = window.nav.geometry()
+        scroll = window.lite_workspace_scroll
+        scroll.verticalScrollBar().setValue(scroll.verticalScrollBar().maximum())
+        self.app.processEvents()
+        self.assertEqual(window.nav.geometry(), before)
 
 
 if __name__ == "__main__":

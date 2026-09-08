@@ -158,20 +158,18 @@ class MainWindowNavigationTests(unittest.TestCase):
         self.assertEqual(window.browser_stack.currentIndex(), window._NAV_TRACE)
         self.assertEqual(window.section_label.text(), "Trace")
 
-    def test_lite_messages_nav_click_toggles_table_details_instead(self):
-        """Lite's own redesigned table-primary layout (see
-        cansniff/ui/main_window.py's Lite section): re-clicking the
-        already-open destination toggles table/details instead of a
-        partial sidebar split -- see tests/test_lite_layout.py for the
-        full table/Details/Back coverage; this only pins down that the
-        *nav click* path still reaches it and switching sections still
-        works.
+    def test_lite_messages_nav_click_switches_sections_not_a_sidebar(self):
+        """Lite's own redesigned single-page layout (see
+        cansniff/ui/main_window.py's Lite section): there is no partial
+        sidebar split to toggle any more -- see tests/test_lite_layout.py
+        for the full single-page-workspace coverage; this only pins down
+        that the *nav click* path still switches sections correctly.
         """
         window = self._window(lite=True)
         window.show()
         self.app.processEvents()
-        self.assertFalse(window._lite_detail_open)
         self.assertTrue(window.browser_panel.isVisible())
+        self.assertTrue(window.interpret_view.isVisible())
         window.nav.group.button(window._NAV_TRACE).click()
         self.assertEqual(window.browser_stack.currentIndex(), window._NAV_TRACE)
         self.assertEqual(window.section_label.text(), "Trace")

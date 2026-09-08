@@ -84,13 +84,16 @@ class _LiteFilterTestCase(unittest.TestCase):
             os.remove(path)
 
     def _open_trace_with_details(self, window, frame):
+        """Selects a Trace row and lets InterpretView show it -- table and
+        InterpretView already share one continuous scrollable page in
+        Lite (see cansniff/ui/main_window.py's own Lite section), so
+        there is no separate "Details" view to open any more.
+        """
         window.trace_model.add_frames([frame])
         self.app.processEvents()
         window.nav.group.button(window._NAV_TRACE).click()
         self.app.processEvents()
         window.trace_view.selectRow(window.trace_model.rowCount() - 1)
-        self.app.processEvents()
-        window.lite_details_button.click()
         self.app.processEvents()
 
 
@@ -461,10 +464,10 @@ class TraceCanIdDropdownTests(_LiteFilterTestCase):
 
     def _select_label(self, window, label):
         # Re-clicking an *already*-open Messages/Trace nav destination
-        # toggles Lite's table/details view (see _lite_toggle_detail) --
-        # only click it here when Trace is not already the active
-        # section, so this helper is safe to call whether or not the
-        # caller already navigated there itself.
+        # scrolls Lite's single-page workspace back to the top (see
+        # _on_nav_clicked) -- only click it here when Trace is not
+        # already the active section, so this helper is safe to call
+        # whether or not the caller already navigated there itself.
         if window.browser_stack.currentIndex() != window._NAV_TRACE:
             window.nav.group.button(window._NAV_TRACE).click()
             self.app.processEvents()
