@@ -18,11 +18,11 @@ import time
 from typing import Dict, List, Optional
 
 from PySide6.QtCore import QObject, QThread, Qt, QTimer, Signal, Slot
-from PySide6.QtGui import QAction, QKeySequence
+from PySide6.QtGui import QAction, QFontMetrics, QKeySequence
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QFileDialog, QFrame, QHBoxLayout,
-    QHeaderView, QLabel, QMainWindow, QMessageBox, QPushButton, QSizePolicy,
-    QSplitter, QStackedWidget, QTableView, QVBoxLayout, QWidget,
+    QHeaderView, QLabel, QMainWindow, QMessageBox, QPushButton, QScroller,
+    QSizePolicy, QSplitter, QStackedWidget, QTableView, QVBoxLayout, QWidget,
 )
 
 from .. import __version__
@@ -82,8 +82,8 @@ from .tables import (
     exemplar_widths,
 )
 from .responsive import (
-    NORMAL_STATE, ResponsiveState, SizeClass, compute_responsive_state,
-    interpolated_density,
+    DENSITY_NORMAL, NORMAL_STATE, ResponsiveState, SizeClass, compute_responsive_state,
+    floor_density, interpolated_density,
 )
 from .theme import ROW_HEIGHT_COMPACT, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XS, Theme
 from .widgets import (
@@ -113,6 +113,20 @@ _SIDEBAR_MIN_BY_WIDTH_CLASS = {
 _WORKSPACE_MIN_BY_WIDTH_CLASS = {
     SizeClass.NORMAL: 280, SizeClass.COMPACT: 220, SizeClass.ULTRA: 180,
 }
+
+
+def _enable_touch_scrolling(view: QAbstractItemView) -> None:
+    """Kinetic touch-drag scrolling for a Lite table, via Qt's own
+    QScroller -- no new dependency (QScroller ships with QtWidgets).
+
+    LeftMouseButtonGesture makes an ordinary press-and-drag (touch or
+    mouse) pan the view; Qt's own gesture recognizer still delivers a
+    plain click through untouched when the press releases without
+    dragging past its movement threshold, so row selection and the
+    existing scrollbars/mouse wheel are unaffected -- see
+    tests/test_lite_layout.py's own click-still-selects coverage.
+    """
+    QScroller.grabGesture(view.viewport(), QScroller.LeftMouseButtonGesture)
 
 
 class _ProtocolSurveyWorker(QObject):
@@ -322,11 +336,22 @@ class MainWindow(QMainWindow):
         and still live on self.top_stack, simply unreachable from the
         rail -- see _build_ui's own docstring note. Defaults to False so
         every existing call site (tests included) is completely unaffected.
+
+        Lite's own Messages/Trace layout answers "800x480 is smaller than
+        this content wants to be" with scrolling and an explicit table/
+        details toggle, never by shrinking text/rows/the chart below a
+        legible floor -- see _lite_show_table/_lite_show_details and
+        _apply_responsive_state_impl's own floor_density call.
         """
         super().__init__()
         self.config = config
         self.theme = theme
         self.lite = lite
+        #: Lite only -- see _lite_show_table/_lite_show_details. True while
+        #: the interpretation pane (not the table) currently has the whole
+        #: splitter; meaningless (never read) in the full edition, which
+        #: uses self._sidebar_collapsed/self._selector_on instead.
+        self._lite_detail_open = False
         self.setWindowTitle(
             "CAN Sniffer Lite — passive receive-only" if lite
             else "CAN Sniffer — passive receive-only")
@@ -603,10 +628,38 @@ class MainWindow(QMainWindow):
         workspace = QWidget()
         workspace_layout = QVBoxLayout(workspace)
         workspace_layout.setContentsMargins(SPACE_MD, SPACE_MD, SPACE_MD, SPACE_MD)
-        workspace_layout.setSpacing(0)
+        workspace_layout.setSpacing(0 if not self.lite else SPACE_SM)
+        if self.lite:
+            # Lite's own "return to the full-width table" affordance -- the
+            # mirror image of _build_browser's "Details" button. It lives
+            # here, on the interpretation pane's own header, rather than on
+            # browser_panel, specifically so it stays reachable while
+            # browser_panel itself is fully hidden -- see
+            # _lite_show_details.
+            back_row = QHBoxLayout()
+            back_row.setSpacing(SPACE_SM)
+            self.lite_back_button = QPushButton("← Table")
+            self.lite_back_button.setObjectName("Ghost")
+            self.lite_back_button.setCursor(Qt.PointingHandCursor)
+            self.lite_back_button.clicked.connect(self._lite_show_table)
+            back_row.addWidget(self.lite_back_button)
+            back_row.addStretch(1)
+            workspace_layout.addLayout(back_row)
         self.interpret_view = InterpretView(self.config, self.theme)
         self.interpret_view.setMinimumWidth(280)
-        workspace_layout.addWidget(self.interpret_view, 1)
+        # Lite: InterpretView's own content (identity/payload strip, then
+        # Blocks/Signals/Range/Plot) can genuinely be taller than 480px at
+        # a readable size -- see plot_view.SignalPlot's own density-driven
+        # minimum height, floored to 220px for Lite by
+        # _apply_responsive_state_impl's floor_density call -- so the
+        # *page* scrolls vertically rather than every section on it
+        # shrinking to fit. scrollable() is the same helper ISO-TP/
+        # Protocols/Compare/Matches already use for exactly this below.
+        workspace_layout.addWidget(
+            scrollable(self.interpret_view) if self.lite else self.interpret_view, 1)
+        #: Kept for _lite_show_table/_lite_show_details (Lite only) to
+        #: show/hide as a unit -- the full edition never reads this.
+        self.workspace_panel = workspace
         self.splitter.addWidget(workspace)
 
         self.splitter.setStretchFactor(0, 0)
@@ -805,6 +858,86 @@ class MainWindow(QMainWindow):
         if not self._sidebar_collapsed:
             self._remember_width()
 
+    # ------------------------------------------------------------------
+    # Lite: table-primary / details-on-demand
+    #
+    # The full edition's splitter shows browser_panel (the table) and
+    # workspace (InterpretView) side by side, each squeezed to whatever a
+    # partial split leaves it (see set_sidebar_collapsed) -- fine on a
+    # desktop-width window, not on an 800x480 one. Lite instead gives
+    # whichever of the two is "current" the splitter's *entire* width,
+    # with an explicit button to switch (Details ▸ / ← Table) -- never a
+    # third, partially-split state. Nothing about interpret_view's own
+    # content is tied to this: show_frame already runs on selection
+    # (_lite_note_frame_selected only ever flips a button's enabled
+    # state), so switching between these two views never loses or stales
+    # what would be shown.
+    # ------------------------------------------------------------------
+
+    def _lite_show_table(self) -> None:
+        """Lite's default view: the table takes the whole splitter width,
+        the interpretation pane is fully hidden. See _lite_show_details,
+        its mirror image, and _activate_browser/showEvent, its two
+        entry points.
+        """
+        self._lite_detail_open = False
+        self.workspace_panel.setVisible(False)
+        self.browser_panel.setVisible(True)
+        total = max(1, self._current_content_width())
+        self.splitter.setSizes([total, 0])
+        current_page = (self._NAV_MESSAGES if self.browser_stack.currentIndex() == 0
+                        else self._NAV_TRACE)
+        self.nav.set_indicator(current_page)
+
+    def _lite_show_details(self) -> None:
+        """Lite's detail view: the interpretation pane takes the whole
+        splitter width, the table is fully hidden. Reachable once a frame
+        is actually selected (see _lite_note_frame_selected) via
+        browser_panel's own Details button, or by re-clicking the
+        already-open Messages/Trace nav destination (see
+        _on_nav_clicked) -- the same "this destination doubles as a
+        toggle" gesture the full edition's own sidebar collapse uses.
+        """
+        self._lite_detail_open = True
+        self.workspace_panel.setVisible(True)
+        self.browser_panel.setVisible(False)
+        total = max(1, self._current_content_width())
+        self.splitter.setSizes([0, total])
+        self.nav.set_indicator(None)
+
+    def _lite_toggle_detail(self) -> None:
+        if self._lite_detail_open:
+            self._lite_show_table()
+        else:
+            self._lite_show_details()
+
+    def _lite_reconcile_splitter(self) -> None:
+        """Keep whichever of table/details is current filling the
+        splitter's actual current width after a resize -- called from
+        _reconcile_sidebar_width (itself called on every responsive-state
+        change; see _apply_responsive_state_impl). Re-applies the same
+        [total, 0]/[0, total] split _lite_show_table/_lite_show_details set
+        without toggling self._lite_detail_open or touching browser_panel/
+        workspace_panel visibility, which a resize never changes.
+        """
+        if self.top_stack.currentIndex() != self._STACK_BROWSER:
+            return
+        total = max(1, self._current_content_width())
+        if self._lite_detail_open:
+            self.splitter.setSizes([0, total])
+        else:
+            self.splitter.setSizes([total, 0])
+
+    def _lite_note_frame_selected(self) -> None:
+        """Lite only: a frame is now showing in interpret_view (show_frame
+        already ran), so its own Details button becomes reachable -- see
+        _build_browser. Never opens the detail pane itself: selecting a
+        row must not silently navigate away from the table, only make
+        doing so possible.
+        """
+        if self.lite:
+            self.lite_details_button.setEnabled(True)
+
     def _build_top_bar(self) -> QWidget:
         bar = QFrame()
         bar.setObjectName("TopBar")
@@ -962,6 +1095,20 @@ class MainWindow(QMainWindow):
         self.section_label = SectionLabel("Messages", self.theme)
         header.addWidget(self.section_label)
         header.addStretch(1)
+        if self.lite:
+            # Lite's own "open interpretation" affordance -- the mirror
+            # image of the "← Table" button _build_ui puts on the
+            # interpretation pane's own header. Disabled until a frame is
+            # actually selected (see _lite_note_frame_selected): opening it
+            # on an empty InterpretView would show nothing useful, and
+            # selecting a row must never *itself* navigate away from the
+            # table -- see the module's own Lite section.
+            self.lite_details_button = QPushButton("Details ▸")
+            self.lite_details_button.setObjectName("Ghost")
+            self.lite_details_button.setCursor(Qt.PointingHandCursor)
+            self.lite_details_button.setEnabled(False)
+            self.lite_details_button.clicked.connect(self._lite_show_details)
+            header.addWidget(self.lite_details_button)
         layout.addLayout(header)
 
         self.filter_bar = FilterBar(self.theme)
@@ -1025,26 +1172,64 @@ class MainWindow(QMainWindow):
         # Floor for the stretched payload column: without it the fixed columns
         # eat the whole sidebar and clip even the header text.
         header.setMinimumSectionSize(72)
-        # Identity and counters get a width sized to their format, not to the
-        # rows currently loaded. ResizeToContents here re-measured up to a
-        # thousand rows on every window resize — the dominant cost of resizing
-        # once a capture had been running. The payload is a *preview* in this
-        # narrow sidebar: it takes whatever width is left and elides, which
-        # keeps every other column readable instead of pushing them behind a
-        # horizontal scrollbar. The full payload is always shown in the detail
-        # panel on the right.
-        for column in range(view.model().columnCount()):
-            header.setSectionResizeMode(
-                column,
-                QHeaderView.Stretch if column == payload_column
-                else QHeaderView.Interactive,
-            )
+        if self.lite:
+            # Lite's table is the primary, full-width view (see
+            # _build_ui's own table/details toggle) rather than a narrow
+            # sidebar beside InterpretView, so its payload column gets its
+            # own natural, non-shrinking width like every other column
+            # (see _size_table_columns) instead of being stretched down to
+            # whatever room happens to be left -- the natural total can
+            # then exceed the viewport, which the horizontal scrollbar
+            # below (never previously needed, since Stretch prevents it)
+            # makes reachable.
+            for column in range(view.model().columnCount()):
+                header.setSectionResizeMode(column, QHeaderView.Interactive)
+            view.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+            _enable_touch_scrolling(view)
+        else:
+            # Identity and counters get a width sized to their format, not to
+            # the rows currently loaded. ResizeToContents here re-measured up
+            # to a thousand rows on every window resize — the dominant cost of
+            # resizing once a capture had been running. The payload is a
+            # *preview* in this narrow sidebar: it takes whatever width is
+            # left and elides, which keeps every other column readable
+            # instead of pushing them behind a horizontal scrollbar. The full
+            # payload is always shown in the detail panel on the right.
+            for column in range(view.model().columnCount()):
+                header.setSectionResizeMode(
+                    column,
+                    QHeaderView.Stretch if column == payload_column
+                    else QHeaderView.Interactive,
+                )
         self._size_table_columns(view, payload_column)
 
     def _size_table_columns(self, view: QTableView, payload_column: int) -> None:
         for column, width in enumerate(exemplar_widths(view.model(), self.theme)):
-            if column != payload_column:
-                view.setColumnWidth(column, width)
+            if column == payload_column:
+                if self.lite:
+                    view.setColumnWidth(column, self._lite_payload_column_width())
+                # else: Stretch-managed on the full edition -- see
+                # _configure_table.
+                continue
+            view.setColumnWidth(column, width)
+
+    def _lite_payload_column_width(self) -> int:
+        """Lite's own natural width for the payload column -- sized for
+        every byte the delegate can actually paint (see tables.
+        ByteHighlightDelegate) rather than Stretch's "whatever room is
+        left", so the table's natural total width can exceed the viewport
+        and scroll instead of eliding. Classic CAN's 8 bytes normally;
+        CAN FD's 64 only when FD is actually configured, never paid for by
+        every capture regardless -- see _apply_config_to_widgets, which
+        re-sizes both tables' payload columns whenever this could have
+        changed.
+        """
+        max_bytes = 64 if bool(self.config.get("source.live.fd", False)) else 8
+        metrics = QFontMetrics(self.theme.mono_font())
+        advance = metrics.horizontalAdvance("FF")
+        space = metrics.horizontalAdvance(" ")
+        width = max_bytes * advance + max(0, max_bytes - 1) * space
+        return width + 2 * SPACE_SM + 8
 
     def _build_status_bar(self) -> None:
         bar = self.statusBar()
@@ -1113,6 +1298,14 @@ class MainWindow(QMainWindow):
         delegate = self.id_view.itemDelegateForColumn(6)
         if isinstance(delegate, ByteHighlightDelegate):
             delegate.enabled = bool(self.config.get("ui.highlight_changed_bytes", True))
+
+        if self.lite:
+            # source.live.fd may just have changed (Settings) -- re-derive
+            # the payload column's own natural width (see
+            # _lite_payload_column_width) rather than leaving it sized for
+            # whichever FD state was configured at construction.
+            self._size_table_columns(self.id_view, 6)
+            self._size_table_columns(self.trace_view, 5)
 
         self._update_source_chip()
 
@@ -1954,6 +2147,7 @@ class MainWindow(QMainWindow):
         if stats is None:
             return
         self.interpret_view.show_frame(stats.frame, stats, self.id_model.time_base)
+        self._lite_note_frame_selected()
 
     # ------------------------------------------------------------------
     # selection & browsing
@@ -1989,6 +2183,12 @@ class MainWindow(QMainWindow):
         already_open = (self.top_stack.currentIndex() == self._STACK_BROWSER
                         and index == self.browser_stack.currentIndex())
         if already_open:
+            if self.lite:
+                # Lite's own table/details toggle (see _lite_toggle_detail)
+                # -- there is no partial "sidebar" split to flip in Lite,
+                # only ever a full-width table or a full-width detail pane.
+                self._lite_toggle_detail()
+                return
             # Flip the sidebar's own *current on-screen* state -- reading
             # self._sidebar_collapsed directly here (not self._selector_on[
             # index], which is only the operator's last *remembered*
@@ -2063,6 +2263,13 @@ class MainWindow(QMainWindow):
         """
         self.top_stack.setCurrentIndex(self._STACK_BROWSER)
         self._on_view_changed(index)
+        if self.lite:
+            # Lite always arrives at the table -- see the module's own
+            # Lite section; it does not keep a separate remembered
+            # selector state per page the way _selector_on does for the
+            # full edition.
+            self._lite_show_table()
+            return
         self.set_sidebar_collapsed(not self._selector_on[index], remember=False)
         # The operator's own remembered preference above may not actually
         # fit the window's current width (most commonly: arriving here for
@@ -2130,6 +2337,7 @@ class MainWindow(QMainWindow):
         self.interpret_view.show_frame(
             frame, self.id_model.stats_for_key(frame.key), self.id_model.time_base
         )
+        self._lite_note_frame_selected()
 
     def _on_trace_scrolled(self, value: int) -> None:
         bar = self.trace_view.verticalScrollBar()
@@ -2148,6 +2356,7 @@ class MainWindow(QMainWindow):
         self.interpret_view.show_frame(
             frame, self.id_model.stats_for_key(frame.key), self.id_model.time_base
         )
+        self._lite_note_frame_selected()
         self._activate_browser(self._NAV_TRACE)
 
     def _refresh_isotp(self) -> None:
@@ -2639,6 +2848,14 @@ class MainWindow(QMainWindow):
         self._selected_key = None
         self._playback_high_water = None
         self.interpret_view.reset_content()
+        if self.lite:
+            # Nothing is selected any more (above), so Details would only
+            # ever show an empty InterpretView -- return to the table and
+            # make Details unreachable again until a new selection exists,
+            # the same disabled-until-selected state _build_browser starts
+            # in. See _lite_note_frame_selected, its mirror image.
+            self.lite_details_button.setEnabled(False)
+            self._lite_show_table()
         self._dropped_seen = 0
 
         # Force ISO-TP's next survey to rebuild from the now-empty store
@@ -3634,7 +3851,19 @@ class MainWindow(QMainWindow):
         # overwhelming majority of calls, same as the three-tier scheme
         # this replaces already guaranteed. See resizeEvent's own docstring
         # on why that sweep must stay rare.
-        density_changed = self.theme.set_density(interpolated_density(width, height))
+        density = interpolated_density(width, height)
+        if self.lite:
+            # Lite targets a fixed small touchscreen and answers "content
+            # larger than the viewport" with scrolling (Messages/Trace's
+            # own horizontal scroll, InterpretView's own vertical one --
+            # see _build_browser/_build_ui), not with density shrinking
+            # legibility away -- see this module's own Lite section. This
+            # never *caps* density below floor_density's own floor
+            # argument: a Lite window on a larger host screen still grows
+            # past DENSITY_NORMAL via interpolated_density's own SPACIOUS
+            # anchors exactly as the full edition does.
+            density = floor_density(density, DENSITY_NORMAL)
+        density_changed = self.theme.set_density(density)
         if state_changed:
             self._responsive = state
             self.interpret_view.apply_responsive(state)
@@ -3704,7 +3933,17 @@ class MainWindow(QMainWindow):
         the next time the operator switches back to Messages/Trace,
         _activate_browser's own set_sidebar_collapsed call already applies
         whatever self._min_sidebar/_min_workspace currently are.
+
+        Lite (self.lite): there is no partial split to auto-collapse --
+        both of Lite's own states (_lite_show_table/_lite_show_details)
+        already give the current pane the *entire* splitter width, so
+        this delegates to _lite_reconcile_splitter instead, which simply
+        keeps that pane filling the splitter's actual current width after
+        a resize.
         """
+        if self.lite:
+            self._lite_reconcile_splitter()
+            return
         if self.top_stack.currentIndex() != self._STACK_BROWSER:
             return
         fits = self._current_content_width() >= (self._min_sidebar + self._min_workspace)
@@ -3737,8 +3976,11 @@ class MainWindow(QMainWindow):
         # construction. Messages is always the page open at construction
         # (browser_stack's own default), so its own remembered selector
         # state -- not Trace's -- is the one that applies here.
-        self.set_sidebar_collapsed(
-            not self._selector_on[self._NAV_MESSAGES], remember=False)
+        if self.lite:
+            self._lite_show_table()
+        else:
+            self.set_sidebar_collapsed(
+                not self._selector_on[self._NAV_MESSAGES], remember=False)
         # Real geometry exists now (see _current_content_width's own
         # docstring on why that matters) -- establish the initial
         # responsive classification from it, exactly as every later resize
@@ -3768,20 +4010,28 @@ class MainWindow(QMainWindow):
             self._investigation_window.close()
             self._investigation_window = None
         self.config.set("ui.window", {"width": self.width(), "height": self.height()})
-        if self.browser_panel.isVisible():
-            self._remember_width()
-        self.config.set("ui.sidebar_width", int(self._sidebar_width))
-        self.config.set("ui.sidebar_collapsed", not self.browser_panel.isVisible())
-        # The two independent, per-page memories -- see _selector_on. Read
-        # directly from that dict, not from browser_panel's own visibility:
-        # unlike the legacy key above, these must stay correct regardless
-        # of which page -- including ISO-TP, which hides browser_panel too
-        # without it meaning either selector is "collapsed" -- happens to
-        # be open at the moment the window closes.
-        self.config.set("ui.messages_sidebar_collapsed",
-                        not self._selector_on[self._NAV_MESSAGES])
-        self.config.set("ui.trace_sidebar_collapsed",
-                        not self._selector_on[self._NAV_TRACE])
+        if not self.lite:
+            # Lite has no partial-split "sidebar" concept of its own (see
+            # _lite_show_table/_lite_show_details) and never writes
+            # self._sidebar_collapsed/self._selector_on, so persisting
+            # these from Lite's own transient browser_panel/workspace_
+            # panel visibility would just overwrite the full edition's own
+            # remembered preference with a value that has nothing to do
+            # with it -- skipped entirely instead.
+            if self.browser_panel.isVisible():
+                self._remember_width()
+            self.config.set("ui.sidebar_width", int(self._sidebar_width))
+            self.config.set("ui.sidebar_collapsed", not self.browser_panel.isVisible())
+            # The two independent, per-page memories -- see _selector_on. Read
+            # directly from that dict, not from browser_panel's own visibility:
+            # unlike the legacy key above, these must stay correct regardless
+            # of which page -- including ISO-TP, which hides browser_panel too
+            # without it meaning either selector is "collapsed" -- happens to
+            # be open at the moment the window closes.
+            self.config.set("ui.messages_sidebar_collapsed",
+                            not self._selector_on[self._NAV_MESSAGES])
+            self.config.set("ui.trace_sidebar_collapsed",
+                            not self._selector_on[self._NAV_TRACE])
         try:
             self.config.save()
         except Exception:

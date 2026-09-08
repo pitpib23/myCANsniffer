@@ -268,6 +268,49 @@ def _min_density(a: Density, b: Density) -> Density:
     )
 
 
+def floor_density(density: Density, floor: Density) -> Density:
+    """Field-by-field "roomier wins" (max()) -- the mirror image of
+    _min_density's "more constrained wins" above. Raises every field of
+    ``density`` up to at least ``floor``'s own value, never down: a
+    ``density`` that is already roomier than ``floor`` on some or all axes
+    (e.g. a host screen bigger than ``floor`` itself) passes through those
+    fields unchanged, so this only ever raises a floor, never imposes a
+    ceiling.
+
+    Existing for exactly one caller: MainWindow's Lite edition, whose fixed
+    small-touchscreen target relies on scrolling (see cansniff/ui/
+    main_window.py's own Lite section) rather than density shrinking
+    everything down to fit -- passing ``floor=DENSITY_NORMAL`` there means
+    Lite's table/nav/chrome never renders smaller than the original
+    desktop's own normal-density sizing, while a Lite window on a larger
+    host screen can still grow past that via interpolated_density's own
+    SPACIOUS anchors exactly as before.
+
+    ``name`` becomes ``floor.name`` when every field actually landed on
+    ``floor``'s own value (the common case for a small-screen ``density``),
+    ``density.name`` when nothing needed raising, and "responsive"
+    otherwise (a genuine per-field mix, e.g. one axis already past floor
+    while another was not) -- this keeps every existing ``density.name==
+    "normal"``-style check elsewhere (SignalPlot.restyle, DatabaseWindow,
+    widgets.BitActivityMatrix) working correctly against a floored density,
+    with no changes needed at any of those call sites.
+    """
+    fields = (
+        "margin", "spacing", "tight_spacing", "row_height", "button_pad_v",
+        "button_pad_h", "input_pad_v", "input_pad_h", "header_pad_v",
+        "header_pad_h", "cell_pad_v", "cell_pad_h", "nav_width",
+        "nav_button_height", "chip_max_width", "font_delta",
+    )
+    merged = {name: max(getattr(density, name), getattr(floor, name)) for name in fields}
+    if all(merged[name] == getattr(floor, name) for name in fields):
+        merged["name"] = floor.name
+    elif all(merged[name] == getattr(density, name) for name in fields):
+        merged["name"] = density.name
+    else:
+        merged["name"] = "responsive"
+    return Density(**merged)
+
+
 #: Anchor points for continuous density interpolation: ascending
 #: (dimension, Density) pairs. Below the first anchor's dimension, density
 #: is clamped to that anchor (never more compact than ULTRA); above the
@@ -348,5 +391,5 @@ __all__ = [
     "classify_width", "classify_height", "WIDTH_COMPACT", "WIDTH_ULTRA",
     "HEIGHT_COMPACT", "HEIGHT_ULTRA", "Density", "DENSITY_NORMAL",
     "DENSITY_COMPACT", "DENSITY_ULTRA", "DENSITY_SPACIOUS", "density_for",
-    "interpolated_density", "MIN_FONT_PT",
+    "interpolated_density", "floor_density", "MIN_FONT_PT",
 ]

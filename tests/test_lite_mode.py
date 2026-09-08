@@ -140,25 +140,42 @@ class MainWindowNavigationTests(unittest.TestCase):
         window._activate_browser(window._NAV_MESSAGES)
         self.assertEqual(window.top_stack.currentIndex(), window._STACK_BROWSER)
 
-    def test_lite_messages_trace_nav_click_matches_full_edition_behavior(self):
-        """The one nav behavior Lite keeps -- clicking Messages/Trace opens/
-        toggles the packet-list sidebar (see _on_nav_clicked) -- must work
-        identically in both editions: same _sidebar_collapsed bookkeeping,
-        same browser_stack page swap.
+    def test_full_edition_messages_nav_click_still_toggles_the_sidebar(self):
+        """Unchanged full-edition behavior: clicking the already-open
+        Messages/Trace destination toggles the packet-list sidebar (see
+        _on_nav_clicked/set_sidebar_collapsed) -- same _sidebar_collapsed
+        bookkeeping as before this iteration's Lite-only layout changes.
         """
-        for lite in (False, True):
-            with self.subTest(lite=lite):
-                window = self._window(lite=lite)
-                window.show()
-                self.app.processEvents()
-                self.assertFalse(window._sidebar_collapsed)
-                window.nav.group.button(window._NAV_MESSAGES).click()
-                self.assertTrue(window._sidebar_collapsed)
-                window.nav.group.button(window._NAV_MESSAGES).click()
-                self.assertFalse(window._sidebar_collapsed)
-                window.nav.group.button(window._NAV_TRACE).click()
-                self.assertEqual(window.browser_stack.currentIndex(), window._NAV_TRACE)
-                self.assertEqual(window.section_label.text(), "Trace")
+        window = self._window(lite=False)
+        window.show()
+        self.app.processEvents()
+        self.assertFalse(window._sidebar_collapsed)
+        window.nav.group.button(window._NAV_MESSAGES).click()
+        self.assertTrue(window._sidebar_collapsed)
+        window.nav.group.button(window._NAV_MESSAGES).click()
+        self.assertFalse(window._sidebar_collapsed)
+        window.nav.group.button(window._NAV_TRACE).click()
+        self.assertEqual(window.browser_stack.currentIndex(), window._NAV_TRACE)
+        self.assertEqual(window.section_label.text(), "Trace")
+
+    def test_lite_messages_nav_click_toggles_table_details_instead(self):
+        """Lite's own redesigned table-primary layout (see
+        cansniff/ui/main_window.py's Lite section): re-clicking the
+        already-open destination toggles table/details instead of a
+        partial sidebar split -- see tests/test_lite_layout.py for the
+        full table/Details/Back coverage; this only pins down that the
+        *nav click* path still reaches it and switching sections still
+        works.
+        """
+        window = self._window(lite=True)
+        window.show()
+        self.app.processEvents()
+        self.assertFalse(window._lite_detail_open)
+        self.assertTrue(window.browser_panel.isVisible())
+        window.nav.group.button(window._NAV_TRACE).click()
+        self.assertEqual(window.browser_stack.currentIndex(), window._NAV_TRACE)
+        self.assertEqual(window.section_label.text(), "Trace")
+        self.assertTrue(window.browser_panel.isVisible())
 
 
 @unittest.skipUnless(HAVE_QT, "PySide6 not available")
