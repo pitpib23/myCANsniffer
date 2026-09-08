@@ -656,8 +656,10 @@ class MainWindow(QMainWindow):
             # is simply reached by scrolling down, like any ordinary page.
             # A second, nested scroll area around InterpretView alone
             # would just be redundant here -- this single one already
-            # owns the whole page cleanly.
-            self.interpret_view = InterpretView(self.config, self.theme)
+            # owns the whole page cleanly -- including the one Plot's own
+            # _build_plot would otherwise add just for itself; see
+            # InterpretView's own ``lite`` parameter.
+            self.interpret_view = InterpretView(self.config, self.theme, lite=True)
             page = QWidget()
             page_layout = QVBoxLayout(page)
             page_layout.setContentsMargins(SPACE_MD, SPACE_MD, SPACE_MD, SPACE_MD)

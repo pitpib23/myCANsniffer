@@ -131,10 +131,24 @@ def _block_key(word) -> BlockKey:
 class InterpretView(QWidget):
     """Live interpretation of the selected ID's payload."""
 
-    def __init__(self, config: Config, theme: Theme, parent: Optional[QWidget] = None):
+    def __init__(self, config: Config, theme: Theme, parent: Optional[QWidget] = None,
+                 lite: bool = False):
+        """``lite``: MainWindow's own Lite edition (see its docstring)
+        already wraps this whole widget in one page-owning QScrollArea
+        (see main_window.py's own Lite section), so Plot's own nested one
+        -- see _build_plot's docstring on why it exists for the full
+        edition -- would just be a second, redundant scroll boundary that
+        actively hides the chart behind its own small internal scrollbar
+        instead of letting the outer page grow to show it. Skipped only
+        for that one page, only when lite; every other page/behavior here
+        (Blocks/Signals/Range, show_frame, set_section, Bit Activity, the
+        payload strip, signal decoding) is untouched regardless. Defaults
+        to False so every existing call site is unaffected.
+        """
         super().__init__(parent)
         self.config = config
         self.theme = theme
+        self.lite = lite
 
         self._frame: Optional[CanFrame] = None
         self._stats: Optional[FrameStats] = None
@@ -717,6 +731,17 @@ class InterpretView(QWidget):
 
         self.plot = SignalPlot(self.theme)
         layout.addWidget(self.plot, 1)
+        if self.lite:
+            # Lite already wraps this whole view in one page-owning
+            # QScrollArea (see __init__'s own docstring) -- a second,
+            # nested one here would silently cap the chart to whatever
+            # small viewport it ends up with and hide the rest behind its
+            # own internal scrollbar instead of letting the outer page
+            # grow to show it, which is exactly what this project's Lite
+            # edition wants: a readable, full-size chart, reached by
+            # scrolling the page, never a plot that is itself a
+            # scrollable viewport.
+            return container
         # scrollable(), not a bare container: Plot's chooser row has a real,
         # largely fixed minimum width of its own that must never propagate
         # through self.workspace (a CurrentPageStack -- see widgets.py) up to
