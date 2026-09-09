@@ -1015,9 +1015,18 @@ class MainWindow(QMainWindow):
         title.setObjectName("AppTitle")
         title_block.addWidget(title)
         primary_row.addLayout(title_block)
-        # Lowers only the hard floor, same reasoning as _bar_button below —
-        # the title still shows in full at any realistic window width.
-        title.setMinimumWidth(min(title.sizeHint().width(), self._BAR_BUTTON_MIN_WIDTH))
+        # Unlike _bar_button below, this floor is never lowered past the
+        # label's own natural width: a QPushButton's sizeHint bakes in
+        # style padding beyond its text, so shrinking one a little only
+        # eats padding: a plain QLabel has none, so the same trick would
+        # clip actual glyphs off the app's own name with no ellipsis to
+        # show it happened -- found on Lite's real 800px touchscreen,
+        # where the primary row is tight enough for this to bind ("CAN
+        # Sniffer" rendered as "CAN Sniffe"). Title text is short and its
+        # sizeHint already small, so never shrinking it below that costs
+        # only a few px elsewhere in the row, well within what the other
+        # controls' own floors already tolerate.
+        title.setMinimumWidth(title.sizeHint().width())
 
         primary_row.addSpacing(SPACE_LG)
 

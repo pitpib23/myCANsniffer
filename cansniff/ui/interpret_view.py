@@ -376,8 +376,23 @@ class InterpretView(QWidget):
         # The disclosure sits at the left edge under the strip because that is
         # where the thing it opens appears; the chips are reference detail and
         # read fine parked on the right.
-        row = QHBoxLayout()
-        row.setSpacing(SPACE_SM)
+        #
+        # A FlowLayout of the two groups, not one long QHBoxLayout: six
+        # chips plus the disclosure and its legend easily exceed 700px laid
+        # out in a single line, which on an 800px-wide touchscreen forced
+        # this whole card -- and so the Lite workspace around it -- into a
+        # horizontal scrollbar (see widgets.FlowLayout and _build_controls
+        # below, the same idiom already used for this). Each group keeps
+        # its own internal QHBoxLayout so its members stay visually
+        # clustered; only the two groups themselves reflow, wrapping onto a
+        # second line once the width offered is too narrow for both.
+        row_container = QWidget()
+        row = FlowLayout(row_container, margin=0, spacing=SPACE_SM)
+
+        disclosure_group = QWidget()
+        disclosure_row = QHBoxLayout(disclosure_group)
+        disclosure_row.setContentsMargins(0, 0, 0, 0)
+        disclosure_row.setSpacing(SPACE_SM)
 
         self.bits_toggle = QPushButton(_BITS_LABEL.format("▾"))
         self.bits_toggle.setObjectName("Disclosure")
@@ -385,16 +400,20 @@ class InterpretView(QWidget):
         self.bits_toggle.setCursor(Qt.PointingHandCursor)
         self.bits_toggle.setToolTip("How often each bit flipped over recent frames")
         self.bits_toggle.toggled.connect(self._on_bits_toggled)
-        row.addWidget(self.bits_toggle)
+        disclosure_row.addWidget(self.bits_toggle)
 
         self.bits_caption = QLabel("")
         self.bits_caption.setObjectName("Muted")
-        row.addWidget(self.bits_caption)
+        disclosure_row.addWidget(self.bits_caption)
 
         self.bits_legend = ActivityLegend(self.theme)
-        row.addWidget(self.bits_legend)
+        disclosure_row.addWidget(self.bits_legend)
+        row.addWidget(disclosure_group)
 
-        row.addStretch(1)
+        identity_group = QWidget()
+        identity_row = QHBoxLayout(identity_group)
+        identity_row.setContentsMargins(0, 0, 0, 0)
+        identity_row.setSpacing(SPACE_SM)
 
         # The selected block's byte range, next to the chips it qualifies.
         self.selection_label = QLabel("")
@@ -408,7 +427,7 @@ class InterpretView(QWidget):
         # label happens to be, purely from switching modes. Same idiom as
         # workspace_note below.
         self.selection_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        row.addWidget(self.selection_label)
+        identity_row.addWidget(self.selection_label)
 
         self.chip_channel = Chip("", "muted", self.theme)
         self.chip_fmt = Chip("", "muted", self.theme)
@@ -419,9 +438,10 @@ class InterpretView(QWidget):
         for chip in (self.chip_channel, self.chip_fmt, self.chip_len,
                      self.chip_dlc, self.chip_rate, self.chip_count):
             chip.setVisible(False)
-            row.addWidget(chip)
+            identity_row.addWidget(chip)
+        row.addWidget(identity_group)
 
-        grid.addLayout(row, 1, 0, 1, 3)
+        grid.addWidget(row_container, 1, 0, 1, 3)
 
     def _build_payload_detail(self) -> QWidget:
         """Row 2: everything that collapses away, aligned under the strip."""
