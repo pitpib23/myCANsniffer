@@ -17,7 +17,7 @@ from ..analysis.profile import (
     IntegrityStatus, SourceState, TrafficProfileSnapshot,
 )
 from .theme import SPACE_LG, SPACE_MD, SPACE_SM, Theme
-from .widgets import ResponsiveDialog
+from .widgets import ResponsiveDialog, enable_touch_scrolling
 
 
 def _count(value: int) -> str:
@@ -97,6 +97,7 @@ class BusOverviewDialog(ResponsiveDialog):
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.NoFrame)
         scroll.setWidget(body)
+        enable_touch_scrolling(scroll)
         outer.addWidget(scroll, 1)
 
     def _group(self, title, rows):

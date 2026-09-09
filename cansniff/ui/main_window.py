@@ -20,9 +20,9 @@ from typing import Dict, List, Optional, Tuple
 from PySide6.QtCore import QObject, QThread, Qt, QTimer, Signal, Slot
 from PySide6.QtGui import QAction, QFontMetrics, QKeySequence
 from PySide6.QtWidgets import (
-    QAbstractItemView, QAbstractScrollArea, QApplication, QComboBox, QFileDialog,
+    QAbstractItemView, QApplication, QComboBox, QFileDialog,
     QFrame, QHBoxLayout, QHeaderView, QLabel, QMainWindow, QMessageBox, QPushButton,
-    QScrollArea, QScroller, QSizePolicy, QSplitter, QStackedWidget, QTableView,
+    QScrollArea, QSizePolicy, QSplitter, QStackedWidget, QTableView,
     QVBoxLayout, QWidget,
 )
 
@@ -89,7 +89,7 @@ from .responsive import (
 from .theme import ROW_HEIGHT_COMPACT, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XS, Theme
 from .widgets import (
     Chip, CurrentPageStack, FlowLayout, MetricChip, NavRail, SectionLabel,
-    fit_top_level_to_screen, scrollable,
+    enable_touch_scrolling, fit_top_level_to_screen, scrollable,
 )
 
 log = logging.getLogger(__name__)
@@ -126,25 +126,11 @@ _WORKSPACE_MIN_BY_WIDTH_CLASS = {
 _LITE_TABLE_VISIBLE_ROWS = 8
 
 
-def _enable_touch_scrolling(view: QAbstractScrollArea) -> None:
-    """Kinetic touch-drag scrolling for a Lite table or scroll area, via
-    Qt's own QScroller -- no new dependency (QScroller ships with
-    QtWidgets). Works identically for a QTableView (row scrolling) and a
-    QScrollArea (the whole Lite workspace page, see _build_ui) -- both are
-    QAbstractScrollArea, each with their own ``viewport()``.
-
-    LeftMouseButtonGesture makes an ordinary press-and-drag (touch or
-    mouse) pan the view; Qt's own gesture recognizer still delivers a
-    plain click through untouched when the press releases without
-    dragging past its movement threshold, so row selection and the
-    existing scrollbars/mouse wheel are unaffected -- see
-    tests/test_lite_layout.py's own click-still-selects coverage. Grabbed
-    only on the viewport it is called with, never a descendant -- a
-    QChartView (Plot's own rubber-band zoom drag) living inside the
-    Lite workspace scroll area gets first claim on its own mouse events
-    regardless, so this never steals the plot's own pan/zoom gesture.
-    """
-    QScroller.grabGesture(view.viewport(), QScroller.LeftMouseButtonGesture)
+#: Local alias kept for the two Lite call sites below (id_view/trace_view,
+#: and lite_workspace_scroll before scrollable() existed for it) -- the
+#: real implementation is shared with every other scrollable() page/dialog
+#: across both editions, see widgets.enable_touch_scrolling.
+_enable_touch_scrolling = enable_touch_scrolling
 
 
 class _ProtocolSurveyWorker(QObject):
@@ -1089,22 +1075,42 @@ class MainWindow(QMainWindow):
         # One button, one concept: a DBC's message-bound signals and the old
         # "scaled value" byte rules are both just Signals now — see
         # analysis/signals.py and ui/database_window.py.
-        for text, slot, tip in (
+        #
+        # Lite drops Project and Capture filters -- both open a dialog
+        # built for a desktop workflow (multi-field project annotation/
+        # reporting; an add/edit/reorder list of capture rules) that does
+        # not belong on a 7-inch kiosk touchscreen. Neither backend is
+        # touched: an existing project or capture-filter set set up from
+        # the full edition (same config file) still applies exactly as
+        # before -- see _show_investigation/_edit_filters, still defined
+        # and still used by the full edition's own button -- only Lite's
+        # own entry point to them is gone.
+        secondary_buttons = [
             ("BUS", self._show_bus_overview,
              "Show factual session traffic and capture-integrity observations"),
-            ("Project", self._show_investigation,
-             "New, open, save, annotate and report an investigation project"),
+        ]
+        if not self.lite:
+            secondary_buttons.append(
+                ("Project", self._show_investigation,
+                 "New, open, save, annotate and report an investigation project"))
+        secondary_buttons.append(
             ("Database", self._edit_database_window,
              "Create, import, export and edit signal databases, and choose "
-             "which one — if any — decodes captured traffic"),
-            ("Open capture", self._open_capture, "Load a capture file for offline playback"),
+             "which one — if any — decodes captured traffic"))
+        secondary_buttons.append(
+            ("Open capture", self._open_capture, "Load a capture file for offline playback"))
+        secondary_buttons.append(
             ("Export", self._export_capture,
-             "Write the observed frames to ASC, candump, CSV or JSONL"),
-            ("Capture filters", self._edit_filters,
-             "Choose which frames are received. To hide rows you have already "
-             "captured, use the filter bar above the table."),
-            ("Settings", self._edit_settings, "Source, capture, display and raw configuration"),
-        ):
+             "Write the observed frames to ASC, candump, CSV or JSONL"))
+        if not self.lite:
+            secondary_buttons.append(
+                ("Capture filters", self._edit_filters,
+                 "Choose which frames are received. To hide rows you have already "
+                 "captured, use the filter bar above the table."))
+        secondary_buttons.append(
+            ("Settings", self._edit_settings, "Source, capture, display and raw configuration"))
+
+        for text, slot, tip in secondary_buttons:
             secondary_row.addWidget(
                 self._bar_button(text, slot=slot, ghost=True, tip=tip))
         return bar

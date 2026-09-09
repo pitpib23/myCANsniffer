@@ -15,7 +15,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QApplication, QButtonGroup, QDialog, QFrame, QHBoxLayout, QLabel,
-    QLayout, QPushButton, QScrollArea,
+    QLayout, QPushButton, QScrollArea, QScroller,
     QSizePolicy, QStackedWidget, QStyle, QStyledItemDelegate,
     QStyleOptionViewItem, QVBoxLayout, QWidget, QWidgetItem,
 )  # noqa: F401  (QSizePolicy used by NavRail and PayloadStrip)
@@ -133,6 +133,26 @@ class CurrentPageStack(QStackedWidget):
                 else super().minimumSizeHint())
 
 
+def enable_touch_scrolling(area) -> None:
+    """Kinetic touch-drag scrolling for any QAbstractScrollArea, via Qt's own
+    QScroller -- no new dependency (QScroller ships with QtWidgets). Works
+    identically for a QTableView (row scrolling) and a QScrollArea (a whole
+    page wrapped by :func:`scrollable`, or a dialog's own hand-built one) --
+    both are QAbstractScrollArea, each with their own ``viewport()``.
+
+    LeftMouseButtonGesture makes an ordinary press-and-drag (touch or mouse)
+    pan the view; Qt's own gesture recognizer still delivers a plain click
+    through untouched when the press releases without dragging past its
+    movement threshold, so row selection, buttons and the existing
+    scrollbars/mouse wheel are unaffected. Grabbed only on the viewport it
+    is called with, never a descendant -- a QChartView (Plot's own
+    rubber-band zoom drag) living inside a scrolled page gets first claim on
+    its own mouse events regardless, so this never steals a child widget's
+    own pan/zoom gesture.
+    """
+    QScroller.grabGesture(area.viewport(), QScroller.LeftMouseButtonGesture)
+
+
 def scrollable(content: QWidget) -> QScrollArea:
     """Wrap a page that can genuinely need more room than the viewport gives
     it, so the overflow scrolls instead of either clipping below the
@@ -164,6 +184,12 @@ def scrollable(content: QWidget) -> QScrollArea:
     time would just nest two scrollbars over the same content for no
     benefit. Use this only for a page whose own natural size can exceed the
     viewport as a *whole page*, not row-by-row.
+
+    Also arms kinetic touch-drag scrolling (see enable_touch_scrolling) on
+    the wrapper, so a page reached this way -- a Settings tab, ISO-TP,
+    Protocols, Compare, a Lite workspace -- can be panned by touch as well
+    as by scrollbar or wheel, since every place this is used ends up on a
+    touchscreen-facing surface sooner or later.
     """
     scroll = QScrollArea()
     scroll.setObjectName("WorkspaceScroll")
@@ -176,6 +202,7 @@ def scrollable(content: QWidget) -> QScrollArea:
     scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
     scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
     scroll.setWidget(content)
+    enable_touch_scrolling(scroll)
     return scroll
 
 

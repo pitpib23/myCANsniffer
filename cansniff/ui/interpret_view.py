@@ -38,7 +38,7 @@ from .theme import (
 from .widgets import (
     CELL_PADDING, MONO_ROLE, TONE_ROLE, ActivityLegend, BitMatrix, Chip,
     CurrentPageStack, EmptyState, FlowLayout, InterpretCellDelegate,
-    PayloadStrip, SectionLabel, Segmented, scrollable,
+    PayloadStrip, SectionLabel, Segmented, enable_touch_scrolling, scrollable,
 )
 
 _BLOCK_SIZES = [1, 2, 4, 8]
@@ -339,6 +339,10 @@ class InterpretView(QWidget):
         self.strip_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.strip_scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.strip_scroll.setFixedHeight(self.strip.sizeHint().height() + 14)
+        # Wide CAN-FD payloads (up to 64 bytes) can exceed the viewport --
+        # touch-drag to reach the rest, same as tapping a byte still works
+        # (see enable_touch_scrolling).
+        enable_touch_scrolling(self.strip_scroll)
         grid.addWidget(self.strip_scroll, 0, 1)
 
         actions = QHBoxLayout()
@@ -438,6 +442,7 @@ class InterpretView(QWidget):
         self.matrix_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.matrix_scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.matrix_scroll.setFixedHeight(self.bit_matrix.sizeHint().height() + 14)
+        enable_touch_scrolling(self.matrix_scroll)
         # The strip scrolls with it, so the columns stay under their bytes.
         self.matrix_scroll.horizontalScrollBar().valueChanged.connect(
             self.strip_scroll.horizontalScrollBar().setValue
