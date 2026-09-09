@@ -55,7 +55,7 @@ from PySide6.QtWidgets import (
 
 from ..discovery import DEFAULT_SCAN_DURATION, MIN_SCAN_DURATION
 from .theme import SPACE_LG, SPACE_MD, SPACE_SM, Theme
-from .widgets import FlowLayout, ResponsiveDialog
+from .widgets import FlowLayout, ResponsiveDialog, enable_touch_scrolling
 
 _TABLE_HEADERS = (
     "Bitrate", "Score", "Persistent ID", "Bucket Stability", "Singleton/Churn",
@@ -253,6 +253,7 @@ class AutoScanDialog(ResponsiveDialog):
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.table.itemSelectionChanged.connect(self._update_start_listening_enabled)
+        enable_touch_scrolling(self.table)
         outer.addWidget(self.table, 1)
 
         self.status_label = QLabel("")
