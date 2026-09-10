@@ -220,10 +220,22 @@ class MinimumSizeStabilityTests(WindowCase):
         card, so their own minimum must move exactly as little as it did
         before this file's original bug fix: the width must never move at
         all -- that dimension is exactly what Plot's control row (1193px on
-        its own) used to leak straight through -- and height is allowed
-        only the small, bounded wobble Blocks' own extra controls row
-        (block size / byte range, ~35-40px, deliberate chrome, not leaked
-        content) has always added.
+        its own) used to leak straight through.
+
+        Height is allowed a wider, still-bounded wobble than it used to:
+        Blocks' own extra controls row (block size / byte range, ~35-40px)
+        was always deliberate chrome, not leaked content: baseline is
+        captured on Range, and Range's own table is now sized to its
+        actual row count (one per payload byte, up to
+        _RANGE_TABLE_MAX_ROWS -- see InterpretView._size_range_table)
+        rather than an ordinary QTableWidget's own small default minimum,
+        so Range's own baseline is now taller by however many payload
+        bytes this fixture's frames carry (8, here) than it used to be --
+        real content, not a leak, but real enough to need a wider bound
+        than the other three modes' own small, roughly-constant chrome
+        needs. 220px covers this fixture's own 8-byte payload with a
+        little headroom; it does not need to cover _RANGE_TABLE_MAX_ROWS'
+        own worst case, since this fixture's own frames never vary.
 
         ISO-TP has no equivalent here any more: it is not one of
         InterpretView's own modes at all now, and does not hide or show
@@ -238,7 +250,7 @@ class MinimumSizeStabilityTests(WindowCase):
             hint = self.window.interpret_view.minimumSizeHint()
             self.assertEqual(hint.width(), baseline.width(),
                              "minimum width drifted after selecting mode {}".format(mode))
-            self.assertLessEqual(abs(hint.height() - baseline.height()), 40,
+            self.assertLessEqual(abs(hint.height() - baseline.height()), 220,
                                  "minimum height drifted after selecting mode {}".format(mode))
 
     def test_isotp_page_minimum_never_exceeds_the_browser_workspace_baseline(self):

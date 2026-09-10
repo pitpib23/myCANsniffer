@@ -54,8 +54,25 @@ _DEFAULT_PLOT_WINDOW = 2
 #: one that happens to be registered.
 _DEFAULT_PLOT_DECODERS = {1: "u8", 2: "u16_be", 4: "u32_be", 8: "u64_be"}
 
+#: Touch-height floor for Lite's own Plot controls -- same figure and same
+#: reasoning as auto_scan_dialog.py's own _LITE_BUTTON_HEIGHT (WCAG's and
+#: Material's ~44-48px minimum comfortable touch target), applied here
+#: because these controls were found live, on the real 800x480 touchscreen,
+#: rendering at 22px -- half that floor -- with no Lite override of their
+#: own. See _build_plot's own Lite branch.
+_LITE_TOUCH_HEIGHT = 44
+
 #: Disclosure caption; {} carries the chevron for the open/closed state.
 _BITS_LABEL = "{}  Bit activity"
+
+#: Range State's own row-count ceiling: sized to its *actual* row count
+#: (one row per payload byte) up to this many rows, rather than either
+#: reserving this much height unconditionally (a 2-3 byte message would
+#: sit in a mostly-empty box) or growing without bound (a 64-byte CAN FD
+#: payload would push everything below it -- Plot, on the same page in
+#: Lite -- out of easy reach). Past this many rows the table's own
+#: ordinary internal scrollbar takes over -- see _refresh_range.
+_RANGE_TABLE_MAX_ROWS = 12
 
 #: Analysis modes. Stable identifiers -- MainWindow, tests and the
 #: `self.workspace` QStackedWidget all address a page by one of these,
@@ -679,24 +696,53 @@ class InterpretView(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(SPACE_SM)
 
-        # Row 1: what to plot, read how, over how long.
-        chooser = QHBoxLayout()
-        chooser.setSpacing(SPACE_MD)
+        # Row 1: what to plot, read how, over how long -- a FlowLayout of
+        # small groups, not one fixed QHBoxLayout, for the same reason
+        # _build_controls above already is one: at normal desktop width all
+        # four groups sit on one line exactly as a fixed row would, but on
+        # an 800px touchscreen they wrap instead of forcing a horizontal
+        # scrollbar. Found live, on real hardware: with Signal also
+        # offered (a message the loaded database describes), the fixed
+        # row's own natural width ran past the viewport and hid Window
+        # entirely behind a scrollbar an operator had no reason to expect
+        # a *toolbar* to have. See widgets.FlowLayout.
+        #
+        # Lite only: the full edition's own window is never narrow enough
+        # for this to matter, and FlowLayout's own sizeHint()/minimumSize()
+        # (see widgets.py) does not scale cleanly to every context this
+        # exact row has to work in on the full edition's side -- a
+        # generous window still triggered this page's own scrollable()
+        # wrapper unnecessarily, found live via this file's own regression
+        # suite, tracing back to how a hasHeightForWidth layout's sizeHint
+        # is derived from heightForWidth at its own *minimum* width (Qt's
+        # QLayout::totalSizeHint()) -- worth revisiting generically another
+        # time, not as a side effect of a Lite-only touch-target fix.
+        chooser_container = QWidget()
+        if self.lite:
+            chooser = FlowLayout(chooser_container, margin=0, spacing=SPACE_MD)
+        else:
+            chooser = QHBoxLayout(chooser_container)
+            chooser.setContentsMargins(0, 0, 0, 0)
+            chooser.setSpacing(SPACE_MD)
 
-        size_group = QHBoxLayout()
-        size_group.setSpacing(SPACE_SM)
-        size_group.addWidget(SectionLabel("Block size", self.theme))
+        size_group = QWidget()
+        size_row = QHBoxLayout(size_group)
+        size_row.setContentsMargins(0, 0, 0, 0)
+        size_row.setSpacing(SPACE_SM)
+        size_row.addWidget(SectionLabel("Block size", self.theme))
         self.plot_size = Segmented([str(n) for n in _BLOCK_SIZES], 1)
         self.plot_size.setToolTip(
             "Bytes per block. Wider blocks unlock the wider decoders."
         )
         self.plot_size.changed.connect(self._on_plot_block_size)
-        size_group.addWidget(self.plot_size)
-        chooser.addLayout(size_group)
+        size_row.addWidget(self.plot_size)
+        chooser.addWidget(size_group)
 
-        read_group = QHBoxLayout()
-        read_group.setSpacing(SPACE_SM)
-        read_group.addWidget(SectionLabel("Read as", self.theme))
+        read_group = QWidget()
+        read_row = QHBoxLayout(read_group)
+        read_row.setContentsMargins(0, 0, 0, 0)
+        read_row.setSpacing(SPACE_SM)
+        read_row.addWidget(SectionLabel("Read as", self.theme))
         self.plot_decoder = QComboBox()
         self.plot_decoder.setMinimumWidth(150)
         self.plot_decoder.setToolTip(
@@ -704,9 +750,13 @@ class InterpretView(QWidget):
             "Only decoders that fit the block width are offered."
         )
         self.plot_decoder.currentIndexChanged.connect(self._on_plot_decoder)
-        read_group.addWidget(self.plot_decoder)
-        chooser.addLayout(read_group)
+        read_row.addWidget(self.plot_decoder)
+        chooser.addWidget(read_group)
 
+        signal_group = QWidget()
+        signal_row = QHBoxLayout(signal_group)
+        signal_row.setContentsMargins(0, 0, 0, 0)
+        signal_row.setSpacing(SPACE_SM)
         self.plot_signal_label = SectionLabel("Signal", self.theme)
         self.plot_signal = QComboBox()
         self.plot_signal.setMinimumWidth(180)
@@ -719,14 +769,22 @@ class InterpretView(QWidget):
         # entry that is already current still has to switch the plot away from
         # a raw block. currentIndexChanged alone does not fire for that.
         self.plot_signal.activated.connect(self._on_plot_signal)
-        chooser.addWidget(self.plot_signal_label)
-        chooser.addWidget(self.plot_signal)
+        signal_row.addWidget(self.plot_signal_label)
+        signal_row.addWidget(self.plot_signal)
+        chooser.addWidget(signal_group)
 
-        chooser.addStretch(1)
+        if not self.lite:
+            # Only meaningful for a fixed QHBoxLayout: pushes Window to the
+            # row's right edge, exactly as before this file's own history
+            # added Lite's FlowLayout branch above. FlowLayout has no
+            # matching concept -- its groups simply wrap.
+            chooser.addStretch(1)
 
-        window_group = QHBoxLayout()
-        window_group.setSpacing(SPACE_SM)
-        window_group.addWidget(SectionLabel("Window", self.theme))
+        window_group = QWidget()
+        window_row = QHBoxLayout(window_group)
+        window_row.setContentsMargins(0, 0, 0, 0)
+        window_row.setSpacing(SPACE_SM)
+        window_row.addWidget(SectionLabel("Window", self.theme))
         self.plot_window = Segmented([label for label, _s in _PLOT_WINDOWS],
                                      _DEFAULT_PLOT_WINDOW)
         self.plot_window.setToolTip(
@@ -734,17 +792,40 @@ class InterpretView(QWidget):
             "frame of this message."
         )
         self.plot_window.changed.connect(self._on_plot_window)
-        window_group.addWidget(self.plot_window)
-        chooser.addLayout(window_group)
-        layout.addLayout(chooser)
+        window_row.addWidget(self.plot_window)
+        chooser.addWidget(window_group)
+        layout.addWidget(chooser_container)
+
+        if self.lite:
+            # Found live, on the physical touchscreen: every one of these
+            # controls rendered at 22px tall -- under half the ~44-48px
+            # minimum comfortable touch target (WCAG 2.5.5/Material
+            # Design) -- with no Lite floor of its own, unlike the primary
+            # top-bar buttons and Auto Scan's own controls elsewhere in
+            # this project. A *minimum*, same spirit as those: nothing
+            # about how any of this looks at a normal desktop width
+            # changes.
+            for segmented in (self.plot_size, self.plot_window):
+                for button in segmented.group.buttons():
+                    button.setMinimumHeight(_LITE_TOUCH_HEIGHT)
+            for combo in (self.plot_decoder, self.plot_signal):
+                combo.setMinimumHeight(_LITE_TOUCH_HEIGHT)
 
         # No row of block buttons here. The payload strip at the top of the
         # panel is already a row of byte cells that highlights a selected
         # block, and duplicating it below the toolbar meant two controls for
         # one choice — with the real bytes shown only in the one further away.
         # Clicking the strip picks the block; see _on_byte_clicked.
+        #
+        # "...instead", not "...to plot the block starting there": opening
+        # Plot already plots something -- the first database signal this
+        # message has, or byte 0 raw when it has none (see
+        # _reload_plot_choices) -- so by the time this is ever on screen,
+        # a chart is already showing. Found live: the original wording
+        # read as though nothing had happened yet, sitting directly above
+        # a chart proving otherwise.
         self.plot_hint = QLabel(
-            "Click a byte in the payload above to plot the block starting there.")
+            "Click a byte in the payload above to plot it instead.")
         self.plot_hint.setObjectName("Muted")
         layout.addWidget(self.plot_hint)
 
@@ -967,6 +1048,7 @@ class InterpretView(QWidget):
         state = self._range_cache.get(window, self._frame.key)
         table = self.range_table
         table.setRowCount(len(state.bytes))
+        self._size_range_table(len(state.bytes))
         for row, stat in enumerate(state.bytes):
             behaviour = "constant" if stat.constant else "{} of 256 values".format(
                 stat.distinct)
@@ -992,6 +1074,28 @@ class InterpretView(QWidget):
                 ", ".join("{}B x{}".format(k, v)
                           for k, v in sorted(state.lengths.items())))
         self.workspace_note.setText(note)
+
+    def _size_range_table(self, row_count: int) -> None:
+        """Height that fits exactly ``row_count`` rows, up to
+        _RANGE_TABLE_MAX_ROWS -- never a fixed reservation for the
+        ceiling regardless of how few bytes this message actually has,
+        and never taller than the ceiling regardless of how many it does.
+        Past it, the table's own already-standard internal scrollbar
+        (QAbstractScrollArea, like every other table in this project)
+        reaches the rest -- nothing new to learn, and nothing pushes Plot
+        (on the same page below this, in Lite) out of easy reach on a
+        wide CAN FD payload's 64-row table.
+
+        An explicit fixed height, not a size policy change: it overrides
+        whatever stretch this table's container would otherwise give it,
+        regardless of that container's own layout (CurrentPageStack here,
+        but this must not assume that never changes).
+        """
+        table = self.range_table
+        header_height = table.horizontalHeader().sizeHint().height()
+        frame = 2 * table.frameWidth()
+        rows = min(row_count, _RANGE_TABLE_MAX_ROWS)
+        table.setFixedHeight(header_height + frame + rows * ROW_HEIGHT)
 
     # -- plot ------------------------------------------------------------
 
@@ -1695,7 +1799,18 @@ class InterpretView(QWidget):
     def _highlight_plot_block(self) -> None:
         """Mark the plotted block on the strip, the matrix and the caption."""
         source = self._plot_source
-        if source is None or source[0] != "raw":
+        is_raw = source is not None and source[0] == "raw"
+        # Block size/Read as only mean anything while a raw block, not a
+        # named signal, is what is actually plotted -- a signal's own
+        # width and scaling come from the database, never from these.
+        # Found live: with a signal active, turning either dial visibly
+        # did nothing, with no indication why; disabling them here is the
+        # same "make the inert state visible" idiom _reload_plot_signals
+        # already uses to hide Signal itself when there is nothing for it
+        # to offer, applied to the other side of the same choice.
+        self.plot_size.setEnabled(is_raw)
+        self.plot_decoder.setEnabled(is_raw)
+        if not is_raw:
             # A named signal has no single byte range to bracket.
             self.strip.set_highlight(None)
             self.bit_matrix.set_highlight(None)

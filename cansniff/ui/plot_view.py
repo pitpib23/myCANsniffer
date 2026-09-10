@@ -141,10 +141,18 @@ class SignalPlot(QWidget):
         self.view.setMinimumHeight(220)
         root.addWidget(self.view, 1)
 
+        # Status + what belongs here + a concrete next step, in that order --
+        # not just "nothing here", which teaches a first-time operator
+        # nothing about what to do about it. Matches the sibling empty
+        # state one level up (interpret_view.py's own "No message
+        # selected" / "Press Start, then choose a CAN ID on the left..."):
+        # short, and names the actual control to reach for rather than the
+        # abstract concept behind it.
         self.empty = EmptyState(
-            "No signal selected",
-            "Choose a signal from the decoded message, or a payload block, "
-            "to see how its value moves over time.",
+            "Nothing plotted yet",
+            "Select a message, then choose one of its signals above or tap "
+            "a byte in its payload — Plot draws how the value moves over "
+            "time.",
             theme,
         )
         root.addWidget(self.empty, 1)
@@ -211,7 +219,8 @@ class SignalPlot(QWidget):
                     "Nothing to plot",
                     "The selected signal produced no samples in this capture. "
                     "It may never have been observed, or every frame carrying "
-                    "it failed to decode.",
+                    "it failed to decode. Try a different signal, or a byte "
+                    "block instead.",
                 )
             return ""
 
