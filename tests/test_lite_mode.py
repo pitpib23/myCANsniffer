@@ -27,11 +27,12 @@ from __future__ import annotations
 import os
 import tempfile
 import unittest
+from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 try:
-    from PySide6.QtWidgets import QApplication
+    from PySide6.QtWidgets import QApplication, QPushButton
     HAVE_QT = True
 except ImportError:  # pragma: no cover
     HAVE_QT = False
@@ -174,6 +175,109 @@ class MainWindowNavigationTests(unittest.TestCase):
         self.assertEqual(window.browser_stack.currentIndex(), window._NAV_TRACE)
         self.assertEqual(window.section_label.text(), "Trace")
         self.assertTrue(window.browser_panel.isVisible())
+
+
+@unittest.skipUnless(HAVE_QT, "PySide6 not available")
+class TopBarLiteSimplificationTests(unittest.TestCase):
+    """Lite's top bar drops Open capture (Settings' own Source tab already
+    browses to a capture file) and collapses BUS/Database/Export/Settings
+    into one "Menu" button at the row's right edge, in place of the
+    always-on source/database status chips -- see MainWindow._build_top_bar.
+    None of this touches the full edition, which keeps every button and
+    chip exactly as before.
+    """
+
+    app = None
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def _window(self, lite):
+        path = os.path.join(
+            tempfile.gettempdir(),
+            "cansniff_lite_topbar_{}_{}.json".format(lite, id(self)))
+        window = MainWindow(Config.defaults(path), Theme(), lite=lite)
+        self.addCleanup(self._clean, window, path)
+        return window
+
+    @classmethod
+    def _clean(cls, window, path):
+        window._teardown_thread()
+        window.close()
+        window.deleteLater()
+        cls.app.processEvents()
+        if os.path.exists(path):
+            os.remove(path)
+
+    def _ghost_texts(self, window):
+        return [b.text() for b in window.findChildren(QPushButton)
+                if b.objectName() == "Ghost"]
+
+    def test_lite_drops_open_capture_and_the_four_moved_buttons(self):
+        window = self._window(lite=True)
+        ghosts = self._ghost_texts(window)
+        for gone in ("Open capture", "BUS", "Database", "Export", "Settings",
+                     "Project", "Capture filters"):
+            self.assertNotIn(gone, ghosts)
+        self.assertIn("Menu", ghosts)
+
+    def test_lite_menu_button_has_exactly_bus_database_export_settings(self):
+        window = self._window(lite=True)
+        menu = window.more_button.menu()
+        self.assertIsNotNone(menu)
+        self.assertEqual([a.text() for a in menu.actions()],
+                         ["BUS", "Database", "Export", "Settings"])
+
+    def test_lite_menu_actions_call_the_same_slots_as_the_full_edition_buttons(self):
+        # Same wiring the full edition's own buttons use -- see
+        # _build_top_bar's non-lite secondary_buttons list -- just reached
+        # through a menu action instead of a dedicated button. Patched
+        # before construction so the QAction's own triggered connection
+        # (made once, at build time) targets these mocks directly.
+        with mock.patch.object(MainWindow, "_show_bus_overview") as bus, \
+             mock.patch.object(MainWindow, "_edit_database_window") as database, \
+             mock.patch.object(MainWindow, "_export_capture") as export, \
+             mock.patch.object(MainWindow, "_edit_settings") as settings:
+            window = self._window(lite=True)
+            menu = window.more_button.menu()
+            actions = {a.text(): a for a in menu.actions()}
+            for text in ("BUS", "Database", "Export", "Settings"):
+                actions[text].trigger()
+            bus.assert_called_once()
+            database.assert_called_once()
+            export.assert_called_once()
+            settings.assert_called_once()
+
+    def test_lite_hides_the_source_and_database_status_chips(self):
+        window = self._window(lite=True)
+        window.show()
+        self.app.processEvents()
+        self.assertFalse(window.source_chip.isVisible())
+        self.assertFalse(window.dbc_chip.isVisible())
+
+    def test_lite_chips_stay_live_even_though_hidden(self):
+        """_update_source_chip/_set_database keep updating the (invisible)
+        chips unconditionally -- nothing about them gets a lite branch, so
+        an existing config/project that inspects window.database or the
+        chips' own text still finds exactly what the full edition would.
+        """
+        window = self._window(lite=True)
+        window._set_chip_text(window.dbc_chip, "example.dbc", "accent")
+        self.assertEqual(window.dbc_chip.text(), "example.dbc")
+
+    def test_full_edition_top_bar_is_unaffected(self):
+        window = self._window(lite=False)
+        window.show()
+        self.app.processEvents()
+        ghosts = self._ghost_texts(window)
+        for expected in ("BUS", "Project", "Database", "Open capture",
+                         "Export", "Capture filters", "Settings"):
+            self.assertIn(expected, ghosts)
+        self.assertNotIn("Menu", ghosts)
+        self.assertFalse(hasattr(window, "more_button"))
+        self.assertTrue(window.source_chip.isVisible())
+        self.assertTrue(window.dbc_chip.isVisible())
 
 
 @unittest.skipUnless(HAVE_QT, "PySide6 not available")

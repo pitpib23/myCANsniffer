@@ -36,7 +36,9 @@ except ImportError:  # pragma: no cover - depends on environment
 if HAVE_QT:
     from cansniff.analysis.signals import Profile, ProfileStore, Signal, import_dbc
     from cansniff.config import Config
-    from cansniff.ui.database_window import AddMessageDialog, DatabaseWindow
+    from cansniff.ui.database_window import (
+        AddMessageDialog, DatabaseWindow, LiteDatabaseDialog,
+    )
     from cansniff.ui.signal_edit_dialog import SignalEditDialog
     from cansniff.ui.main_window import MainWindow
     from cansniff.ui.theme import Theme
@@ -686,6 +688,167 @@ class ApplyUnapplyTests(WindowTestCase):
         self.app.processEvents()
         self.assertEqual(events, [], "editing an inactive profile must not "
                          "reapply the active decoder")
+
+
+# ---------------------------------------------------------------------------
+# Lite's own drastically smaller stand-in — LiteDatabaseDialog
+# ---------------------------------------------------------------------------
+
+
+@unittest.skipUnless(HAVE_QT, "PySide6 not available")
+class LiteDatabaseDialogTests(unittest.TestCase):
+    """Lite never edits a database's contents -- only whether one is
+    applied, and which .dbc file that is. Same ProfileStore, same
+    import_dbc/active semantics as DatabaseWindow's own Import DBC/Use
+    Database/Unapply Database (see ApplyUnapplyTests above) -- just four
+    controls instead of a profiles/messages/signals editor.
+    """
+
+    app = None
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def _dialog(self, store=None):
+        store = store if store is not None else ProfileStore()
+        dlg = LiteDatabaseDialog(store, None, Theme())
+        self.addCleanup(dlg.deleteLater)
+        return dlg
+
+    def test_fresh_store_shows_no_file_and_disables_both_actions(self):
+        dlg = self._dialog()
+        self.assertEqual(dlg.file_label.text(), "No database file selected")
+        self.assertEqual(dlg.applied_chip.text(), "Not applied")
+        self.assertFalse(dlg.apply_button.isEnabled())
+        self.assertFalse(dlg.unapply_button.isEnabled())
+
+    def test_opens_already_showing_the_active_profile(self):
+        store = ProfileStore()
+        profile = store.add(import_dbc(FIXTURE))
+        store.active = profile.name
+        dlg = self._dialog(store)
+        self.assertEqual(dlg.file_label.text(), profile.path or profile.name)
+        self.assertEqual(dlg.applied_chip.text(), "Applied")
+        self.assertFalse(dlg.apply_button.isEnabled(), "already active")
+        self.assertTrue(dlg.unapply_button.isEnabled())
+
+    def test_select_imports_but_does_not_apply(self):
+        store = ProfileStore()
+        dlg = self._dialog(store)
+        with patch("cansniff.ui.database_window.QFileDialog.getOpenFileName",
+                  return_value=(FIXTURE, "")):
+            dlg._select_file()
+        self.assertEqual(len(store.profiles), 1)
+        self.assertIsNone(store.active, "Select alone must not apply")
+        self.assertIn("sample.dbc", dlg.file_label.text())
+        self.assertEqual(dlg.applied_chip.text(), "Not applied")
+        self.assertTrue(dlg.apply_button.isEnabled())
+
+    def test_select_cancelled_leaves_everything_unchanged(self):
+        store = ProfileStore()
+        dlg = self._dialog(store)
+        with patch("cansniff.ui.database_window.QFileDialog.getOpenFileName",
+                  return_value=("", "")):
+            dlg._select_file()
+        self.assertEqual(store.profiles, [])
+        self.assertEqual(dlg.file_label.text(), "No database file selected")
+
+    def test_apply_makes_the_selected_file_active_and_emits_store_changed(self):
+        store = ProfileStore()
+        dlg = self._dialog(store)
+        events = []
+        dlg.storeChanged.connect(events.append)
+        with patch("cansniff.ui.database_window.QFileDialog.getOpenFileName",
+                  return_value=(FIXTURE, "")):
+            dlg._select_file()
+        dlg._apply()
+        self.assertEqual(store.active, store.profiles[0].name)
+        self.assertEqual(len(events), 1)
+        self.assertEqual(dlg.applied_chip.text(), "Applied")
+        self.assertEqual(dlg.apply_button.text(), "Applied")
+        self.assertFalse(dlg.apply_button.isEnabled())
+        self.assertTrue(dlg.unapply_button.isEnabled())
+
+    def test_unapply_clears_active_without_removing_the_profile(self):
+        store = ProfileStore()
+        profile = store.add(import_dbc(FIXTURE))
+        store.active = profile.name
+        dlg = self._dialog(store)
+        events = []
+        dlg.storeChanged.connect(events.append)
+        dlg._unapply()
+        self.assertIsNone(store.active)
+        self.assertIsNotNone(store.find(profile.name),
+                            "unapply must not remove the profile")
+        self.assertEqual(len(events), 1)
+        self.assertEqual(dlg.applied_chip.text(), "Not applied")
+        self.assertEqual(dlg.file_label.text(), profile.path or profile.name,
+                         "unapply clears what decodes traffic, not the "
+                         "dialog's own current-file display")
+
+    def test_ok_button_closes_the_dialog(self):
+        dlg = self._dialog()
+        dlg.show()
+        self.app.processEvents()
+        dlg.ok_button.click()
+        self.assertFalse(dlg.isVisible())
+
+    def test_a_second_select_replaces_the_shown_file_without_auto_applying(self):
+        store = ProfileStore()
+        first = store.add(Profile(name="first.dbc"))
+        store.active = first.name
+        dlg = self._dialog(store)
+        with patch("cansniff.ui.database_window.QFileDialog.getOpenFileName",
+                  return_value=(FIXTURE, "")):
+            dlg._select_file()
+        # The previously active profile is untouched and still applied --
+        # Select only changes what this dialog is pointed at.
+        self.assertEqual(store.active, "first.dbc")
+        self.assertIn("sample.dbc", dlg.file_label.text())
+        self.assertEqual(dlg.applied_chip.text(), "Not applied")
+
+
+@unittest.skipUnless(HAVE_QT, "PySide6 not available")
+class MainWindowDatabaseButtonEditionTests(_TempDir):
+    """MainWindow._edit_database_window opens LiteDatabaseDialog for the
+    Lite edition and the full DatabaseWindow otherwise -- neither backend
+    (ProfileStore, storeChanged -> _on_profile_store_changed) differs.
+    """
+
+    app = None
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_lite_opens_the_small_dialog(self):
+        win = MainWindow(Config.defaults(self._path("lite.json")), Theme(), lite=True)
+        self.addCleanup(win.deleteLater)
+        with patch.object(LiteDatabaseDialog, "exec", return_value=0) as exec_mock:
+            win._edit_database_window()
+        exec_mock.assert_called_once()
+
+    def test_full_edition_opens_the_full_window(self):
+        win = MainWindow(Config.defaults(self._path("full.json")), Theme(), lite=False)
+        self.addCleanup(win.deleteLater)
+        with patch.object(DatabaseWindow, "exec", return_value=0) as exec_mock:
+            win._edit_database_window()
+        exec_mock.assert_called_once()
+
+    def test_lite_dialog_apply_reaches_the_real_window_the_same_way(self):
+        win = MainWindow(Config.defaults(self._path("wire.json")), Theme(), lite=True)
+        self.addCleanup(win.deleteLater)
+        profile = win.profile_store.add(import_dbc(FIXTURE))
+
+        def _run(self):
+            self._current_profile = profile.name
+            self._apply()
+
+        with patch.object(LiteDatabaseDialog, "exec", _run, create=True):
+            win._edit_database_window()
+        self.assertIsNotNone(win.database)
+        self.assertEqual(win.dbc_chip.text(), profile.name)
 
 
 # ---------------------------------------------------------------------------

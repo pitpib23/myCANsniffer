@@ -21,8 +21,8 @@ from PySide6.QtCore import QObject, QThread, Qt, QTimer, Signal, Slot
 from PySide6.QtGui import QAction, QFontMetrics, QKeySequence
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QComboBox, QFileDialog,
-    QFrame, QHBoxLayout, QHeaderView, QLabel, QMainWindow, QMessageBox, QPushButton,
-    QScrollArea, QSizePolicy, QSplitter, QStackedWidget, QTableView,
+    QFrame, QHBoxLayout, QHeaderView, QLabel, QMainWindow, QMenu, QMessageBox,
+    QPushButton, QScrollArea, QSizePolicy, QSplitter, QStackedWidget, QTableView,
     QVBoxLayout, QWidget,
 )
 
@@ -69,7 +69,7 @@ from .auto_scan_dialog import AutoScanDialog
 from .config_dialog import ConfigDialog
 from .compare_view import CompareView
 from .bus_overview import BusOverviewDialog
-from .database_window import DatabaseWindow
+from .database_window import DatabaseWindow, LiteDatabaseDialog
 from .discovery_worker import BitrateScanWorker
 from .filter_bar import FilterBar
 from .filter_dialog import FilterDialog
@@ -1081,6 +1081,41 @@ class MainWindow(QMainWindow):
         )
         primary_row.addWidget(self.dbc_chip)
 
+        if self.lite:
+            # A touchscreen's top bar has no permanent room for a standing
+            # status box: BUS/Database (reached from the Menu button below)
+            # already show exactly this same information, on demand,
+            # without spending width on it at all times. Both chips stay
+            # fully built and kept live -- _update_source_chip/_set_database/
+            # _apply_density_to_chrome all still run unconditionally, with
+            # nothing lite-specific to special-case in any of them -- they
+            # are simply never shown.
+            self.source_chip.setVisible(False)
+            self.dbc_chip.setVisible(False)
+
+            # BUS/Database/Export/Settings collapse into one "Menu" button
+            # here, at the row's own right edge, rather than a button apiece
+            # in the row below (see the empty secondary_buttons list further
+            # down): four buttons plus the primary Start/Auto Scan/Stop/
+            # Pause/Clear group left too little width for any of them to
+            # read comfortably on an 800px touchscreen.
+            self.more_button = self._bar_button(
+                "Menu", ghost=True,
+                tip="BUS overview, Database, Export and Settings")
+            more_menu = QMenu(self.more_button)
+            for text, slot in (
+                ("BUS", self._show_bus_overview),
+                ("Database", self._edit_database_window),
+                ("Export", self._export_capture),
+                ("Settings", self._edit_settings),
+            ):
+                action = QAction(text, more_menu)
+                action.triggered.connect(slot)
+                more_menu.addAction(action)
+            self.more_button.setMenu(more_menu)
+            self._more_menu = more_menu
+            primary_row.addWidget(self.more_button)
+
         # One button, one concept: a DBC's message-bound signals and the old
         # "scaled value" byte rules are both just Signals now — see
         # analysis/signals.py and ui/database_window.py.
@@ -1094,30 +1129,40 @@ class MainWindow(QMainWindow):
         # before -- see _show_investigation/_edit_filters, still defined
         # and still used by the full edition's own button -- only Lite's
         # own entry point to them is gone.
-        secondary_buttons = [
-            ("BUS", self._show_bus_overview,
-             "Show factual session traffic and capture-integrity observations"),
-        ]
+        #
+        # Lite also drops Open capture -- Settings' own Source tab already
+        # browses to an offline capture file (config_dialog.py's own
+        # "Browse…" there), so a second, redundant entry point for the same
+        # thing does not earn its own row here. And BUS/Database/Export/
+        # Settings themselves move into the "Menu" button above instead of
+        # a button apiece -- see this method's own Lite branch just above --
+        # so Lite never populates this row at all. It is still built (see
+        # _apply_density_to_chrome's own _secondary_flow.set_spacing) so
+        # nothing there needs a lite branch either; an empty FlowLayout
+        # takes no visible height.
+        secondary_buttons = []
         if not self.lite:
+            secondary_buttons.append(
+                ("BUS", self._show_bus_overview,
+                 "Show factual session traffic and capture-integrity observations"))
             secondary_buttons.append(
                 ("Project", self._show_investigation,
                  "New, open, save, annotate and report an investigation project"))
-        secondary_buttons.append(
-            ("Database", self._edit_database_window,
-             "Create, import, export and edit signal databases, and choose "
-             "which one — if any — decodes captured traffic"))
-        secondary_buttons.append(
-            ("Open capture", self._open_capture, "Load a capture file for offline playback"))
-        secondary_buttons.append(
-            ("Export", self._export_capture,
-             "Write the observed frames to ASC, candump, CSV or JSONL"))
-        if not self.lite:
+            secondary_buttons.append(
+                ("Database", self._edit_database_window,
+                 "Create, import, export and edit signal databases, and choose "
+                 "which one — if any — decodes captured traffic"))
+            secondary_buttons.append(
+                ("Open capture", self._open_capture, "Load a capture file for offline playback"))
+            secondary_buttons.append(
+                ("Export", self._export_capture,
+                 "Write the observed frames to ASC, candump, CSV or JSONL"))
             secondary_buttons.append(
                 ("Capture filters", self._edit_filters,
                  "Choose which frames are received. To hide rows you have already "
                  "captured, use the filter bar above the table."))
-        secondary_buttons.append(
-            ("Settings", self._edit_settings, "Source, capture, display and raw configuration"))
+            secondary_buttons.append(
+                ("Settings", self._edit_settings, "Source, capture, display and raw configuration"))
 
         for text, slot, tip in secondary_buttons:
             secondary_row.addWidget(
@@ -3555,21 +3600,28 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _edit_database_window(self) -> None:
-        """Open the unified Signal Database window.
+        """Open the Signal Database window -- the full profiles/messages/
+        signals editor in the full edition, or Lite's own drastically
+        smaller stand-in (current file, Select, Apply/Unapply, OK) that
+        never edits a database's contents, only which one — if any — is
+        applied. See LiteDatabaseDialog's own docstring.
 
-        The window mutates ``self.profile_store`` live — Use Database and
-        Unapply Database (and, for the currently active profile, any signal
-        edit) take effect immediately via ``storeChanged`` while the window is
-        still open, not on some later confirmation. There is nothing to
-        commit when it closes; ``_persist_profile_store`` afterwards only
-        catches edits to a profile that was never the active one, which
+        Either window mutates ``self.profile_store`` live — Use/Apply and
+        Unapply Database (and, in the full window, any signal edit) take
+        effect immediately via ``storeChanged`` while the window is still
+        open, not on some later confirmation. There is nothing to commit
+        when it closes; ``_persist_profile_store`` afterwards only catches
+        edits to a profile that was never the active one, which
         ``storeChanged`` has no reason to fire for.
         """
-        dialog = DatabaseWindow(
-            self.profile_store, self, self.theme,
-            self.interpret_view.current_frame(),
-            self.frame_store.all_frames(label="Definition observation context"),
-        )
+        if self.lite:
+            dialog = LiteDatabaseDialog(self.profile_store, self, self.theme)
+        else:
+            dialog = DatabaseWindow(
+                self.profile_store, self, self.theme,
+                self.interpret_view.current_frame(),
+                self.frame_store.all_frames(label="Definition observation context"),
+            )
         dialog.storeChanged.connect(self._on_profile_store_changed)
         dialog.exec()
         self._persist_profile_store()

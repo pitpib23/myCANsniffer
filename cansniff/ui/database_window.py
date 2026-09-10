@@ -196,6 +196,128 @@ class AddMessageDialog(ResponsiveDialog):
 
 
 # ---------------------------------------------------------------------------
+# Lite's own stand-in for the window below — see LiteDatabaseDialog.
+# ---------------------------------------------------------------------------
+
+
+class LiteDatabaseDialog(ResponsiveDialog):
+    """Lite's drastically smaller replacement for the full Signal Database
+    window below: a kiosk touchscreen has no room for profiles-on-the-left/
+    messages-in-the-middle/signals-on-the-right, and Lite never edits a
+    database's *contents* — only whether one is currently decoding traffic,
+    and which .dbc file that is. Four controls, top to bottom: the currently
+    selected file, a button to pick a different one, and Apply/Unapply —
+    the same two actions the full window's own top bar calls "Use Database"/
+    "Unapply Database", acting immediately exactly as there, not on some
+    later confirmation — plus OK to close.
+
+    Creating an empty profile, editing signals, multiple profiles side by
+    side, CANopen/J1939 definitions and DBC export are full-edition-only
+    features reached through DatabaseWindow instead; none of that backend
+    is touched here, only reached through a different button — see
+    MainWindow._edit_database_window.
+    """
+
+    storeChanged = QtSignal(object)
+
+    def __init__(self, store: ProfileStore, parent=None,
+                 theme: Optional[Theme] = None):
+        super().__init__(parent)
+        self.setWindowTitle("Database")
+        self.resize(360, 220)
+        self._theme = theme or Theme()
+        self.store = store
+        self._current_profile: Optional[str] = store.active
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(SPACE_MD)
+
+        layout.addWidget(SectionLabel("Current file", self._theme))
+        self.file_label = QLabel("")
+        self.file_label.setWordWrap(True)
+        layout.addWidget(self.file_label)
+
+        self.applied_chip = Chip("Not applied", "muted", self._theme)
+        layout.addWidget(self.applied_chip)
+
+        self.select_button = _action_button(
+            "Select…", self._select_file,
+            "Import a .dbc file. Importing alone does not change what "
+            "decodes captured traffic — use Apply below for that.")
+        layout.addWidget(self.select_button)
+
+        layout.addStretch(1)
+
+        bottom = QHBoxLayout()
+        self.unapply_button = _action_button(
+            "Unapply", self._unapply,
+            "Stop decoding captured traffic with any database. The "
+            "selected file, and the profile itself, are not removed.")
+        bottom.addWidget(self.unapply_button)
+        self.apply_button = _action_button(
+            "Apply", self._apply,
+            "Make the selected file the active decoder for captured "
+            "traffic.", object_name="Primary")
+        bottom.addWidget(self.apply_button)
+        bottom.addStretch(1)
+        self.ok_button = _action_button(
+            "OK", self.accept, "Close this window")
+        bottom.addWidget(self.ok_button)
+        layout.addLayout(bottom)
+
+        self._refresh()
+
+    def _selected_profile(self) -> Optional[Profile]:
+        return self.store.find(self._current_profile) if self._current_profile else None
+
+    def _refresh(self) -> None:
+        profile = self._selected_profile()
+        has_selection = profile is not None
+        is_active = has_selection and profile.name == self.store.active
+        self.file_label.setText(
+            (profile.path or profile.name) if profile is not None
+            else "No database file selected")
+        if is_active:
+            self.applied_chip.set_text_and_tone("Applied", "success")
+        else:
+            self.applied_chip.set_text_and_tone("Not applied", "muted")
+        self.unapply_button.setEnabled(self.store.active is not None)
+        self.apply_button.setText("Applied" if is_active else "Apply")
+        self.apply_button.setEnabled(has_selection and not is_active)
+
+    def _select_file(self) -> None:
+        start_dir = ""
+        current = self._selected_profile()
+        if current is not None and current.path:
+            start_dir = os.path.dirname(current.path)
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select signal database", start_dir,
+            "CAN databases (*.dbc);;All files (*)")
+        if not path:
+            return
+        try:
+            profile = import_dbc(path)
+        except SignalError as exc:
+            QMessageBox.warning(self, "Could not import database", str(exc))
+            return
+        self.store.add(profile)
+        self._current_profile = profile.name
+        self._refresh()
+
+    def _apply(self) -> None:
+        if self._current_profile is None:
+            return
+        self.store.active = self._current_profile
+        self.storeChanged.emit(self.store)
+        self._refresh()
+
+    def _unapply(self) -> None:
+        self.store.active = None
+        self.storeChanged.emit(self.store)
+        self._refresh()
+
+
+# ---------------------------------------------------------------------------
 # the main window
 # ---------------------------------------------------------------------------
 
