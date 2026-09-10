@@ -166,7 +166,8 @@ class AutoScanDialog(ResponsiveDialog):
         self.config_group = QGroupBox("Candidate bitrates")
         config_layout = QVBoxLayout(self.config_group)
         self._checkbox_flow = FlowLayout(spacing=SPACE_SM)
-        checkbox_host = QWidget()
+        #: Kept for set_scanning's own re-layout nudge below.
+        self._checkbox_host = checkbox_host = QWidget()
         checkbox_host.setLayout(self._checkbox_flow)
         for bitrate in candidate_bitrates:
             box = QCheckBox("{} kbit/s".format(_kbit(bitrate)))
@@ -318,6 +319,28 @@ class AutoScanDialog(ResponsiveDialog):
         never just "the button was clicked"."""
         self._scanning = scanning
         self.config_group.setEnabled(not scanning)
+        # Hidden, not just disabled, while scanning -- every control in it
+        # is unusable then anyway (candidate_label below already names the
+        # bitrate under test), and an 11-checkbox, two-row FlowLayout plus
+        # the duration/Start Scan row is a lot of now-inert space to keep
+        # reserved on an 800x480 screen where Scanning's own progress and
+        # the results table (which starts filling live, one row per
+        # completed candidate) need it far more.
+        #
+        # This also sidesteps a real layout bug found live, on real
+        # hardware, mid-scan: merely *disabling* config_group while leaving
+        # it visible let this dialog's outer QVBoxLayout shrink it --
+        # config_group has no stretch factor of its own, unlike the
+        # results table -- down toward the checkbox FlowLayout's own
+        # minimumSize(), which (see widgets.FlowLayout) reports only its
+        # single largest item's height, never what wrapping every item
+        # actually needs. That under-reported minimum let Qt clip whichever
+        # checkbox row no longer fit, or (once that was patched locally)
+        # squeeze the duration/Start Scan row into overlapping Scanning's
+        # own header instead -- symptoms of the same root deficit, not two
+        # separate bugs. Removing config_group from layout consideration
+        # entirely removes the deficit itself, rather than relocating it.
+        self.config_group.setVisible(not scanning)
         self.progress_group.setVisible(scanning)
         self.start_scan_button.setEnabled(not scanning)
         self._update_start_listening_enabled()

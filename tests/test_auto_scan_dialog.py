@@ -174,12 +174,38 @@ class AutoScanDialogTests(unittest.TestCase):
         finally:
             dialog.deleteLater()
 
+    def test_set_scanning_hides_the_now_unusable_config_group(self):
+        """Found live, on real hardware, mid-scan: merely disabling
+        config_group while leaving it visible let this dialog's outer
+        layout shrink it toward the checkbox FlowLayout's own
+        under-reported minimumSize() (see widgets.FlowLayout), clipping a
+        checkbox row or overlapping the row below it depending on exactly
+        how the squeeze landed. Hiding it entirely (every control in it is
+        unusable while scanning anyway -- candidate_label already names
+        the bitrate under test) removes the deficit that caused either
+        symptom, rather than relocating it.
+        """
+        dialog = self._dialog()
+        try:
+            # isHidden(), not isVisible(): this dialog is never shown in
+            # this offscreen test, so isVisible() would read False
+            # throughout regardless -- isHidden() reflects config_group's
+            # own explicit shown/hidden flag independent of that.
+            self.assertFalse(dialog.config_group.isHidden())
+            dialog.set_scanning(True)
+            self.assertTrue(dialog.config_group.isHidden())
+            dialog.set_scanning(False)
+            self.assertFalse(dialog.config_group.isHidden())
+        finally:
+            dialog.deleteLater()
+
     def test_set_scanning_false_restores_selection_and_relabels_close(self):
         dialog = self._dialog()
         try:
             dialog.set_scanning(True)
             dialog.set_scanning(False)
             self.assertTrue(dialog.config_group.isEnabled())
+            self.assertFalse(dialog.config_group.isHidden())
             self.assertTrue(dialog.start_scan_button.isEnabled())
             self.assertEqual(dialog.action_button.text(), "Close")
         finally:

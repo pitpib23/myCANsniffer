@@ -414,6 +414,21 @@ class AutoScanDialogLiteColumnsTests(unittest.TestCase):
         finally:
             dialog.deleteLater()
 
+    def test_lite_scanning_phase_hides_config_group_for_the_results_room(self):
+        """Lite's 800x480 popup needs this even more than the full
+        edition's own larger one does -- see AutoScanDialog.set_scanning's
+        own docstring/comment for the real layout bug this also sidesteps.
+        """
+        dialog = AutoScanDialog("can0", (500000,), Theme(), 30.0, lite=True)
+        try:
+            self.assertFalse(dialog.config_group.isHidden())
+            dialog.set_scanning(True)
+            self.assertTrue(dialog.config_group.isHidden())
+            dialog.set_scanning(False)
+            self.assertFalse(dialog.config_group.isHidden())
+        finally:
+            dialog.deleteLater()
+
     def test_lite_row_height_and_button_height_are_touch_sized(self):
         """7-inch display requirement: ~44-48px touch targets."""
         dialog = AutoScanDialog("can0", (500000,), Theme(), 30.0, lite=True)
