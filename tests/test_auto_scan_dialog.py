@@ -211,6 +211,59 @@ class AutoScanDialogTests(unittest.TestCase):
         finally:
             dialog.deleteLater()
 
+    # -- one phase on screen at a time: configure, scan, or review results --
+
+    def test_three_phases_show_exactly_one_of_config_progress_table(self):
+        """Exactly one of config_group/progress_group/self.table is ever
+        shown: pick candidates, watch it scan, read what it found -- never
+        two of those at once. See set_scanning's own comment.
+        """
+        dialog = self._dialog()
+        try:
+            # Phase 1: configuring. Nothing scanned yet.
+            self.assertFalse(dialog.config_group.isHidden())
+            self.assertTrue(dialog.progress_group.isHidden())
+            self.assertTrue(dialog.table.isHidden())
+
+            # Phase 2: scanning. Rows can already be arriving in the
+            # background (candidate-complete fires mid-scan, before the
+            # scan as a whole finishes) -- the table stays hidden anyway
+            # until the *whole* scan is done, not just its first candidate.
+            dialog.set_scanning(True)
+            dialog.on_progress(ScanProgress(
+                "candidate-complete", "500 kbit/s: score 80.0/100", 1, 2,
+                bitrate=500000, candidate=_completed_candidate(500000)))
+            self.assertTrue(dialog.config_group.isHidden())
+            self.assertFalse(dialog.progress_group.isHidden())
+            self.assertTrue(dialog.table.isHidden())
+            self.assertEqual(dialog.table.rowCount(), 1, "still collecting in the background")
+
+            # Phase 3: results. The scan is over; config_group stays out of
+            # the way (nothing left to configure until a fresh scan is
+            # requested) and the table -- now with real rows -- takes over.
+            dialog.set_scanning(False)
+            self.assertTrue(dialog.config_group.isHidden())
+            self.assertTrue(dialog.progress_group.isHidden())
+            self.assertFalse(dialog.table.isHidden())
+        finally:
+            dialog.deleteLater()
+
+    def test_a_scan_with_nothing_to_show_goes_back_to_configuring(self):
+        """An error before any candidate completed leaves self._candidates
+        empty -- reviewing an empty table would be useless, so this goes
+        back to configuring (where the operator can try again) instead of
+        finishing on a blank results phase.
+        """
+        dialog = self._dialog()
+        try:
+            dialog.set_scanning(True)
+            dialog.on_error("Could not configure can0: denied")
+            dialog.set_scanning(False)
+            self.assertFalse(dialog.config_group.isHidden())
+            self.assertTrue(dialog.table.isHidden())
+        finally:
+            dialog.deleteLater()
+
     # -- results table: numeric only, no qualitative labels -----------------
 
     def test_completed_candidate_row_shows_numeric_score_and_components(self):

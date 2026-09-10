@@ -256,6 +256,12 @@ class AutoScanDialog(ResponsiveDialog):
         self.table.itemSelectionChanged.connect(self._update_start_listening_enabled)
         enable_touch_scrolling(self.table)
         outer.addWidget(self.table, 1)
+        # Exactly one of config_group/progress_group/self.table is ever
+        # shown at a time -- configuring, scanning, or reviewing results,
+        # never a mix (see set_scanning's own comment). Nothing to review
+        # yet at construction, so this starts alongside progress_group,
+        # hidden.
+        self.table.setVisible(False)
 
         self.status_label = QLabel("")
         self.status_label.setWordWrap(True)
@@ -319,29 +325,36 @@ class AutoScanDialog(ResponsiveDialog):
         never just "the button was clicked"."""
         self._scanning = scanning
         self.config_group.setEnabled(not scanning)
-        # Hidden, not just disabled, while scanning -- every control in it
-        # is unusable then anyway (candidate_label below already names the
-        # bitrate under test), and an 11-checkbox, two-row FlowLayout plus
-        # the duration/Start Scan row is a lot of now-inert space to keep
-        # reserved on an 800x480 screen where Scanning's own progress and
-        # the results table (which starts filling live, one row per
-        # completed candidate) need it far more.
+        # Exactly one of config_group / progress_group / self.table is ever
+        # shown at a time -- configuring, scanning, or reviewing results,
+        # never two at once: pick candidates, watch it scan, read what it
+        # found. Once a scan has actually produced at least one row,
+        # finishing (scanning back to False) reveals the table instead of
+        # config_group again -- see _on_start_scan_clicked's own reset of
+        # self._candidates for why that is empty again the moment a new
+        # scan is requested, and empty otherwise only when a scan ends
+        # with nothing to show (an error before any candidate completed,
+        # say), in which case going back to configuring -- not a
+        # permanently empty table -- is the useful thing to show.
         #
-        # This also sidesteps a real layout bug found live, on real
-        # hardware, mid-scan: merely *disabling* config_group while leaving
-        # it visible let this dialog's outer QVBoxLayout shrink it --
-        # config_group has no stretch factor of its own, unlike the
-        # results table -- down toward the checkbox FlowLayout's own
-        # minimumSize(), which (see widgets.FlowLayout) reports only its
-        # single largest item's height, never what wrapping every item
-        # actually needs. That under-reported minimum let Qt clip whichever
-        # checkbox row no longer fit, or (once that was patched locally)
-        # squeeze the duration/Start Scan row into overlapping Scanning's
-        # own header instead -- symptoms of the same root deficit, not two
-        # separate bugs. Removing config_group from layout consideration
-        # entirely removes the deficit itself, rather than relocating it.
-        self.config_group.setVisible(not scanning)
+        # Hiding config_group (not just disabling it) also sidesteps a
+        # real layout bug found live, on real hardware, mid-scan: merely
+        # *disabling* it while leaving it visible let this dialog's outer
+        # QVBoxLayout shrink it -- config_group has no stretch factor of
+        # its own, unlike the results table -- down toward the checkbox
+        # FlowLayout's own minimumSize(), which (see widgets.FlowLayout)
+        # reports only its single largest item's height, never what
+        # wrapping every item actually needs. That under-reported minimum
+        # let Qt clip whichever checkbox row no longer fit, or (once that
+        # was patched locally) squeeze the duration/Start Scan row into
+        # overlapping Scanning's own header instead -- symptoms of the
+        # same root deficit, not two separate bugs. Removing config_group
+        # from layout consideration entirely removes the deficit itself,
+        # rather than relocating it.
+        has_results = bool(self._candidates)
+        self.config_group.setVisible(not scanning and not has_results)
         self.progress_group.setVisible(scanning)
+        self.table.setVisible(not scanning and has_results)
         self.start_scan_button.setEnabled(not scanning)
         self._update_start_listening_enabled()
         if scanning:
