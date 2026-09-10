@@ -54,6 +54,21 @@ _DEFAULT_PLOT_WINDOW = 2
 #: one that happens to be registered.
 _DEFAULT_PLOT_DECODERS = {1: "u8", 2: "u16_be", 4: "u32_be", 8: "u64_be"}
 
+#: Never offered in Plot's own "Read as" list -- see _reload_plot_decoders.
+#: Hex (BE)/(LE) read the exact same bytes, same byte order, as one of the
+#: fixed-width unsigned decoders (u8/u16/u32/u64) already offered at every
+#: width Plot's own Block size ever is (1/2/4/8 -- see _BLOCK_SIZES): its
+#: number() is bit-for-bit identical to theirs, so the plotted line is too.
+#: Hex earns a place in the Blocks table because it is the *only* decoder
+#: that reads an arbitrary width (odd byte ranges, e.g. 3 or 5 bytes, that
+#: have no fixed-width decoder of their own) -- Plot never reaches those
+#: widths, so that advantage never applies here, leaving only a redundant,
+#: more confusingly-labelled duplicate of an entry already in the list.
+#: BCD is not excluded alongside it: its number() is a genuinely different
+#: reading (packed decimal, not raw binary), not a duplicate of anything
+#: else offered.
+_PLOT_EXCLUDED_DECODERS = frozenset({"hex_be", "hex_le"})
+
 #: Touch-height floor for Lite's own Plot controls -- same figure and same
 #: reasoning as auto_scan_dialog.py's own _LITE_BUTTON_HEIGHT (WCAG's and
 #: Material's ~44-48px minimum comfortable touch target), applied here
@@ -1202,6 +1217,8 @@ class InterpretView(QWidget):
         blocked = combo.blockSignals(True)
         combo.clear()
         for key in numeric_decoder_keys():
+            if key in _PLOT_EXCLUDED_DECODERS:
+                continue
             decoder = DECODERS[key]
             if decoder.exact_len not in (None, width):
                 continue
@@ -1210,9 +1227,9 @@ class InterpretView(QWidget):
             combo.addItem("—", None)
         position = combo.findData(previous)
         if position < 0:
-            # Default to a plain unsigned integer of the block's width. The
-            # first *registered* numeric decoder is a hex reading, which is a
-            # number but a strange thing to plot; whoever wants it can pick it.
+            # Default to a plain unsigned integer of the block's width --
+            # the obvious first reading for a block nobody has looked at
+            # yet.
             position = combo.findData(_DEFAULT_PLOT_DECODERS.get(width, ""))
         combo.setCurrentIndex(position if position >= 0 else 0)
         combo.blockSignals(blocked)

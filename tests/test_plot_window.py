@@ -219,6 +219,25 @@ class PlotWindowTests(unittest.TestCase):
         self.assertNotIn("u32_be", keys, "a 32-bit read cannot fit two bytes")
         self.assertNotIn("f32_be", keys)
 
+    def test_hex_be_and_le_are_never_offered_in_plot(self):
+        """Hex (BE)/(LE) read the exact same bytes, same order, as one of
+        the fixed-width unsigned decoders already offered at every width
+        Plot's own Block size ever is -- see interpret_view's own
+        _PLOT_EXCLUDED_DECODERS. Unlike Blocks, Plot never reaches an odd
+        byte width where hex would be the only decoder that fits, so it
+        never earns a place here; BCD stays, since its own reading is not
+        a duplicate of anything else offered.
+        """
+        for index in range(4):                 # every Block size: 1/2/4/8
+            self.view._on_plot_block_size(index)
+            self.view._on_byte_clicked(0)
+            self.app.processEvents()
+            keys = {self.view.plot_decoder.itemData(i)
+                    for i in range(self.view.plot_decoder.count())}
+            self.assertNotIn("hex_be", keys)
+            self.assertNotIn("hex_le", keys)
+            self.assertIn("bcd", keys)
+
     def test_a_wider_block_unlocks_the_wider_decoders(self):
         self.view._on_plot_block_size(2)          # 4 bytes
         self.view._on_byte_clicked(0)
