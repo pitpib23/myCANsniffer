@@ -11,7 +11,8 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 from PySide6.QtCore import QEvent, QObject, QPointF, QRect, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import (
-    QColor, QFont, QFontMetrics, QFontMetricsF, QPainter, QPainterPath, QPen,
+    QColor, QFont, QFontMetrics, QFontMetricsF, QGuiApplication, QPainter,
+    QPainterPath, QPen,
 )
 from PySide6.QtWidgets import (
     QAbstractScrollArea, QApplication, QButtonGroup, QDialog, QFrame,
@@ -304,6 +305,80 @@ def scrollable(content: QWidget) -> QScrollArea:
     scroll.setWidget(content)
     enable_touch_scrolling(scroll)
     return scroll
+
+
+def _accepts_text_input_right_now(widget: Optional[QWidget]) -> bool:
+    """Whether ``widget`` is, right now, a genuine target for typed text --
+    not just an instance of a class that sometimes is one.
+
+    ``Qt.WA_InputMethodEnabled`` is what this actually turns on: True for a
+    QLineEdit/QTextEdit/QPlainTextEdit/QSpinBox-QDoubleSpinBox editor, False
+    for QPushButton/QTableView/QTableWidget/a closed QComboBox and every
+    other display/action widget in this project (confirmed live, per class
+    actually used here, not assumed from name). It also already tells every
+    read-only detail pane in this codebase (compare_view's
+    correlation_detail, isotp_view's diagnostic_caveats and
+    conversation_detail, protocols_view's evidence_detail and
+    j1939_transport_detail, profile_matches_view's details,
+    object_dictionary_window's detail_text -- all QPlainTextEdit) apart from
+    a genuinely editable one: QLineEdit/QTextEdit/QPlainTextEdit's own
+    ``setReadOnly(True)`` clears this same attribute itself (confirmed live
+    -- not merely the *query* below going False while the attribute stays
+    True, as first assumed and then disproven by actually checking). The
+    ``inputMethodQuery(Qt.ImEnabled)`` check is kept anyway, as a second,
+    independent signal: cheap, and correct insurance against some future
+    widget whose read-only/disabled state does not happen to clear the
+    attribute the same way these do.
+    """
+    if widget is None or not widget.testAttribute(Qt.WA_InputMethodEnabled):
+        return False
+    try:
+        enabled = widget.inputMethodQuery(Qt.ImEnabled)
+    except Exception:
+        # A widget that sets WA_InputMethodEnabled but does not answer this
+        # query at all has no read-only concept to second-guess -- trust the
+        # attribute alone rather than treat "unimplemented" as "closed".
+        return True
+    return True if enabled is None else bool(enabled)
+
+
+def install_input_panel_focus_guard(app: QApplication) -> None:
+    """Close a docked on-screen keyboard (squeekboard/onboard, see
+    MainWindow._on_available_geometry_changed) the moment keyboard focus
+    genuinely leaves a widget that accepts typed text for one that does not
+    -- a button, a table, a read-only detail pane, empty space.
+
+    Root cause this works around: Qt shows the input panel automatically on
+    FocusIn to a widget with ``Qt.WA_InputMethodEnabled`` set, but does not
+    itself call ``QInputMethod.hide()`` on FocusOut -- that half is left to
+    whatever the platform's input-panel integration does on its own, and a
+    docked panel driven from outside the Qt process (squeekboard/onboard)
+    has no way to learn that focus moved to a non-text widget *inside* this
+    process unless told. Confirmed nothing already tells it: no code
+    anywhere in this project calls QInputMethod/QGuiApplication.inputMethod
+    show()/hide(), and every table already used here is configured
+    NoEditTriggers with item flags stripped of Qt.ItemIsEditable (so no
+    delegate ever opens a hidden text editor on tap either) -- so a table or
+    button left the previous panel open behind it, not a still-open editor
+    of its own.
+
+    Connected once, to QApplication.focusChanged -- the same signal Qt's own
+    docs point to for exactly this kind of cross-widget reaction -- rather
+    than to any individual widget's click/press handlers, so this reacts to
+    focus actually changing ownership, never to a tap that leaves focus
+    exactly where it already was (a second tap on the field already focused,
+    a drag that ends back where it started). That is also why this only
+    ever calls hide(), never show(): a widget that does want the panel gets
+    it from Qt's own normal FocusIn handling already: forcing show() here
+    too would reopen it for a programmatic setFocus() a page does purely to
+    steer keyboard/scroll behavior, not to invite typing.
+    """
+
+    def _on_focus_changed(_old: Optional[QWidget], new: Optional[QWidget]) -> None:
+        if not _accepts_text_input_right_now(new):
+            QGuiApplication.inputMethod().hide()
+
+    app.focusChanged.connect(_on_focus_changed)
 
 
 def fit_top_level_to_screen(widget: QWidget, margin: int = 20) -> None:
