@@ -27,9 +27,9 @@ import unittest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 try:
-    from PySide6.QtCore import Qt
+    from PySide6.QtCore import QPoint, Qt
     from PySide6.QtTest import QTest
-    from PySide6.QtWidgets import QApplication, QHeaderView, QScrollArea
+    from PySide6.QtWidgets import QApplication, QHeaderView, QScrollArea, QScroller
     HAVE_QT = True
 except ImportError:  # pragma: no cover
     HAVE_QT = False
@@ -533,6 +533,103 @@ class RetainedBehaviorUnchangedTests(_LiteLayoutTestCase):
         self.assertEqual(
             window.trace_model.COLUMNS,
             ["Time (s)", "Ch", "CAN ID", "Type", "Bytes", "Payload"])
+
+
+class NestedTouchScrollGuardTests(_LiteLayoutTestCase):
+    """Lite's single-page workspace (lite_workspace_scroll) and its own
+    message table (id_view) are both independently touch-scroll-enabled
+    (see widgets.enable_touch_scrolling) and genuinely nested -- id_view
+    lives inside the same page lite_workspace_scroll wraps. Found live, on
+    real hardware: without widgets._NestedTouchScrollGuard, a single touch
+    drag started inside id_view put *both* QScrollers through
+    Pressed -> Dragging -> Scrolling at once (confirmed via
+    QScroller.activeScrollers() -- both viewports showing up together for
+    the whole gesture), and the page moved right along with the table it
+    was never meant to.
+
+    Offscreen QPA cannot drive QScroller's own kinetic/pixel-scroll
+    animation to completion (confirmed live: its state sits at Scrolling
+    indefinitely here, however long the test waits, yet settles to
+    Inactive within a couple of real-display frames on actual hardware) --
+    these assertions are on QScroller's own state/activeScrollers()
+    bookkeeping instead of scrollbar pixel values, which is unaffected by
+    that and is what the guard itself actually operates on.
+    """
+
+    def _drag(self, viewport, start, dy_per_step, steps, release=True):
+        QTest.mousePress(viewport, Qt.LeftButton, pos=start)
+        self.app.processEvents()
+        pos = start
+        for _ in range(steps):
+            pos = QPoint(pos.x(), pos.y() + dy_per_step)
+            QTest.mouseMove(viewport, pos=pos)
+            self.app.processEvents()
+        if release:
+            QTest.mouseRelease(viewport, Qt.LeftButton, pos=pos)
+            self.app.processEvents()
+        return pos
+
+    def test_dragging_inside_the_table_never_also_activates_the_page(self):
+        window = self._window()
+        window.id_model.add_frames([_frame(0x100 + i) for i in range(30)])
+        self.app.processEvents()
+        table_vp = window.id_view.viewport()
+        outer_vp = window.lite_workspace_scroll.viewport()
+
+        self._drag(table_vp, QPoint(table_vp.width() // 2, 10), 15, 5, release=False)
+        active = QScroller.activeScrollers()
+        self.assertLessEqual(
+            len(active), 1,
+            "one drag inside the table must never activate more than one "
+            "QScroller at a time")
+        self.assertEqual(
+            QScroller.scroller(outer_vp).state(), QScroller.State.Inactive,
+            "the page's own QScroller must stay Inactive for a gesture "
+            "that started inside the table")
+        QTest.mouseRelease(table_vp, Qt.LeftButton,
+                           pos=QPoint(table_vp.width() // 2, 10 + 5 * 15))
+        self.app.processEvents()
+
+    def test_page_stays_put_even_once_the_table_would_reach_its_own_limit(self):
+        """The boundary case: no hand-off, ever, mid-gesture."""
+        window = self._window()
+        window.id_model.add_frames([_frame(0x100 + i) for i in range(30)])
+        self.app.processEvents()
+        table_vp = window.id_view.viewport()
+        outer_vp = window.lite_workspace_scroll.viewport()
+
+        # Drag far past whatever the table's own content could ever need,
+        # all in one continuous gesture (no release in between).
+        self._drag(table_vp, QPoint(table_vp.width() // 2, table_vp.height() - 10),
+                   -20, 60, release=False)
+        self.assertEqual(
+            QScroller.scroller(outer_vp).state(), QScroller.State.Inactive,
+            "the page must not pick the gesture up once the table can no "
+            "longer scroll further, mid-drag")
+        QTest.mouseRelease(table_vp, Qt.LeftButton, pos=QPoint(table_vp.width() // 2, 0))
+        self.app.processEvents()
+
+    def test_a_drag_starting_outside_the_table_still_scrolls_the_page(self):
+        """Confirms the guard is only ever a no-op there, never a block --
+        the outer page's own touch scrolling must be entirely unaffected
+        for a gesture that never touches id_view at all."""
+        window = self._window()
+        window.id_model.add_frames([_frame(0x100 + i) for i in range(3)])
+        self.app.processEvents()
+        outer_vp = window.lite_workspace_scroll.viewport()
+        # A point below the (short) table -- on InterpretView's own area,
+        # not inside id_view's viewport.
+        below_table = window.id_view.mapTo(
+            outer_vp, QPoint(5, window.id_view.height() + 30))
+
+        self._drag(outer_vp, below_table, -15, 6, release=False)
+        self.assertNotEqual(
+            QScroller.scroller(outer_vp).state(), QScroller.State.Inactive,
+            "a gesture starting outside the table must still engage the "
+            "page's own QScroller normally")
+        QTest.mouseRelease(outer_vp, Qt.LeftButton,
+                           pos=QPoint(below_table.x(), below_table.y() - 6 * 15))
+        self.app.processEvents()
 
 
 class LayoutFitsAvailableGeometryTests(_LiteLayoutTestCase):

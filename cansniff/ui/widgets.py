@@ -9,13 +9,13 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional, Sequence, Tuple
 
-from PySide6.QtCore import QPointF, QRect, QRectF, QSize, Qt, Signal
+from PySide6.QtCore import QEvent, QObject, QPointF, QRect, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import (
     QColor, QFont, QFontMetrics, QFontMetricsF, QPainter, QPainterPath, QPen,
 )
 from PySide6.QtWidgets import (
-    QApplication, QButtonGroup, QDialog, QFrame, QHBoxLayout, QLabel,
-    QLayout, QPushButton, QScrollArea, QScroller,
+    QAbstractScrollArea, QApplication, QButtonGroup, QDialog, QFrame,
+    QHBoxLayout, QLabel, QLayout, QPushButton, QScrollArea, QScroller,
     QSizePolicy, QStackedWidget, QStyle, QStyledItemDelegate,
     QStyleOptionViewItem, QVBoxLayout, QWidget, QWidgetItem,
 )  # noqa: F401  (QSizePolicy used by NavRail and PayloadStrip)
@@ -133,6 +133,98 @@ class CurrentPageStack(QStackedWidget):
                 else super().minimumSizeHint())
 
 
+class _NestedTouchScrollGuard(QObject):
+    """Stops a touch-scroll-enabled QAbstractScrollArea's own QScroller from
+    also reacting to a gesture that actually belongs to a touch-scroll-
+    enabled *descendant* living inside it (a table on a scrolled page, the
+    payload strip/bit matrix on Lite's single-page workspace, ...).
+
+    Why this is needed: QScroller.grabGesture(viewport, LeftMouseButton-
+    Gesture) has no built-in notion of "nested" scroll areas. Qt's gesture
+    framework delivers the same gesture's events to *every* ancestor that
+    has also grabbed the same gesture type as the widget a press actually
+    landed on -- confirmed live, in this project, via
+    QScroller.activeScrollers(): dragging inside Lite's own message table
+    put both the table's own QScroller and the page's own QScroller through
+    Pressed -> Dragging -> Scrolling in lockstep from one gesture. There is
+    no automatic exclusivity between two independently grabGesture()'d
+    QScroller instances the way there is between, say, competing pinch/pan
+    gesture recognizers Qt arbitrates itself -- an application has to
+    establish that itself.
+
+    How ownership is actually enforced -- and two things that do not work,
+    tried first and rejected here on purpose:
+
+    * Consuming Gesture/GestureOverride for the ancestor's own viewport
+      (returning True from an event filter) does nothing: traced live, a
+      widget's QScroller is already mid-recognition well before those
+      arrive -- it keeps dragging regardless of what a filter does to
+      them afterward.
+    * Consuming the ancestor's own QScrollPrepareEvent instead *does*
+      stop that QScroller (confirmed live: it stays Inactive for the
+      whole gesture) -- but it does so by silently swallowing an event
+      Qt's own QGestureManager is still separately tracking as
+      "delivered, pending a verdict" for that widget, and the manager
+      cannot reconcile the two: a later plain tap on the *descendant*
+      then fails to resolve into an ordinary click at all (observed
+      live as "QGestureManager::deliverEvent: could not find the target
+      for gesture", and the table's own row selection breaking with it).
+
+    What actually works cleanly: the moment a gesture legitimately
+    starts on a descendant's own viewport (its own QScrollPrepareEvent
+    arrives -- the same signal used above, just read on the receiver it
+    truly belongs to this time), every QAbstractScrollArea ancestor that
+    has independently grabbed LeftMouseButtonGesture has that grab lifted
+    -- QScroller.ungrabGesture() -- for the rest of this one gesture. Qt
+    then correctly never considers that ancestor a candidate for this
+    gesture at all, rather than being told after the fact to disregard an
+    event it already dispatched -- the same public, intended mechanism an
+    application is expected to use to hand a gesture off between widgets,
+    used here to *not* hand it off. The lifted grab is restored the
+    moment the descendant's own QScroller reports Inactive again (via its
+    stateChanged signal) -- including after any kinetic coast-down, so an
+    ancestor cannot re-arm mid-flick either.
+
+    Nothing here needs to touch the boundary case specially: an ancestor
+    with no grab at all cannot pick a gesture up when the descendant
+    reaches its own scroll limit, or at any other point before release --
+    there is no hand-off path left for it to use.
+    """
+
+    def __init__(self, host: QAbstractScrollArea) -> None:
+        super().__init__(host)
+        self._host = host
+        #: Ancestor viewports currently ungrabbed on this widget's behalf,
+        #: for the one gesture in progress -- empty whenever none is.
+        self._lifted: List[QWidget] = []
+
+    def eventFilter(self, obj, event) -> bool:
+        if event.type() == QEvent.ScrollPrepare and not self._lifted:
+            self._claim_gesture_from_ancestors()
+        return False  # never consumed -- this only ever has a side effect
+
+    def _claim_gesture_from_ancestors(self) -> None:
+        widget = self._host.parentWidget()
+        while widget is not None:
+            if isinstance(widget, QAbstractScrollArea) and widget is not self._host:
+                ancestor_viewport = widget.viewport()
+                if ancestor_viewport is not None and QScroller.hasScroller(ancestor_viewport):
+                    QScroller.ungrabGesture(ancestor_viewport)
+                    self._lifted.append(ancestor_viewport)
+            widget = widget.parentWidget()
+        if self._lifted:
+            QScroller.scroller(self._host.viewport()).stateChanged.connect(
+                self._restore_ancestors_once_inactive)
+
+    def _restore_ancestors_once_inactive(self, state) -> None:
+        if state != QScroller.State.Inactive:
+            return
+        self.sender().stateChanged.disconnect(self._restore_ancestors_once_inactive)
+        for ancestor_viewport in self._lifted:
+            QScroller.grabGesture(ancestor_viewport, QScroller.LeftMouseButtonGesture)
+        self._lifted = []
+
+
 def enable_touch_scrolling(area) -> None:
     """Kinetic touch-drag scrolling for any QAbstractScrollArea, via Qt's own
     QScroller -- no new dependency (QScroller ships with QtWidgets). Works
@@ -149,8 +241,16 @@ def enable_touch_scrolling(area) -> None:
     rubber-band zoom drag) living inside a scrolled page gets first claim on
     its own mouse events regardless, so this never steals a child widget's
     own pan/zoom gesture.
+
+    Also installs _NestedTouchScrollGuard on the same viewport, so that if
+    *this* area turns out to have its own touch-scroll-enabled descendant
+    (a table on a scrolled page, say), a gesture starting inside that
+    descendant scrolls only it -- never both at once, and never handed back
+    to this outer area mid-gesture. Harmless, and a practical no-op, for a
+    leaf table with no touch-scroll-enabled descendants of its own.
     """
     QScroller.grabGesture(area.viewport(), QScroller.LeftMouseButtonGesture)
+    area.viewport().installEventFilter(_NestedTouchScrollGuard(area))
 
 
 def scrollable(content: QWidget) -> QScrollArea:
