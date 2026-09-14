@@ -9,16 +9,19 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional, Sequence, Tuple
 
-from PySide6.QtCore import QEvent, QObject, QPointF, QRect, QRectF, QSize, Qt, Signal
+from PySide6.QtCore import (
+    QEvent, QObject, QPoint, QPointF, QRect, QRectF, QSize, Qt, Signal,
+)
 from PySide6.QtGui import (
     QColor, QFont, QFontMetrics, QFontMetricsF, QGuiApplication, QPainter,
     QPainterPath, QPen,
 )
 from PySide6.QtWidgets import (
-    QAbstractScrollArea, QApplication, QButtonGroup, QDialog, QFrame,
-    QHBoxLayout, QLabel, QLayout, QPushButton, QScrollArea, QScroller,
-    QSizePolicy, QStackedWidget, QStyle, QStyledItemDelegate,
-    QStyleOptionViewItem, QVBoxLayout, QWidget, QWidgetItem,
+    QAbstractScrollArea, QAbstractSpinBox, QApplication, QButtonGroup,
+    QComboBox, QDialog, QFrame, QHBoxLayout, QLabel, QLayout, QPushButton,
+    QScrollArea, QScroller, QSizePolicy, QStackedWidget, QStyle,
+    QStyledItemDelegate, QStyleOptionViewItem, QVBoxLayout, QWidget,
+    QWidgetItem,
 )  # noqa: F401  (QSizePolicy used by NavRail and PayloadStrip)
 
 from .theme import RADIUS_MD, RADIUS_SM, ROW_HEIGHT, SPACE_SM, SPACE_XS, Theme
@@ -322,13 +325,24 @@ def _accepts_text_input_right_now(widget: Optional[QWidget]) -> bool:
     j1939_transport_detail, profile_matches_view's details,
     object_dictionary_window's detail_text -- all QPlainTextEdit) apart from
     a genuinely editable one: QLineEdit/QTextEdit/QPlainTextEdit's own
-    ``setReadOnly(True)`` clears this same attribute itself (confirmed live
-    -- not merely the *query* below going False while the attribute stays
-    True, as first assumed and then disproven by actually checking). The
-    ``inputMethodQuery(Qt.ImEnabled)`` check is kept anyway, as a second,
-    independent signal: cheap, and correct insurance against some future
-    widget whose read-only/disabled state does not happen to clear the
-    attribute the same way these do.
+    ``setReadOnly(True)`` clears this same attribute itself (confirmed live).
+    A *disabled* QLineEdit is different again: confirmed live that
+    ``setEnabled(False)`` leaves ``WA_InputMethodEnabled`` itself True, and
+    only ``inputMethodQuery(Qt.ImEnabled)`` goes False -- so the attribute
+    alone is not sufficient by itself either; both checks are load-bearing,
+    not one kept as idle insurance for the other.
+
+    This answers "does this widget's own class/state say it takes text" --
+    it does not by itself know whether a given *interaction* actually landed
+    on this widget's real text-entry surface, which matters for a compound
+    widget like QAbstractSpinBox/QComboBox (see
+    _interaction_targets_text_entry, which is what the pointer-driven guard
+    below actually uses; this function alone is what the focus-driven path
+    still uses, since a focus change carries no click position to refine
+    with -- confirmed live that Tab-focusing an ordinary QSpinBox reports
+    the spin box itself, not its internal lineEdit(), as
+    QApplication.focusWidget(), and that is a genuine typing target in that
+    case: focus reached it via keyboard navigation, not an ambiguous tap).
     """
     if widget is None or not widget.testAttribute(Qt.WA_InputMethodEnabled):
         return False
@@ -342,43 +356,230 @@ def _accepts_text_input_right_now(widget: Optional[QWidget]) -> bool:
     return True if enabled is None else bool(enabled)
 
 
+def _event_local_pos(event) -> Optional[QPoint]:
+    """The event's position in its receiver's own local coordinates, across
+    the PySide6 QSinglePointEvent (``position()``, QPointF) and legacy
+    (``pos()``, QPoint) APIs -- or None for an event with no meaningful
+    single position of its own (QScrollPrepareEvent, a multi-point
+    QTouchEvent), which callers here treat as "cannot refine, don't guess."
+    """
+    getter = getattr(event, "position", None)
+    if callable(getter):
+        try:
+            return getter().toPoint()
+        except Exception:
+            pass
+    getter = getattr(event, "pos", None)
+    if callable(getter):
+        try:
+            return getter()
+        except Exception:
+            pass
+    return None
+
+
+def _interaction_targets_text_entry(obj, event) -> bool:
+    """Whether a just-started pointer interaction (MouseButtonPress,
+    ScrollPrepare -- a gesture-grabbed QAbstractScrollArea's own actual
+    gesture-start event, see _NestedTouchScrollGuard above -- or TouchBegin)
+    delivered to ``obj`` genuinely targets typed text, right now.
+
+    Answering this from ``obj`` and the class of widget it is would be wrong
+    for QAbstractSpinBox and QComboBox, confirmed live: neither delivers a
+    press within its own internal ``lineEdit()`` child's on-screen area to
+    that child at all -- QAbstractSpinBox intercepts every press itself
+    first, text area and step buttons alike (``obj`` is the spin box either
+    way), and QComboBox does the same for its own editable line edit and
+    dropdown arrow. Worse, confirmed live that the bare container's own
+    ``Qt.WA_InputMethodEnabled``/``inputMethodQuery(Qt.ImEnabled)`` both
+    answer True for a plain QSpinBox even though tapping its step buttons is
+    not text entry at all -- _accepts_text_input_right_now(the spin box
+    itself) cannot be trusted here, which is exactly why this function
+    exists instead of just calling it on ``obj`` unconditionally. Comparing
+    the interaction's own local position against the child editor's real
+    geometry (already in the parent's own local coordinates, since it is a
+    genuine child widget) is what actually tells a tap on the digits apart
+    from one on a step button or the dropdown arrow -- a non-editable
+    QComboBox has no lineEdit() at all, so it is never a text target either
+    way, regardless of position.
+    """
+    if isinstance(obj, (QAbstractSpinBox, QComboBox)):
+        editor = obj.lineEdit()
+        if editor is None:
+            return False
+        pos = _event_local_pos(event)
+        if pos is None or not editor.geometry().contains(pos):
+            return False
+        return _accepts_text_input_right_now(editor)
+    return _accepts_text_input_right_now(obj)
+
+
+class _InputPanelInteractionGuard(QObject):
+    """Application-wide event filter that closes the on-screen keyboard, and
+    drops stale Qt keyboard focus, the moment a pointer interaction actually
+    *begins* on something that is not, right now, a genuine text-entry
+    target -- rather than waiting for ``QApplication.focusChanged``, which a
+    touched widget may never cause at all.
+
+    Why focusChanged alone (the previous, sole implementation of
+    install_input_panel_focus_guard) was not enough: it only runs when Qt
+    keyboard focus actually moves. Confirmed live that a QPushButton in this
+    project does move it (StrongFocus, so a tap does fire focusChanged) --
+    but nothing *requires* a touched widget to take keyboard focus at all,
+    and a widget explicitly configured Qt.NoFocus (a touchscreen-only action
+    button might reasonably be, even though none in this project happen to
+    be one today) would leave a previously focused QLineEdit as
+    ``QApplication.focusWidget()`` indefinitely: focusChanged never fires,
+    the panel never gets told to close, and Qt's own periodic/refocus
+    heuristics (window activation, the platform re-querying the still-
+    focused editor) can reopen it later. Reacting to the *start* of an
+    interaction instead -- MouseButtonPress for an ordinary widget,
+    ScrollPrepare for a gesture-grabbed QAbstractScrollArea viewport (a
+    table, a scrolled page, the payload strip, the bit matrix -- confirmed
+    live that QScroller's own gesture recognition swallows the raw
+    MouseButtonPress before *any* event filter, even one installed on
+    QApplication itself, ever sees it; ScrollPrepare is the first event that
+    still reaches one), and TouchBegin for a native touch path -- means this
+    does not depend on the target widget's focus policy at all.
+
+    Installed once on QApplication itself (not on a handful of individual
+    widgets): every event sent to every QObject in the process passes
+    through here first, before it reaches its own receiver's event()/any
+    filters installed on that receiver directly, which is what lets this see
+    a plain QPushButton's own MouseButtonPress -- confirmed live -- to
+    classify it, without needing a separate click handler wired onto every
+    button and table in the application individually (which the brief
+    explicitly asks not to do). eventFilter always returns False: this never
+    consumes an event, so QScroller's kinetic/pixel scrolling, item-view
+    selection, and every button's own click handling all proceed completely
+    unaffected -- this only ever has the side effect below, once, at the
+    very start of a gesture that fails the text-entry check.
+
+    One quirk to guard against, confirmed live: a press inside a
+    QAbstractSpinBox's own text area is handled by the spin box itself, not
+    its ``lineEdit()`` child (see _interaction_targets_text_entry) -- but Qt
+    also then redelivers that same physical press to the spin box's
+    *parent* widget, synchronously, as an ordinary unhandled-event bubble
+    (the parent is plainly never itself a text target, so on its own that
+    second delivery would be classified correctly -- it is just wrong for
+    this one press, since the actual target already, correctly, decided the
+    press was a genuine text interaction a moment earlier). ``_accepted``
+    remembers exactly one such just-allowed target so the very next
+    interaction-start event can be recognized as that same bubble and
+    skipped, rather than undoing the decision -- and only ever remembers one
+    at a time, self-clearing on the next interaction-start event regardless
+    of outcome, so this can never latch and silently disable the guard.
+    """
+
+    _INTERACTION_STARTS = (QEvent.MouseButtonPress, QEvent.ScrollPrepare, QEvent.TouchBegin)
+
+    def __init__(self, app: QApplication) -> None:
+        super().__init__(app)
+        self._app = app
+        self._accepted: Optional[QWidget] = None
+
+    def eventFilter(self, obj, event) -> bool:
+        if event.type() in self._INTERACTION_STARTS and isinstance(obj, QWidget):
+            accepted, self._accepted = self._accepted, None
+            if accepted is not None and accepted is not obj and _is_ancestor(obj, accepted):
+                return False  # Qt's own same-press bubble -- see class docstring
+            if self._on_interaction_start(obj, event):
+                self._accepted = obj
+        return False
+
+    def _on_interaction_start(self, obj: QWidget, event) -> bool:
+        """Returns True (and does nothing further) when obj/event target a
+        genuine text-entry surface right now; False after hiding the panel
+        and dropping any stale editable focus instead."""
+        if _interaction_targets_text_entry(obj, event):
+            return True  # genuine text entry -- leave the panel and focus alone
+        QGuiApplication.inputMethod().hide()
+        # Drop Qt's own keyboard focus from whatever text editor it was
+        # still sitting on, if any -- not unconditionally on every non-text
+        # interaction (a second tap on a button that already held ordinary
+        # focus has nothing stale to clear, and clearFocus() on a widget
+        # that is not QApplication.focusWidget() is a no-op anyway, but
+        # skipping it when there is nothing to do keeps this from touching
+        # focus at all during ordinary button-to-button/table-to-table
+        # interaction, which is the "don't arbitrarily call setFocus()" the
+        # brief asks for turned around). This is what stops the platform's
+        # own later re-focus/re-query heuristics from reopening the panel
+        # for an editor Qt would otherwise still call "focused".
+        stale = self._app.focusWidget()
+        if stale is not None and _accepts_text_input_right_now(stale):
+            stale.clearFocus()
+        return False
+
+
+def _is_ancestor(widget: QWidget, maybe_descendant: QWidget) -> bool:
+    """Whether ``widget`` is somewhere in ``maybe_descendant``'s own chain of
+    parentWidget()s -- used only to recognize Qt's own same-press bubble to a
+    parent (see _InputPanelInteractionGuard), not general-purpose elsewhere."""
+    parent = maybe_descendant.parentWidget()
+    while parent is not None:
+        if parent is widget:
+            return True
+        parent = parent.parentWidget()
+    return False
+
+
 def install_input_panel_focus_guard(app: QApplication) -> None:
     """Close a docked on-screen keyboard (squeekboard/onboard, see
-    MainWindow._on_available_geometry_changed) the moment keyboard focus
-    genuinely leaves a widget that accepts typed text for one that does not
-    -- a button, a table, a read-only detail pane, empty space.
+    MainWindow._on_available_geometry_changed) the moment the user's actual
+    interaction target -- what a press/drag/tap really lands on, not merely
+    whatever Qt happens to still call keyboard focus -- is not, right now, a
+    genuine text-entry surface.
 
-    Root cause this works around: Qt shows the input panel automatically on
-    FocusIn to a widget with ``Qt.WA_InputMethodEnabled`` set, but does not
-    itself call ``QInputMethod.hide()`` on FocusOut -- that half is left to
-    whatever the platform's input-panel integration does on its own, and a
-    docked panel driven from outside the Qt process (squeekboard/onboard)
-    has no way to learn that focus moved to a non-text widget *inside* this
-    process unless told. Confirmed nothing already tells it: no code
-    anywhere in this project calls QInputMethod/QGuiApplication.inputMethod
-    show()/hide(), and every table already used here is configured
-    NoEditTriggers with item flags stripped of Qt.ItemIsEditable (so no
-    delegate ever opens a hidden text editor on tap either) -- so a table or
-    button left the previous panel open behind it, not a still-open editor
-    of its own.
+    Root cause: Qt shows the input panel automatically on FocusIn to a
+    widget with ``Qt.WA_InputMethodEnabled`` set, but does not itself call
+    ``QInputMethod.hide()`` on FocusOut -- that half is left to whatever the
+    platform's input-panel integration does on its own, and a docked panel
+    driven from outside the Qt process (squeekboard/onboard) has no way to
+    learn that focus moved to a non-text widget *inside* this process unless
+    told. Confirmed nothing already tells it: no code anywhere in this
+    project calls QInputMethod/QGuiApplication.inputMethod show()/hide()
+    other than this function, and every table already used here is
+    configured NoEditTriggers with a model that never grants
+    Qt.ItemIsEditable (so no delegate ever opens a hidden text editor on tap
+    either) -- confirmed live, including double-click and Enter on a fresh
+    non-editable QTableView -- so a table or button left a *previous*
+    panel open behind it, not a still-open editor of its own.
 
-    Connected once, to QApplication.focusChanged -- the same signal Qt's own
-    docs point to for exactly this kind of cross-widget reaction -- rather
-    than to any individual widget's click/press handlers, so this reacts to
-    focus actually changing ownership, never to a tap that leaves focus
-    exactly where it already was (a second tap on the field already focused,
-    a drag that ends back where it started). That is also why this only
-    ever calls hide(), never show(): a widget that does want the panel gets
-    it from Qt's own normal FocusIn handling already: forcing show() here
-    too would reopen it for a programmatic setFocus() a page does purely to
-    steer keyboard/scroll behavior, not to invite typing.
+    Two complementary mechanisms, not one, because either alone misses a
+    real case:
+
+    * _InputPanelInteractionGuard, an application-wide event filter (see its
+      own docstring) reacting to the *start* of a pointer/touch interaction
+      -- this is the one that actually closes the gap a touched widget that
+      never takes Qt keyboard focus at all would otherwise leave open, and
+      is what most taps in this application (buttons, tables, scrolled
+      pages) go through.
+    * QApplication.focusChanged, kept from the previous implementation, for
+      a focus change that is not preceded by a press this process saw at
+      all -- Tab/keyboard navigation, or a page's own programmatic
+      setFocus() call after a button's ``clicked`` handler runs (already
+      used in this project: database_window.py's "New" button focusing
+      can_id_edit) -- which is exactly the sequence this leaves free to
+      re-open the panel afterward for a *genuinely* editable field, since
+      this path, like the interaction guard, only ever calls hide(), never
+      show().
+
+    Returns the installed _InputPanelInteractionGuard -- main.py has no use
+    for it (this is meant to be installed once, for the process's whole
+    life), but a test that wants a clean slate between cases needs it back
+    to remove it again, since QApplication.installEventFilter has no way to
+    look an already-installed filter back up by type.
     """
+
+    guard = _InputPanelInteractionGuard(app)
+    app.installEventFilter(guard)
 
     def _on_focus_changed(_old: Optional[QWidget], new: Optional[QWidget]) -> None:
         if not _accepts_text_input_right_now(new):
             QGuiApplication.inputMethod().hide()
 
     app.focusChanged.connect(_on_focus_changed)
+    return guard
 
 
 def fit_top_level_to_screen(widget: QWidget, margin: int = 20) -> None:
