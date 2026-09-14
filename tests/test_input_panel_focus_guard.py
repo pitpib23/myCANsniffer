@@ -283,6 +283,93 @@ class InputPanelFocusGuardTests(unittest.TestCase):
         self._press(self.editable)
         self.mock_hide.assert_not_called()  # guard still classifies correctly afterward
 
+    # -- pre-Start scrolling regression: no spurious hide() at all when ---
+    # -- nothing was ever focused (a fresh page/table's very first touch) -
+
+    def test_first_touch_of_a_session_with_nothing_ever_focused_never_calls_input_method_at_all(self):
+        """Bug: the on-screen keyboard's automatic show-on-focus/hide
+        integration involves a live round trip to the platform's input
+        panel (squeekboard/onboard) -- calling QGuiApplication.inputMethod()
+        at all, even just to immediately hide() an already-hidden panel,
+        is not free, and was previously done unconditionally on *every*
+        non-text interaction. A page or table's very first touch of a
+        session -- nothing has ever been focused yet -- is exactly this
+        case: there is no stale editor anywhere, so there is nothing to
+        hide, and this guard must not call the platform at all for it, not
+        merely call hide() redundantly. (This is the same call this
+        project's QScroller-grabbed viewports process ScrollPrepare from,
+        on the very same press -- see K4 -- so a gratuitous live call here
+        was also, independently, a plausible source of interference with
+        the gesture QScroller is simultaneously trying to recognize on
+        that identical first press.)
+        """
+        # A shared QApplication across this whole test run can still be
+        # carrying focus from an earlier test's (since-deleted) widget --
+        # not this test's own concern, so start from a genuinely clean
+        # slate rather than assuming one.
+        stray = self.app.focusWidget()
+        if stray is not None:
+            stray.clearFocus()
+            self.app.processEvents()
+        self.mock_hide.reset_mock()
+        self.mock_qga.inputMethod.reset_mock()
+
+        for widget, pos in (
+            (self.table.viewport(), self.table.viewport().rect().center()),
+            (self.button, None),
+            (self.table.viewport(), self.table.viewport().rect().center()),
+        ):
+            self._press(widget, pos)
+            self.mock_hide.assert_not_called()
+        self.mock_qga.inputMethod.assert_not_called()
+
+    def test_stale_focus_is_cleared_before_hide_is_requested_not_after(self):
+        """The flash bug: hiding the panel used to run before clearing the
+        stale editor's own Qt focus, a moment later, as a separate step --
+        so the panel was told to close while the platform could still see
+        an editable widget as the current input-method focus target for
+        that whole moment in between, which is exactly the window an
+        automatic show/re-show heuristic can act in. Clearing focus first
+        removes the input-method target itself before the platform is ever
+        asked to hide anything.
+
+        Exercised on a gesture-grabbed table viewport (id_view/trace_view's
+        own real configuration -- see K4), not a plain button: confirmed
+        live that for an ordinary StrongFocus QPushButton, Qt's own native
+        click-to-focus reassignment already runs *before* this application-
+        wide event filter ever sees the press at all (self._app.focusWidget()
+        already reports the button itself, not the stale editor, by the
+        time _on_interaction_start runs) -- so hide() still correctly fires
+        there too, but via the plain focusChanged connection reacting to
+        Qt's own native change, not via this method's own clearFocus()/
+        hide() calls, which never run for that case since there is nothing
+        left stale to find by then. A gesture-grabbed viewport's first
+        event is ScrollPrepare instead (QScroller's own recognition
+        intercepts the raw MouseButtonPress before any filter, confirmed
+        repeatedly elsewhere in this file) -- confirmed live that *that*
+        event still arrives before Qt's native reassignment, which is
+        exactly the case this method's own ordering has to get right, and
+        exactly the widgets (id_view/trace_view) the reported flash was
+        about.
+        """
+        QScroller.grabGesture(self.table.viewport(), QScroller.LeftMouseButtonGesture)
+        self.editable.setFocus(Qt.MouseFocusReason)
+        self.app.processEvents()
+
+        seen = []
+        original_clear_focus = self.editable.clearFocus
+        def spy_clear_focus():
+            seen.append("clearFocus")
+            original_clear_focus()
+        self.editable.clearFocus = spy_clear_focus
+        self.mock_hide.side_effect = lambda: seen.append("hide")
+
+        QTest.mousePress(self.table.viewport(), Qt.LeftButton, Qt.NoModifier,
+                          self.table.viewport().rect().center())
+        self.app.processEvents()
+
+        self.assertEqual(seen[:2], ["clearFocus", "hide"])
+
     # -- K5: read-only QLineEdit ------------------------------------------
 
     def test_k5_press_on_read_only_line_edit(self):
@@ -392,21 +479,37 @@ class InputPanelFocusGuardTests(unittest.TestCase):
 
     def test_k11_repeated_real_world_sequence_only_hides_for_non_text_targets(self):
         search_box = QLineEdit(self.host)
+        search_box.show()  # a widget created after its parent is already
+                            # shown needs its own show() -- otherwise it
+                            # never becomes a real click/focus target at all
         table_index = self.table.model().index(0, 0)
         table_rect = self.table.visualRect(table_index)
         page = QWidget(self.host)
         page.resize(200, 200)
         page.show()
+        self.app.processEvents()
 
+        # hide() is only ever warranted when a genuine text target is
+        # actually losing stale focus -- so it fires the first time a
+        # non-text press follows one that left a real editor focused, and
+        # not again for a further non-text press with nothing left stale to
+        # clear (button -> page here, both non-text in a row).
         steps = [
             (lambda: self._press(search_box), False),
             (lambda: self._press(self.table.viewport(), table_rect.center()), True),
-            (lambda: self._press(self.button), True),
-            (lambda: self._press(page), True),
+            (lambda: self._press(self.button), False),
+            (lambda: self._press(page), False),
             (lambda: self._press(search_box), False),
             (lambda: self._press(self.table.viewport(), table_rect.center()), True),
         ]
         for do_press, expect_hide in steps:
+            # A real user's taps are never back-to-back within the same
+            # event-loop turn -- QTest.qWait past Qt's own double-click
+            # window keeps each press an unambiguous, independent click
+            # (confirmed live: omitting this let a same-widget re-press
+            # land inside Qt's double-click detection and silently not
+            # retake focus, a test-timing artifact, not a guard defect).
+            QTest.qWait(50)
             do_press()
             self.assertEqual(self.mock_hide.called, expect_hide)
 

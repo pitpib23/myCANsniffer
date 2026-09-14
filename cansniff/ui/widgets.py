@@ -489,25 +489,60 @@ class _InputPanelInteractionGuard(QObject):
 
     def _on_interaction_start(self, obj: QWidget, event) -> bool:
         """Returns True (and does nothing further) when obj/event target a
-        genuine text-entry surface right now; False after hiding the panel
-        and dropping any stale editable focus instead."""
+        genuine text-entry surface right now; False after dropping any
+        stale editable focus and hiding the panel instead.
+
+        Order matters, and this was previously backwards: hide() ran
+        first, unconditionally, on *every* non-text interaction, and only
+        then -- a separate, later step -- did a stale editor's own focus
+        get cleared. Clearing focus first is what actually matters: it is
+        what QApplication.focusWidget() is keyed to, and clearing it fires
+        focusChanged synchronously, which install_input_panel_focus_guard's
+        own focusChanged connection (below) already turns into exactly the
+        same hide() call -- so calling hide() here too, a second way, a
+        moment later, was redundant whenever there was something stale to
+        clear, and actively wrong whenever there was not: pressing a
+        button, a table, or scrolling a page for the first time in a
+        session, with nothing ever having been focused yet, called
+        QGuiApplication.inputMethod().hide() regardless -- a live round
+        trip to the platform's input panel integration for no reason at
+        all, immediately at the start of a gesture QScroller is
+        simultaneously trying to recognize on the very same press. Gating
+        both calls on a stale target actually existing removes that
+        entirely for the common case (no editor was ever focused yet) and
+        fixes the ordering for the case that remains.
+
+        Confirmed live where this ordering actually matters: for an
+        ordinary StrongFocus QPushButton, Qt's own native click-to-focus
+        reassignment already runs *before* this application-wide filter
+        ever sees the press -- self._app.focusWidget() below already
+        reports the button itself by the time this method runs, so
+        clearFocus() finds nothing stale to act on for that case, and
+        hide() still correctly happens, but via the plain focusChanged
+        connection reacting to Qt's own native change, not from here. A
+        gesture-grabbed QAbstractScrollArea viewport -- id_view/trace_view,
+        the widgets the reported keyboard flash was actually about -- is
+        different: its first event is ScrollPrepare (QScroller's own
+        gesture recognition intercepts the raw MouseButtonPress before any
+        event filter, confirmed repeatedly elsewhere in this module), and
+        confirmed live that *that* event still arrives before Qt's native
+        focus reassignment does -- self._app.focusWidget() below is still
+        the genuinely stale editor at that point, which is exactly the case
+        this method's own clearFocus()-before-hide() ordering is for.
+        """
         if _interaction_targets_text_entry(obj, event):
             return True  # genuine text entry -- leave the panel and focus alone
-        QGuiApplication.inputMethod().hide()
-        # Drop Qt's own keyboard focus from whatever text editor it was
-        # still sitting on, if any -- not unconditionally on every non-text
-        # interaction (a second tap on a button that already held ordinary
-        # focus has nothing stale to clear, and clearFocus() on a widget
-        # that is not QApplication.focusWidget() is a no-op anyway, but
-        # skipping it when there is nothing to do keeps this from touching
-        # focus at all during ordinary button-to-button/table-to-table
-        # interaction, which is the "don't arbitrarily call setFocus()" the
-        # brief asks for turned around). This is what stops the platform's
-        # own later re-focus/re-query heuristics from reopening the panel
-        # for an editor Qt would otherwise still call "focused".
+        # Not unconditional: a second tap on a button that already held
+        # ordinary (non-text) focus has nothing stale to clear, and
+        # skipping both calls when there is nothing to do is what keeps
+        # this from touching input-method state at all during ordinary
+        # button-to-button/table-to-table interaction or a page's very
+        # first touch of a session -- the "don't arbitrarily call
+        # setFocus()" the brief asks for, turned around.
         stale = self._app.focusWidget()
         if stale is not None and _accepts_text_input_right_now(stale):
             stale.clearFocus()
+            QGuiApplication.inputMethod().hide()
         return False
 
 
@@ -574,8 +609,16 @@ def install_input_panel_focus_guard(app: QApplication) -> None:
     guard = _InputPanelInteractionGuard(app)
     app.installEventFilter(guard)
 
-    def _on_focus_changed(_old: Optional[QWidget], new: Optional[QWidget]) -> None:
-        if not _accepts_text_input_right_now(new):
+    def _on_focus_changed(old: Optional[QWidget], new: Optional[QWidget]) -> None:
+        # Gated on the widget actually *losing* focus having been a genuine
+        # text target, not just on the new one not being one -- Tab-
+        # navigating from one button to the next (old also not a text
+        # target) has nothing to hide either, and calling hide() anyway on
+        # every such change was the same unconditional-call mistake
+        # _InputPanelInteractionGuard._on_interaction_start's own docstring
+        # describes, here on the focus-driven path instead of the pointer-
+        # driven one.
+        if _accepts_text_input_right_now(old) and not _accepts_text_input_right_now(new):
             QGuiApplication.inputMethod().hide()
 
     app.focusChanged.connect(_on_focus_changed)
