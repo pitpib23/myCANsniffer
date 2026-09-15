@@ -276,15 +276,25 @@ class TableColumnWidthTests(_LiteLayoutTestCase):
         width_64 = window.id_view.columnWidth(6)
         self.assertGreater(width_64, width_8)
 
-    def test_table_itself_has_no_horizontal_scrollbar_in_lite(self):
+    def test_id_view_has_no_horizontal_scrollbar_in_lite(self):
         """Not its own independent horizontal workspace: the *page*
         (lite_workspace_scroll) owns horizontal scrolling instead -- see
-        _configure_table's own Lite section."""
+        _configure_table's own Lite section. trace_view is the deliberate
+        exception -- see test_trace_view_scrolls_horizontally_on_its_own
+        below."""
         window = self._window()
         self.assertEqual(
             window.id_view.horizontalScrollBarPolicy(), Qt.ScrollBarAlwaysOff)
+
+    def test_trace_view_scrolls_horizontally_on_its_own(self):
+        """Unlike id_view, trace_view owns its own horizontal overflow
+        (and is touch-scrollable for it -- see _configure_table's
+        horizontal_touch_scroll) rather than asking the page to grow wide
+        enough for a CAN FD payload -- see _size_table_columns's own
+        propagate_width_to_page."""
+        window = self._window()
         self.assertEqual(
-            window.trace_view.horizontalScrollBarPolicy(), Qt.ScrollBarAlwaysOff)
+            window.trace_view.horizontalScrollBarPolicy(), Qt.ScrollBarAsNeeded)
 
     def test_wide_table_makes_the_enclosing_page_scroll_horizontally(self):
         """A CAN FD-sized payload column pushes the table's own natural
@@ -339,6 +349,39 @@ class TableColumnWidthTests(_LiteLayoutTestCase):
         self.app.processEvents()
         self.assertLess(window.id_view.height(), 2000)
         self.assertGreater(window.id_view.verticalScrollBar().maximum(), 0)
+
+    def test_trace_view_never_grows_past_eight_rows(self):
+        """Unlike id_view (a floor only -- see _configure_table's own
+        fixed_row_cap), trace_view's height is a hard ceiling too: it never
+        grows past _LITE_TABLE_VISIBLE_ROWS worth of height, no matter how
+        little else is on the page competing for room, and always
+        reaches the rest of its rows through its own vertical scrollbar."""
+        window = self._window()
+        window._activate_browser(window._NAV_TRACE)
+        self.app.processEvents()
+        locked_height = window.trace_view.height()
+        self.assertEqual(window.trace_view.minimumHeight(), window.trace_view.maximumHeight())
+
+        window.trace_model.add_frames([_frame(0x100 + i) for i in range(500)])
+        for _ in range(5):
+            self.app.processEvents()
+        self.assertEqual(window.trace_view.height(), locked_height)
+        self.assertGreater(window.trace_view.verticalScrollBar().maximum(), 0)
+
+    def test_trace_view_wide_payload_scrolls_the_table_not_the_page(self):
+        """trace_view's own columns are still sized for a full CAN FD
+        payload (see _lite_payload_column_width) -- the difference from
+        id_view is only where that width is *reached*: the table's own
+        horizontal scrollbar, not lite_workspace_scroll's (see
+        _size_table_columns's own propagate_width_to_page)."""
+        window = self._window()
+        window._activate_browser(window._NAV_TRACE)
+        window.config.set("source.live.fd", True)
+        window._apply_config_to_widgets()
+        for _ in range(5):
+            self.app.processEvents()
+        self.assertEqual(window.trace_view.minimumWidth(), 0)
+        self.assertGreater(window.trace_view.horizontalScrollBar().maximum(), 0)
 
 
 class DensityFloorTests(_LiteLayoutTestCase):

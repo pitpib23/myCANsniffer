@@ -1271,8 +1271,15 @@ class MainWindow(QMainWindow):
         # (unlike Messages, already grouped by ID) it needs both "when"
         # and "which ID" alongside the payload. Channel/Type/Bytes are
         # never removed from the model, only hidden from this view.
+        #
+        # fixed_row_cap/horizontal_touch_scroll=True, unlike id_view: Trace
+        # always stays exactly _LITE_TABLE_VISIBLE_ROWS tall (never grows
+        # into free page space) and scrolls its own overflow, in both
+        # directions, by touch -- rather than handing wide rows to the
+        # page the way id_view still does.
         self._configure_table(
-            self.trace_view, payload_column=5, lite_visible_columns=(0, 2, 5))
+            self.trace_view, payload_column=5, lite_visible_columns=(0, 2, 5),
+            fixed_row_cap=True, horizontal_touch_scroll=True)
         self.trace_view.selectionModel().selectionChanged.connect(self._on_trace_selection)
         self.trace_view.verticalScrollBar().valueChanged.connect(self._on_trace_scrolled)
         if self.lite:
@@ -1294,6 +1301,7 @@ class MainWindow(QMainWindow):
     def _configure_table(
         self, view: QTableView, payload_column: int,
         lite_visible_columns: Tuple[int, ...] = (),
+        fixed_row_cap: bool = False, horizontal_touch_scroll: bool = False,
     ) -> None:
         view.setSelectionBehavior(QAbstractItemView.SelectRows)
         view.setSelectionMode(QAbstractItemView.SingleSelection)
@@ -1328,24 +1336,42 @@ class MainWindow(QMainWindow):
                 header.setSectionResizeMode(column, QHeaderView.Interactive)
                 view.setColumnHidden(column, column not in lite_visible_columns)
             # A CAN FD payload (64 bytes) can still be wider than the
-            # viewport even with only these columns shown -- the *page*
-            # (see _build_ui's own Lite section), not this table, scrolls
-            # horizontally to reach the rest of it in that case; ordinary
-            # Classic CAN traffic (8 bytes) fits without any horizontal
-            # scrolling at all with this reduced column set.
-            view.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+            # viewport even with only these columns shown. horizontal_
+            # touch_scroll controls where that overflow is reached: off
+            # (the default, id_view/trace_view's own long-standing
+            # behavior) leaves it to the *page* (see _build_ui's own Lite
+            # section) to scroll horizontally instead; ordinary Classic CAN
+            # traffic (8 bytes) fits without any horizontal scrolling at
+            # all with this reduced column set either way. When enabled,
+            # the table gets a real horizontal scrollbar and touch-drags
+            # itself -- enable_touch_scrolling below already grabs
+            # LeftMouseButtonGesture regardless of which axes are on, so
+            # nothing further is needed to make that touch-scrollable too.
+            view.setHorizontalScrollBarPolicy(
+                Qt.ScrollBarAsNeeded if horizontal_touch_scroll else Qt.ScrollBarAlwaysOff)
             _enable_touch_scrolling(view)
             # A readable, touch-comfortable number of rows at a glance
             # (see _LITE_TABLE_VISIBLE_ROWS) without letting the table eat
             # the whole page -- InterpretView sits directly below it on
             # the same scrollable page (see _build_ui), reached by
-            # scrolling down, exactly like reaching more rows is. Not a
-            # maximum: a bigger host screen (interpolated_density's own
-            # SPACIOUS anchors) can still give it more room if the page
-            # layout happens to have it to spare.
-            view.setMinimumHeight(
+            # scrolling down, exactly like reaching more rows is.
+            #
+            # fixed_row_cap controls whether that is a floor or a hard
+            # ceiling too: left False (id_view's own behavior, unchanged),
+            # it is a minimum only -- a bigger host screen
+            # (interpolated_density's own SPACIOUS anchors) can still give
+            # the table more room if the page layout happens to have it to
+            # spare. Set True (trace_view), the table never grows past
+            # exactly this many rows regardless of how much page space is
+            # otherwise free -- rows beyond that are always reached by the
+            # table's own internal scrolling, never by the table itself
+            # claiming more of the page.
+            visible_rows_height = (
                 _LITE_TABLE_VISIBLE_ROWS * ROW_HEIGHT_COMPACT
                 + view.horizontalHeader().sizeHint().height())
+            view.setMinimumHeight(visible_rows_height)
+            if fixed_row_cap:
+                view.setMaximumHeight(visible_rows_height)
         else:
             # Identity and counters get a width sized to their format, not to
             # the rows currently loaded. ResizeToContents here re-measured up
@@ -1361,9 +1387,13 @@ class MainWindow(QMainWindow):
                     QHeaderView.Stretch if column == payload_column
                     else QHeaderView.Interactive,
                 )
-        self._size_table_columns(view, payload_column)
+        self._size_table_columns(
+            view, payload_column, propagate_width_to_page=not horizontal_touch_scroll)
 
-    def _size_table_columns(self, view: QTableView, payload_column: int) -> None:
+    def _size_table_columns(
+        self, view: QTableView, payload_column: int,
+        propagate_width_to_page: bool = True,
+    ) -> None:
         for column, width in enumerate(exemplar_widths(view.model(), self.theme)):
             if column == payload_column:
                 if self.lite:
@@ -1372,7 +1402,7 @@ class MainWindow(QMainWindow):
                 # _configure_table.
                 continue
             view.setColumnWidth(column, width)
-        if self.lite:
+        if self.lite and propagate_width_to_page:
             # A *minimum* width equal to the sum of only the columns Lite
             # actually shows (see _configure_table's own Lite section and
             # its lite_visible_columns) -- read back from the view's own
@@ -1385,6 +1415,13 @@ class MainWindow(QMainWindow):
             # the rest of it. Never a fixed width: nothing stops this
             # table from simply filling more space on a wider host
             # screen.
+            #
+            # propagate_width_to_page=False (trace_view) skips this floor
+            # entirely: its own columns are still sized exactly as wide as
+            # above, but that width is never pushed up onto the page, so a
+            # wide CAN FD payload becomes the table's *own* horizontal
+            # scrollbar (see _configure_table's horizontal_touch_scroll)
+            # instead of asking the page to grow to fit it.
             total = sum(
                 view.columnWidth(c) for c in range(view.model().columnCount())
                 if not view.isColumnHidden(c))
@@ -1489,7 +1526,7 @@ class MainWindow(QMainWindow):
             # _lite_payload_column_width) rather than leaving it sized for
             # whichever FD state was configured at construction.
             self._size_table_columns(self.id_view, 6)
-            self._size_table_columns(self.trace_view, 5)
+            self._size_table_columns(self.trace_view, 5, propagate_width_to_page=False)
 
         self._update_source_chip()
 
@@ -3830,7 +3867,8 @@ class MainWindow(QMainWindow):
                     invalidate()
             # Column widths come from the font metrics, so they have to be
             # recomputed rather than left at the previous face's sizes.
-            self._size_table_columns(view, payload_column)
+            self._size_table_columns(
+                view, payload_column, propagate_width_to_page=view is not self.trace_view)
         if reapply_stylesheet:
             # A real font change only -- never the responsive-density path,
             # which calls this far more often (every density transition,
