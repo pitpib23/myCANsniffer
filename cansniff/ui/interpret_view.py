@@ -16,9 +16,9 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QFontMetrics
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QFrame, QGridLayout,
-    QHBoxLayout, QHeaderView, QLabel, QPushButton, QScrollArea, QSizePolicy,
-    QSpinBox, QStackedWidget, QTableWidget, QTableWidgetItem, QVBoxLayout,
-    QWidget,
+    QHBoxLayout, QHeaderView, QLabel, QPushButton, QScrollArea, QScroller,
+    QSizePolicy, QSpinBox, QStackedWidget, QTableWidget, QTableWidgetItem,
+    QVBoxLayout, QWidget,
 )
 
 from ..analysis import dbc as dbc_status
@@ -42,6 +42,15 @@ from .widgets import (
 )
 
 _BLOCK_SIZES = [1, 2, 4, 8]
+
+#: Lite only (see _lock_table_to_visible_rows): how many rows the Blocks and
+#: Signals tables show before they scroll internally, rather than growing
+#: into the rest of the page -- the same figure and the same reasoning as
+#: main_window._LITE_TABLE_VISIBLE_ROWS (id_view/trace_view), kept as its
+#: own copy here rather than imported: this module already deliberately
+#: knows nothing about MainWindow (see this file's own docstring), just the
+#: same touchscreen constraint independently applying to another table.
+_LITE_TABLE_VISIBLE_ROWS = 8
 
 #: Plot time windows, as (label, seconds). 0 means the whole retained capture.
 #: The default is a minute: a long capture spans hundreds of seconds, and drawn
@@ -667,10 +676,56 @@ class InterpretView(QWidget):
         self.cell_delegate = InterpretCellDelegate(self.theme, self.table)
         self.table.setItemDelegate(self.cell_delegate)
         self.table.itemSelectionChanged.connect(self._on_row_selected)
+        self._lock_table_to_visible_rows(self.table)
         self.stack.addWidget(self.table)
 
         self.stack.setCurrentWidget(self.empty_state)
         return self.stack
+
+    def _lock_table_to_visible_rows(self, table: QTableWidget) -> None:
+        """Lite only: caps ``table`` at exactly _LITE_TABLE_VISIBLE_ROWS
+        tall -- a real ceiling, not just a floor, so it never grows into
+        whatever page space happens to be free -- and makes it scroll
+        *itself*, by touch, for anything beyond that, in both directions:
+        the same treatment main_window.py's own trace_view got (see its
+        _configure_table's fixed_row_cap/horizontal_touch_scroll), applied
+        here to Blocks (self.table) and Signals (self.signals_table),
+        which had neither a cap nor a touch-scroll grab of their own
+        before this -- content beyond a screenful was reachable only by
+        scrolling the whole Lite page past them.
+
+        enable_touch_scrolling grabs LeftMouseButtonGesture on whichever
+        axes the table's own scrollbars actually allow, so a plain,
+        already-default QTableWidget horizontal scrollbar (never touched
+        here) becomes touch-draggable for free the same way the vertical
+        one does; nothing here needs to choose between them the way
+        main_window.py's horizontal_touch_scroll flag does, since neither
+        of these two tables hands its own overflow to the page the way
+        id_view still deliberately does.
+
+        Reads the row height back from the table's own vertical header
+        (defaultSectionSize()) rather than a fixed constant, and is called
+        again from restyle() for self.table specifically: that table's own
+        row height is itself density-driven (restyle sets it to
+        self.theme.density.row_height, not the fixed ROW_HEIGHT this
+        module otherwise uses -- confirmed live, they differ, 27px vs
+        30px, so a cap computed from the wrong one here would have been
+        visibly off by nearly a whole row) and can change after this is
+        first called at construction, on a density transition (a bigger
+        host screen, Settings' own font size) -- signals_table's own row
+        height is never touched after _plain_table sets it once, so
+        calling this again for it would be harmless but is not needed.
+        """
+        if not self.lite:
+            return
+        row_height = table.verticalHeader().defaultSectionSize()
+        visible_rows_height = (
+            _LITE_TABLE_VISIBLE_ROWS * row_height
+            + table.horizontalHeader().sizeHint().height())
+        table.setMinimumHeight(visible_rows_height)
+        table.setMaximumHeight(visible_rows_height)
+        if not QScroller.hasScroller(table.viewport()):
+            enable_touch_scrolling(table)
 
     def _plain_table(self, headers: List[str]) -> QTableWidget:
         """A read-only table styled like the interpretation table."""
@@ -702,6 +757,7 @@ class InterpretView(QWidget):
         self.signals_table = self._plain_table(
             ["Signal", "Value", "Unit", "Raw", "Notes"])
         self.signals_table.itemSelectionChanged.connect(self._on_signal_selected)
+        self._lock_table_to_visible_rows(self.signals_table)
         self.signals_stack.addWidget(self.signals_table)
         return self.signals_stack
 
@@ -1447,6 +1503,11 @@ class InterpretView(QWidget):
         self.id_label.setFont(self.theme.mono_font(5.0, bold=True))
         self.selection_label.setFont(self.theme.mono_font(0.5, bold=True))
         self.table.verticalHeader().setDefaultSectionSize(self.theme.density.row_height)
+        # The row height above just changed -- re-lock to the same 8 rows
+        # at the *new* height (see _lock_table_to_visible_rows's own
+        # docstring on why this specific table needs recalling here and
+        # signals_table does not).
+        self._lock_table_to_visible_rows(self.table)
         self.strip.restyle()
         self.bit_matrix.restyle()
         self.bits_legend.restyle()
