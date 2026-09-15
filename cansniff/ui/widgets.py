@@ -193,6 +193,48 @@ class _NestedTouchScrollGuard(QObject):
     with no grab at all cannot pick a gesture up when the descendant
     reaches its own scroll limit, or at any other point before release --
     there is no hand-off path left for it to use.
+
+    One case the ungrab used to get wrong, confirmed live on the actual
+    device rather than assumed: ``ScrollPrepare`` fires on press,
+    unconditionally, regardless of whether *this* host can do anything
+    with the gesture that follows -- QScroller recognizes Dragging for a
+    purely vertical drag on a QAbstractScrollArea whose own vertical
+    scrollbar is permanently ``Qt.ScrollBarAlwaysOff`` just as readily as
+    for one that can actually move (confirmed live: the scrollbar's own
+    value never left 0 either way) -- so the old unconditional ungrab was
+    stealing the ancestor's grab, and thus its ability to scroll at all,
+    for a gesture this host was already guaranteed to do nothing useful
+    with. Two real, reproduced cases of exactly this, both confirmed live
+    with a settled QScroller state and an unmoving ancestor scrollbar
+    value either side of the drag:
+
+    * id_view/trace_view before enough rows exist for the table's own
+      Expanding size policy to overflow its allotted height at all (its
+      own verticalScrollBar().maximum() is 0) -- a drag starting anywhere
+      over the table (most of the Lite page, since the table is
+      Expanding) stole the page's own vertical grab for the whole
+      gesture, leaving neither the table (nothing to scroll) nor the page
+      (ungrabbed) able to move. This is what "touch scrolling only works
+      after Start" actually was: before Start the table nearly always has
+      too little content to need its own scrollbar; once real capture
+      frames arrive it more often does, which is what happened to look
+      like Start "fixing" scrolling -- Start itself never touches any
+      QScroller, viewport, or event filter (confirmed by reading every
+      line of the Start/Stop lifecycle).
+    * strip_scroll/matrix_scroll (InterpretView) are permanently vertical-
+      off (Qt.ScrollBarAlwaysOff, so their own verticalScrollBar().
+      maximum() is always 0, content or no content) -- a vertical drag
+      starting on either one, meant for the outer page, was trapped the
+      same way, every time, regardless of Start.
+
+    The fix is the same in both cases and does not change *when* this
+    reacts (still ScrollPrepare, still before any movement -- the timing
+    already proven above to give zero-simultaneous-scroll): skip stealing
+    the ancestors' grab at all when this host's own vertical range is
+    already known, at this exact moment, to be zero. When it later turns
+    out to be non-zero (a table that has grown enough rows, say), nothing
+    here changes -- the grab is stolen exactly as before, for exactly as
+    long as before.
     """
 
     def __init__(self, host: QAbstractScrollArea) -> None:
@@ -208,6 +250,21 @@ class _NestedTouchScrollGuard(QObject):
         return False  # never consumed -- this only ever has a side effect
 
     def _claim_gesture_from_ancestors(self) -> None:
+        if self._host.verticalScrollBar().maximum() == 0:
+            # This host cannot use a vertical gesture right now -- either
+            # permanently (strip_scroll/matrix_scroll's own vertical
+            # scrolling is always off) or simply because it does not
+            # currently have enough content (an empty/short id_view or
+            # trace_view before Start). Confirmed live: QScroller still
+            # happily recognizes Dragging for a direction a scroll area
+            # cannot act on, so leaving this check out stole the page's
+            # own vertical grab for a gesture this host was already
+            # guaranteed to do nothing with. Vertical, specifically,
+            # because that is the axis every ancestor in this app actually
+            # owns (the Lite page scrolls vertically); a host that can
+            # never use it has nothing here worth protecting from a
+            # vertically-capable ancestor.
+            return
         widget = self._host.parentWidget()
         while widget is not None:
             if isinstance(widget, QAbstractScrollArea) and widget is not self._host:

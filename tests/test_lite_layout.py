@@ -631,6 +631,88 @@ class NestedTouchScrollGuardTests(_LiteLayoutTestCase):
                            pos=QPoint(below_table.x(), below_table.y() - 6 * 15))
         self.app.processEvents()
 
+    def test_dragging_inside_an_empty_table_still_scrolls_the_page(self):
+        """Found live, on real hardware: before enough rows exist for
+        id_view's own Expanding size policy to overflow its allotted
+        height (its own verticalScrollBar().maximum() is 0), a drag
+        starting anywhere over the table -- most of the Lite page, since
+        the table is Expanding -- stole the page's own vertical grab for
+        the whole gesture regardless, even though the table had nothing to
+        do with it: neither the table (nothing to scroll) nor the page
+        (ungrabbed) responded. Confirmed live with a real scrollbar-value
+        comparison either side of the drag (unmoving), reproduced here as
+        the QScroller-state check this file's other tests already use.
+        This is what "touch scrolling only works after Start" actually
+        was: before Start the table nearly always has too little content
+        to need its own scrollbar, and Start itself never touches any
+        QScroller, viewport, or event filter."""
+        window = self._window()
+        # Deliberately no add_frames() at all -- genuinely empty, matching
+        # a real fresh launch before any capture has ever produced a frame.
+        self.assertEqual(window.id_view.verticalScrollBar().maximum(), 0)
+        table_vp = window.id_view.viewport()
+        outer_vp = window.lite_workspace_scroll.viewport()
+
+        self._drag(table_vp, QPoint(table_vp.width() // 2, 10), -15, 6, release=False)
+        self.assertNotEqual(
+            QScroller.scroller(outer_vp).state(), QScroller.State.Inactive,
+            "a table with nothing of its own to scroll must not trap a "
+            "gesture that started over it -- the page must still be free "
+            "to respond")
+        QTest.mouseRelease(table_vp, Qt.LeftButton,
+                           pos=QPoint(table_vp.width() // 2, 10 - 6 * 15))
+        self.app.processEvents()
+
+    def test_vertical_drag_on_the_payload_strip_still_scrolls_the_page(self):
+        """strip_scroll/matrix_scroll (InterpretView) are permanently
+        vertical-off -- their own verticalScrollBar().maximum() is always
+        0, content or no content -- so a vertical drag starting on either
+        one is never something they can use themselves. Confirmed live
+        that this trapped the page's own vertical scroll exactly like the
+        empty-table case above, every time, regardless of Start."""
+        window = self._window()
+        window.id_model.add_frames([_frame(0x123)])
+        self.app.processEvents()
+        window.id_view.selectRow(0)
+        self.app.processEvents()
+
+        self.assertEqual(
+            window.interpret_view.strip_scroll.verticalScrollBar().maximum(), 0)
+        strip_vp = window.interpret_view.strip_scroll.viewport()
+        outer_vp = window.lite_workspace_scroll.viewport()
+
+        self._drag(strip_vp, QPoint(strip_vp.width() // 2, strip_vp.height() // 2),
+                    -15, 6, release=False)
+        self.assertNotEqual(
+            QScroller.scroller(outer_vp).state(), QScroller.State.Inactive,
+            "a vertical drag on the payload strip must not trap the "
+            "page's own vertical scroll -- the strip can never use it")
+        QTest.mouseRelease(strip_vp, Qt.LeftButton,
+                           pos=QPoint(strip_vp.width() // 2, strip_vp.height() // 2 - 6 * 15))
+        self.app.processEvents()
+
+    def test_dragging_inside_a_table_with_real_content_is_unaffected(self):
+        """Regression guard for the fix above: a table that genuinely does
+        have its own scrollable content must keep behaving exactly as
+        test_dragging_inside_the_table_never_also_activates_the_page
+        already proves -- the new "nothing to scroll yet" check must never
+        fire once there is something to scroll."""
+        window = self._window()
+        window.id_model.add_frames([_frame(0x100 + i) for i in range(30)])
+        self.app.processEvents()
+        self.assertGreater(window.id_view.verticalScrollBar().maximum(), 0)
+        table_vp = window.id_view.viewport()
+        outer_vp = window.lite_workspace_scroll.viewport()
+
+        self._drag(table_vp, QPoint(table_vp.width() // 2, 10), 15, 5, release=False)
+        self.assertEqual(
+            QScroller.scroller(outer_vp).state(), QScroller.State.Inactive,
+            "a table with real content of its own must still own the "
+            "gesture completely, exactly as before this fix")
+        QTest.mouseRelease(table_vp, Qt.LeftButton,
+                           pos=QPoint(table_vp.width() // 2, 10 + 5 * 15))
+        self.app.processEvents()
+
 
 class LayoutFitsAvailableGeometryTests(_LiteLayoutTestCase):
     def test_main_window_geometry_stays_within_requested_bounds(self):
