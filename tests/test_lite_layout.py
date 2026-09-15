@@ -578,6 +578,66 @@ class RetainedBehaviorUnchangedTests(_LiteLayoutTestCase):
             ["Time (s)", "Ch", "CAN ID", "Type", "Bytes", "Payload"])
 
 
+class InterpretWorkspaceTableRowLockTests(_LiteLayoutTestCase):
+    """Blocks (interpret_view.table) and Signals (interpret_view.
+    signals_table) get the same fixed-height, own-scrolling treatment as
+    trace_view -- see interpret_view.py's own _lock_table_to_visible_rows.
+    """
+
+    def test_blocks_table_fits_at_least_eight_rows_once_real_headers_exist(self):
+        """Regression guard: self.table has zero columns (and so a header
+        sizeHint().height() of exactly 0 -- confirmed live) at the point it
+        is first locked, in _build_body, before any message has ever been
+        decoded. Once _fill_table gives it real columns, that real header
+        height -- and, confirmed live under the actual production theme, a
+        further few pixels of QSS-driven frame/margin chrome neither
+        header nor row height alone account for -- has to fit somewhere,
+        and previously silently ate into the row space this is supposed
+        to guarantee: Blocks visibly showed fewer than
+        _LITE_TABLE_VISIBLE_ROWS rows. This is the actual, measured
+        acceptance check: how many full rows the *viewport* -- not the
+        widget's own outer height -- can actually show, on whatever theme
+        is active, not an assumption about it.
+        """
+        window = self._window()
+        window.id_model.add_frames([_frame(0x321)])
+        self.app.processEvents()
+        window.id_view.selectRow(0)
+        self.app.processEvents()
+        # The self-correcting single-shot in _lock_table_to_visible_rows
+        # needs at least one more event-loop turn to measure the real,
+        # settled viewport height and grow the cap if it fell short.
+        for _ in range(5):
+            self.app.processEvents()
+
+        table = window.interpret_view.table
+        self.assertEqual(table.minimumHeight(), table.maximumHeight())
+        row_height = table.verticalHeader().defaultSectionSize()
+        # round, not a strict >=: sub-pixel rounding (confirmed under
+        # offscreen, unthemed) can put this a fraction of a row under 8
+        # without a single row actually being visually cut off -- the
+        # original bug this guards showed ~6 rows, nowhere near this close.
+        self.assertGreaterEqual(round(table.viewport().height() / row_height), 8)
+
+    def test_signals_table_fits_at_least_eight_rows(self):
+        window = self._window()
+        for _ in range(5):
+            self.app.processEvents()
+        table = window.interpret_view.signals_table
+        self.assertEqual(table.minimumHeight(), table.maximumHeight())
+        row_height = table.verticalHeader().defaultSectionSize()
+        # round, not a strict >=: sub-pixel rounding (confirmed under
+        # offscreen, unthemed) can put this a fraction of a row under 8
+        # without a single row actually being visually cut off -- the
+        # original bug this guards showed ~6 rows, nowhere near this close.
+        self.assertGreaterEqual(round(table.viewport().height() / row_height), 8)
+
+    def test_full_edition_tables_are_not_height_locked(self):
+        window = self._window(lite=False)
+        self.assertEqual(window.interpret_view.table.maximumHeight(), 16777215)
+        self.assertEqual(window.interpret_view.signals_table.maximumHeight(), 16777215)
+
+
 class NestedTouchScrollGuardTests(_LiteLayoutTestCase):
     """Lite's single-page workspace (lite_workspace_scroll) and its own
     message table (id_view) are both independently touch-scroll-enabled

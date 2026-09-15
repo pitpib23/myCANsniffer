@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import List, Optional, Tuple
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QFontMetrics
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QFrame, QGridLayout,
@@ -712,9 +712,39 @@ class InterpretView(QWidget):
         30px, so a cap computed from the wrong one here would have been
         visibly off by nearly a whole row) and can change after this is
         first called at construction, on a density transition (a bigger
-        host screen, Settings' own font size) -- signals_table's own row
-        height is never touched after _plain_table sets it once, so
-        calling this again for it would be harmless but is not needed.
+        host screen, Settings' own font size).
+
+        self.table needs a second call site too, and for a different
+        reason: at construction it has zero columns (no message has ever
+        been decoded yet), and horizontalHeader().sizeHint().height() is
+        confirmed live to be exactly 0 for a header with no sections at
+        all -- not a smaller-but-real height, genuinely 0 -- so the very
+        first lock reserved no room whatsoever for the header row. Once
+        _fill_table gives it real columns (~18-36px of header, theme-
+        dependent -- confirmed live under the actual production
+        stylesheet) that header still has to fit somewhere inside the
+        same fixed total, silently eating into the row space this was
+        supposed to guarantee: confirmed live this was the actual cause
+        of Blocks visibly showing fewer than _LITE_TABLE_VISIBLE_ROWS.
+        _fill_table calls this again once real headers exist, which is
+        what actually fixes that case.
+
+        One more theme-dependent gap confirmed live even with a real
+        header height already included: QAbstractScrollArea's own frame
+        border/margins add a further, QSS-dependent few pixels this
+        method has no reliable, portable way to predict up front (parsing
+        the stylesheet's own padding tokens would be more fragile than
+        this, and would need updating by hand if theme.py's own QSS ever
+        changes). Rather than guess at a number, the single-shot callback
+        below measures the *actual* resulting viewport height, once Qt's
+        layout has genuinely applied the sizes just set (not yet true in
+        this same call -- geometry changes this size routinely need
+        another event-loop turn to settle, the same "more than one turn"
+        caveat this module's own _apply_theme_and_restyle-adjacent code
+        already documents elsewhere), and grows the cap by whatever
+        shortfall remains -- however large that turns out to be, on
+        whatever theme is actually active -- rather than a guess baked in
+        now that a future theme change could silently invalidate.
         """
         if not self.lite:
             return
@@ -726,6 +756,13 @@ class InterpretView(QWidget):
         table.setMaximumHeight(visible_rows_height)
         if not QScroller.hasScroller(table.viewport()):
             enable_touch_scrolling(table)
+
+        def _correct_for_actual_chrome() -> None:
+            shortfall = _LITE_TABLE_VISIBLE_ROWS * row_height - table.viewport().height()
+            if shortfall > 0:
+                table.setMinimumHeight(table.minimumHeight() + shortfall)
+                table.setMaximumHeight(table.maximumHeight() + shortfall)
+        QTimer.singleShot(0, _correct_for_actual_chrome)
 
     def _plain_table(self, headers: List[str]) -> QTableWidget:
         """A read-only table styled like the interpretation table."""
@@ -1730,6 +1767,23 @@ class InterpretView(QWidget):
             self.table.setColumnCount(len(headers))
             self.table.setHorizontalHeaderLabels(headers)
             self._headers = headers
+            # _lock_table_to_visible_rows's own height figure includes
+            # horizontalHeader().sizeHint().height() -- confirmed live that
+            # this is 0 for the header this table is first constructed with
+            # (setColumnCount(0) in _build_body, before any message has
+            # ever been decoded), not the real ~18-30px (theme-dependent) a
+            # header with actual column labels needs. The first call, at
+            # construction, therefore reserved rows-only height with none
+            # left over for the header row at all -- which then still had
+            # to fit somewhere once real headers existed, silently eating
+            # into the row space this was supposed to guarantee and
+            # leaving visibly fewer than _LITE_TABLE_VISIBLE_ROWS on
+            # screen. Re-locking here, the first time real headers exist
+            # (and again on any later shape change -- a different decoder
+            # set), is what actually fixes that; restyle() alone was not
+            # enough, since nothing else in this class calls restyle() on
+            # the strength of headers merely existing for the first time.
+            self._lock_table_to_visible_rows(self.table)
         if self.table.rowCount() != len(result.words):
             self.table.setRowCount(len(result.words))
 
