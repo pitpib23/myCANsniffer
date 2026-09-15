@@ -377,11 +377,18 @@ class InterpretView(QWidget):
         enable_touch_scrolling(self.strip_scroll)
         grid.addWidget(self.strip_scroll, 0, 1)
 
-        actions = QHBoxLayout()
-        actions.setSpacing(SPACE_SM)
-        self.last_seen_label = QLabel("")
-        self.last_seen_label.setObjectName("Caption")
-        actions.addWidget(self.last_seen_label)
+        # A column, not one row: Hold + Copy table stay together on their own
+        # line, with Last seen underneath rather than sharing that line to
+        # their left -- the strip in column 1 is the thing that actually
+        # needs the width (a CAN FD payload can need every pixel it can get
+        # before it has to fall back to touch-drag/scrolling to see the rest),
+        # and Last seen is reference detail that reads fine narrower and
+        # one line down, exactly like the identity chips below already do.
+        actions = QVBoxLayout()
+        actions.setSpacing(2)
+
+        buttons_row = QHBoxLayout()
+        buttons_row.setSpacing(SPACE_SM)
 
         # "Hold", not "Freeze": the top bar already has Pause, which stops the
         # whole application updating. This one is narrower — it pins *this
@@ -395,13 +402,20 @@ class InterpretView(QWidget):
             "To freeze every view at once, use Pause in the top bar."
         )
         self.freeze_check.toggled.connect(self._on_freeze)
-        actions.addWidget(self.freeze_check)
+        buttons_row.addWidget(self.freeze_check)
 
         self.copy_button = QPushButton("Copy table")
         self.copy_button.setObjectName("Ghost")
         self.copy_button.setToolTip("Copy the table as tab-separated text")
         self.copy_button.clicked.connect(self._copy_table)
-        actions.addWidget(self.copy_button)
+        buttons_row.addWidget(self.copy_button)
+        actions.addLayout(buttons_row)
+
+        self.last_seen_label = QLabel("")
+        self.last_seen_label.setObjectName("Caption")
+        self.last_seen_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        actions.addWidget(self.last_seen_label)
+
         grid.addLayout(actions, 0, 2, Qt.AlignRight | Qt.AlignTop)
 
         # Row 1: the bit-activity disclosure leads, the identity chips trail.
