@@ -92,11 +92,10 @@ def main(argv=None) -> int:
     app.setApplicationName("CAN Sniffer")
     app.setDesktopFileName("CANbus-sniffer")
     app.setWindowIcon(QIcon("/home/pi/.local/share/icons/hicolor/256x256/apps/CANbus-sniffer.png"))
-    # Closes a docked on-screen keyboard (squeekboard/onboard) the moment
-    # keyboard focus leaves a genuinely editable widget -- see
-    # install_input_panel_focus_guard's own docstring for why Qt does not
-    # already do this by itself.
-    install_input_panel_focus_guard(app)
+    # Full mode retains its existing focus guard. MainWindow installs Lite's
+    # intent-based guard before showing the window when --lite is selected.
+    if not args.lite:
+        install_input_panel_focus_guard(app)
 
     # The font database is only queryable once a QApplication exists, so the
     # theme is resolved here rather than at import time.

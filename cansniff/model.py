@@ -46,6 +46,21 @@ class CanFrame:
     # None means the source format did not report CAN FD ESI; it is independent
     # of an actual CAN error frame.
     is_error_state_indicator: Optional[bool] = None
+    # python-can receive timestamps are Unix seconds. Readers without a
+    # trustworthy date explicitly use "relative" or "unknown" instead.
+    timestamp_basis: str = "unix"
+    # Decimal places supplied by a text log, when known. None means the
+    # backend does not advertise its resolution; it is not an accuracy claim.
+    timestamp_precision: Optional[int] = None
+    # File replay may advance timestamp for the existing analysis timeline.
+    # Preserve the original only when rebasing; live frames need no duplicate.
+    recorded_timestamp: Optional[float] = None
+
+    @property
+    def receive_timestamp(self) -> float:
+        """Authoritative receive/recorded time, independent of replay pacing."""
+        return (self.timestamp if self.recorded_timestamp is None
+                else self.recorded_timestamp)
 
     @property
     def id_hex(self) -> str:

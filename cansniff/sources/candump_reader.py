@@ -22,6 +22,7 @@ from __future__ import annotations
 from typing import Iterator, List, Optional
 
 from ..model import CanFrame
+from ..timestamps import text_precision
 
 #: Bit layout of a SocketCAN arbitration/error ID, matching what candump
 #: itself (and python-can's CanutilsLogReader) uses to recognise these.
@@ -72,6 +73,8 @@ def _parse_line(stripped: str) -> Optional[CanFrame]:
         return CanFrame(
             timestamp=timestamp, arb_id=0, data=b"", dlc=0,
             is_error_frame=True, channel=channel, raw_line=stripped,
+            timestamp_basis="unknown",
+            timestamp_precision=text_precision(timestamp_token[1:-1]),
         )
 
     is_fd = False
@@ -102,6 +105,8 @@ def _parse_line(stripped: str) -> Optional[CanFrame]:
             is_extended=is_extended, is_remote_frame=True, is_fd=is_fd,
             is_bitrate_switch=brs, is_error_state_indicator=esi,
             channel=channel, raw_line=stripped,
+            timestamp_basis="unknown",
+            timestamp_precision=text_precision(timestamp_token[1:-1]),
         )
 
     if len(data) % 2 != 0:
@@ -116,6 +121,10 @@ def _parse_line(stripped: str) -> Optional[CanFrame]:
         dlc=len(payload), is_extended=is_extended, is_fd=is_fd,
         is_bitrate_switch=brs, is_error_state_indicator=esi,
         channel=channel, raw_line=stripped,
+        # This syntax also occurs in relative-time datasets; there is no
+        # date/header proving an epoch. Do not infer one from its magnitude.
+        timestamp_basis="unknown",
+        timestamp_precision=text_precision(timestamp_token[1:-1]),
     )
 
 

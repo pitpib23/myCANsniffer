@@ -20,6 +20,7 @@ from PySide6.QtWidgets import QStyle, QStyledItemDelegate, QStyleOptionViewItem
 
 from ..filters import DisplayFilter
 from ..model import DEFAULT_BIT_WINDOW, CanFrame, FrameStats
+from ..timestamps import elapsed_us, format_trace_time, timestamp_iso
 from .theme import ROW_HEIGHT_COMPACT, SPACE_SM, Theme
 
 BYTES_ROLE = Qt.UserRole + 1
@@ -58,8 +59,13 @@ def exemplar_widths(model, theme: Theme) -> List[int]:
             metrics = QFontMetrics(theme.mono_font(bold=bold) if mono
                                    else theme.ui_font(bold=bold))
             metrics_cache[key] = metrics
+        padding = 2 * SPACE_SM + 6
+        if isinstance(model, TraceTableModel) and column == 0:
+            # Lite's production QSS uses larger cell padding than SPACE_SM.
+            # Keep every timestamp digit visible without sizing from rows.
+            padding = max(padding, 2 * theme.density.cell_pad_h + 6)
         widths.append(max(
-            metrics.horizontalAdvance(text) + 2 * SPACE_SM + 6,
+            metrics.horizontalAdvance(text) + padding,
             header_metrics.horizontalAdvance(model.COLUMNS[column]) + _HEADER_PADDING,
         ))
     return widths
@@ -407,10 +413,10 @@ class IdFilterProxy(QSortFilterProxyModel):
 class TraceTableModel(QAbstractTableModel):
     """Bounded scrollback of individual received frames."""
 
-    COLUMNS = ["Time (s)", "Ch", "CAN ID", "Type", "Bytes", "Payload"]
+    COLUMNS = ["Time", "Ch", "CAN ID", "Type", "Bytes", "Payload"]
     #: See IdTableModel.COLUMN_EXEMPLARS.
     COLUMN_EXEMPLARS = [
-        ("99999.999999", True, False),  # relative timestamp, 6 decimals
+        ("2000-12-31 23:59:59.999999", True, False),
         ("8888", False, False),
         ("0x1FFFFFFF", True, True),
         ("29-bit FD error", False, False),
@@ -430,9 +436,14 @@ class TraceTableModel(QAbstractTableModel):
     #: have changed, not on every batch.
     idsChanged = Signal()
 
-    def __init__(self, theme: Theme, max_rows: int = 200000, parent=None):
+    def __init__(self, theme: Theme, max_rows: int = 200000, parent=None,
+                 *, lite: bool = False):
         super().__init__(parent)
         self._theme = theme
+        self._lite = bool(lite)
+        self.COLUMN_EXEMPLARS = list(type(self).COLUMN_EXEMPLARS)
+        if self._lite:
+            self.COLUMN_EXEMPLARS[0] = ("23:59:59.999", True, False)
         #: Everything retained, so clearing a filter restores the full history.
         self._all: "Deque[CanFrame]" = deque()
         #: The subset currently displayed. Filtering happens here rather than
@@ -442,7 +453,6 @@ class TraceTableModel(QAbstractTableModel):
         self._filter = DisplayFilter()
         self._max_rows = max(100, int(max_rows))
         self._time_base: Optional[float] = None
-        self.relative_timestamps = True
         #: Incremental bookkeeping for distinct_frames() -- how many
         #: currently-retained frames (in _all, never _rows: a filter must
         #: never shrink the candidate list it is itself built from) share
@@ -468,6 +478,11 @@ class TraceTableModel(QAbstractTableModel):
     def total_rows(self) -> int:
         return len(self._all)
 
+    @property
+    def time_base(self) -> Optional[float]:
+        """First retained-session receive time; survives filtering/eviction."""
+        return self._time_base
+
     def rowCount(self, parent=QModelIndex()) -> int:
         return 0 if parent.isValid() else len(self._rows)
 
@@ -489,6 +504,16 @@ class TraceTableModel(QAbstractTableModel):
         frame = self._rows[index.row()]
         column = index.column()
 
+        if role == Qt.ToolTipRole and column == 0:
+            absolute = timestamp_iso(frame)
+            description = (absolute + " (Trace shows local time)" if absolute else
+                           "{} seconds; {} time, date/timezone unavailable".format(
+                               frame.receive_timestamp, frame.timestamp_basis))
+            if self._time_base is not None:
+                description += "\nElapsed: {} µs".format(
+                    elapsed_us(frame.receive_timestamp, self._time_base))
+            return description
+
         if role == Qt.FontRole:
             if column == 2:
                 return self._theme.mono_font(bold=True)
@@ -506,10 +531,7 @@ class TraceTableModel(QAbstractTableModel):
             return None
 
         if column == 0:
-            timestamp = frame.timestamp
-            if self.relative_timestamps and self._time_base is not None:
-                timestamp -= self._time_base
-            return "{:.6f}".format(timestamp)
+            return format_trace_time(frame, lite=self._lite)
         if column == 1:
             return frame.channel
         if column == 2:
@@ -526,7 +548,7 @@ class TraceTableModel(QAbstractTableModel):
         if not frames:
             return
         if self._time_base is None:
-            self._time_base = frames[0].timestamp
+            self._time_base = frames[0].receive_timestamp
 
         self._all.extend(frames)
         active = self._filter.is_active

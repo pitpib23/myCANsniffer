@@ -39,6 +39,8 @@ or otherwise affect the physical bus.
 
 from __future__ import annotations
 
+import time
+
 from typing import Any, Dict, Optional
 
 from ..model import CanFrame
@@ -222,9 +224,15 @@ class LiveSource(CanFrameSource):
         message = self._bus.recv(timeout=timeout)   # the only bus call in this project
         if message is None:
             return None
+        # SocketCAN already supplies kernel receive time through python-can.
+        # Fall back only when a backend supplies no timestamp at all; even
+        # zero is a supplied value and must not be silently replaced.
+        timestamp = getattr(message, "timestamp", None)
+        if timestamp is None:
+            timestamp = time.time()
         data = bytes(message.data or b"")
         return CanFrame(
-            timestamp=float(message.timestamp or 0.0),
+            timestamp=float(timestamp),
             arb_id=int(message.arbitration_id),
             data=data,
             dlc=int(message.dlc or len(data)),

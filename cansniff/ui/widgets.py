@@ -287,7 +287,10 @@ class _NestedTouchScrollGuard(QObject):
 
 
 def enable_touch_scrolling(area) -> None:
-    """Kinetic touch-drag scrolling for any QAbstractScrollArea, via Qt's own
+    """Legacy full-edition/dialog scrolling. Lite's nested workspace uses
+    LiteScrollRouter instead and never installs these recognizers/guards.
+
+    Kinetic touch-drag scrolling for any QAbstractScrollArea, via Qt's own
     QScroller -- no new dependency (QScroller ships with QtWidgets). Works
     identically for a QTableView (row scrolling) and a QScrollArea (a whole
     page wrapped by :func:`scrollable`, or a dialog's own hand-built one) --

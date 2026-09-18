@@ -16,7 +16,7 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QFontMetrics
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QFrame, QGridLayout,
-    QHBoxLayout, QHeaderView, QLabel, QPushButton, QScrollArea, QScroller,
+    QHBoxLayout, QHeaderView, QLabel, QPushButton, QScrollArea,
     QSizePolicy, QSpinBox, QStackedWidget, QTableWidget, QTableWidgetItem,
     QVBoxLayout, QWidget,
 )
@@ -383,7 +383,8 @@ class InterpretView(QWidget):
         # Wide CAN-FD payloads (up to 64 bytes) can exceed the viewport --
         # touch-drag to reach the rest, same as tapping a byte still works
         # (see enable_touch_scrolling).
-        enable_touch_scrolling(self.strip_scroll)
+        if not self.lite:
+            enable_touch_scrolling(self.strip_scroll)
         grid.addWidget(self.strip_scroll, 0, 1)
 
         # A column, not one row: Hold + Copy table stay together on their own
@@ -517,7 +518,8 @@ class InterpretView(QWidget):
         self.matrix_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.matrix_scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.matrix_scroll.setFixedHeight(self.bit_matrix.sizeHint().height() + 14)
-        enable_touch_scrolling(self.matrix_scroll)
+        if not self.lite:
+            enable_touch_scrolling(self.matrix_scroll)
         # The strip scrolls with it, so the columns stay under their bytes.
         self.matrix_scroll.horizontalScrollBar().valueChanged.connect(
             self.strip_scroll.horizontalScrollBar().setValue
@@ -694,14 +696,9 @@ class InterpretView(QWidget):
         before this -- content beyond a screenful was reachable only by
         scrolling the whole Lite page past them.
 
-        enable_touch_scrolling grabs LeftMouseButtonGesture on whichever
-        axes the table's own scrollbars actually allow, so a plain,
-        already-default QTableWidget horizontal scrollbar (never touched
-        here) becomes touch-draggable for free the same way the vertical
-        one does; nothing here needs to choose between them the way
-        main_window.py's horizontal_touch_scroll flag does, since neither
-        of these two tables hands its own overflow to the page the way
-        id_view still deliberately does.
+        LiteScrollRouter registers these tables as mixed-axis children of
+        the workspace. Their ranges determine which axis they can own;
+        there are no independent table gesture recognizers in Lite.
 
         Reads the row height back from the table's own vertical header
         (defaultSectionSize()) rather than a fixed constant, and is called
@@ -754,8 +751,6 @@ class InterpretView(QWidget):
             + table.horizontalHeader().sizeHint().height())
         table.setMinimumHeight(visible_rows_height)
         table.setMaximumHeight(visible_rows_height)
-        if not QScroller.hasScroller(table.viewport()):
-            enable_touch_scrolling(table)
 
         def _correct_for_actual_chrome() -> None:
             shortfall = _LITE_TABLE_VISIBLE_ROWS * row_height - table.viewport().height()

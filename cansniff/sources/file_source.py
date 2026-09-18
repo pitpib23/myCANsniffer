@@ -241,7 +241,8 @@ class FileSource(CanFrameSource):
             # that has not looped yet, the common case -- so a plain,
             # never-looped capture allocates nothing extra and emits its
             # frames exactly as recorded.
-            frame = replace(frame, timestamp=frame.timestamp + self._loop_offset)
+            frame = replace(frame, timestamp=frame.timestamp + self._loop_offset,
+                            recorded_timestamp=frame.receive_timestamp)
         return frame
 
     # -- introspection --------------------------------------------------

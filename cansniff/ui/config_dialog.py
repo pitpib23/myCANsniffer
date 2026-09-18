@@ -231,7 +231,7 @@ class ConfigDialog(ResponsiveDialog):
         self.max_retained.setValue(int(self.config.get("capture.max_frames_retained", 200000)))
         form.addRow("Trace history (frames)", self.max_retained)
 
-        self.relative_ts = QCheckBox("Show timestamps relative to the first frame")
+        self.relative_ts = QCheckBox("Show Messages ‘Last’ relative to the first frame")
         self.relative_ts.setChecked(bool(self.config.get("ui.relative_timestamps", True)))
         form.addRow("", self.relative_ts)
 

@@ -19,6 +19,7 @@ import os
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from .model import CanFrame
+from .timestamps import elapsed_us, timestamp_iso
 
 
 class ExportError(RuntimeError):
@@ -110,7 +111,7 @@ def _to_message(frame: CanFrame, adjust_channel: bool = False):
     import can
 
     return can.Message(
-        timestamp=float(frame.timestamp),
+        timestamp=frame.receive_timestamp,
         arbitration_id=int(frame.arb_id),
         is_extended_id=bool(frame.is_extended),
         is_remote_frame=bool(frame.is_remote_frame),
@@ -164,24 +165,35 @@ def write_candump(frames: Iterable[CanFrame], path: str) -> int:
 # in-house formats
 # ---------------------------------------------------------------------------
 
-CSV_HEADER = ("timestamp", "channel", "id", "extended", "dlc", "fd",
-              "brs", "esi", "error", "remote", "data")
+CSV_HEADER = ("timestamp_iso", "elapsed_us", "can_id", "dlc", "data",
+              "channel", "extended", "fd", "brs", "esi", "error", "remote",
+              "timestamp", "timestamp_basis")
 
 
-def write_csv(frames: Iterable[CanFrame], path: str) -> int:
+def write_csv(frames: Iterable[CanFrame], path: str,
+              time_base: Optional[float] = None) -> int:
+    """Write retained frames in capture order, regardless of display filters.
+
+    Callers with a session pass its first receive time, even after history
+    eviction. Standalone exports default to the first supplied frame.
+    """
     count = 0
     with open(path, "w", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle)
         writer.writerow(CSV_HEADER)
         for frame in frames:
+            timestamp = frame.receive_timestamp
+            if time_base is None:
+                time_base = timestamp
             writer.writerow([
-                "{:.6f}".format(frame.timestamp), frame.channel, frame.id_hex,
-                int(frame.is_extended), frame.dlc, int(frame.is_fd),
+                timestamp_iso(frame), elapsed_us(timestamp, time_base),
+                "0x" + frame.id_hex, frame.dlc, frame.data_hex,
+                frame.channel, int(frame.is_extended), int(frame.is_fd),
                 int(frame.is_bitrate_switch),
                 "" if frame.is_error_state_indicator is None
                 else int(frame.is_error_state_indicator),
                 int(frame.is_error_frame),
-                int(frame.is_remote_frame), frame.data_hex,
+                int(frame.is_remote_frame), repr(timestamp), frame.timestamp_basis,
             ])
             count += 1
     return count
@@ -192,7 +204,7 @@ def write_jsonl(frames: Iterable[CanFrame], path: str) -> int:
     with open(path, "w", encoding="utf-8") as handle:
         for frame in frames:
             handle.write(json.dumps({
-                "timestamp": round(frame.timestamp, 6),
+                "timestamp": frame.receive_timestamp,
                 "channel": frame.channel,
                 "id": frame.id_hex,
                 "extended": frame.is_extended,
@@ -217,7 +229,8 @@ _WRITERS: Dict[str, Callable[[Iterable[CanFrame], str], int]] = {
 
 
 def export(frames: Sequence[CanFrame], path: str,
-           format_key: Optional[str] = None) -> Tuple[int, FormatSpec]:
+           format_key: Optional[str] = None, *,
+           time_base: Optional[float] = None) -> Tuple[int, FormatSpec]:
     """Write ``frames`` to ``path``. Returns (frames written, format used).
 
     Raises ExportError with a readable reason — an unwritable destination is a
@@ -238,7 +251,8 @@ def export(frames: Sequence[CanFrame], path: str,
             raise ExportError("Cannot create {}: {}".format(directory, exc)) from exc
 
     try:
-        count = _WRITERS[spec.key](frames, path)
+        count = (write_csv(frames, path, time_base=time_base) if spec.key == "csv"
+                 else _WRITERS[spec.key](frames, path))
     except ExportError:
         raise
     except OSError as exc:

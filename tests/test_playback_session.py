@@ -148,12 +148,18 @@ class PlaybackSessionTimelineTests(unittest.TestCase):
         self.assertEqual(run1, STAMPS)  # a single, unlooped pass
         high_water_after_run1 = self.window._playback_high_water
         self.assertEqual(high_water_after_run1, STAMPS[-1])
+        receive_base = self.window.trace_model.time_base
+        self.assertEqual(receive_base, STAMPS[0])
 
         self._start()
         self._wait_for_at_least(len(STAMPS) * 2)
         self._stop()
 
         full_history = self._history()
+        self.assertEqual(self.window.trace_model.time_base, receive_base)
+        self.assertEqual(
+            [f.receive_timestamp for f in self.window.frame_store.all_frames()],
+            STAMPS * 2)
         run2 = full_history[len(STAMPS):]
         # The bug this file exists to catch: run 2 must not restart at 0.00
         # while run 1's samples are still in history.
@@ -250,6 +256,7 @@ class PlaybackSessionTimelineTests(unittest.TestCase):
         self.config.set("source.file.path", other_path)
         self.config.save()
         self.window.clear_views()
+        self.assertIsNone(self.window.trace_model.time_base)
         self.assertIsNone(self.window._playback_high_water,
                           "clear_views() must reset the playback high-water mark")
 
@@ -260,6 +267,7 @@ class PlaybackSessionTimelineTests(unittest.TestCase):
         history = self._history()
         self.assertEqual(history, other_stamps,
                          "capture B must not inherit capture A's accumulated offset")
+        self.assertEqual(self.window.trace_model.time_base, other_stamps[0])
 
     # -- Sequence E: several loops and restarts, combined ------------------
 

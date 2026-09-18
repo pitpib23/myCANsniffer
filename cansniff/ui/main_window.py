@@ -89,7 +89,7 @@ from .responsive import (
 from .theme import ROW_HEIGHT_COMPACT, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XS, Theme
 from .widgets import (
     Chip, CurrentPageStack, FlowLayout, MetricChip, NavRail, SectionLabel,
-    enable_touch_scrolling, fit_top_level_to_screen, scrollable,
+    fit_top_level_to_screen, scrollable,
 )
 
 log = logging.getLogger(__name__)
@@ -124,13 +124,6 @@ _WORKSPACE_MIN_BY_WIDTH_CLASS = {
 #: grown to hundreds of thousands of pixels tall just so the page never
 #: needs its own internal row scrollbar.
 _LITE_TABLE_VISIBLE_ROWS = 8
-
-
-#: Local alias kept for the two Lite call sites below (id_view/trace_view,
-#: and lite_workspace_scroll before scrollable() existed for it) -- the
-#: real implementation is shared with every other scrollable() page/dialog
-#: across both editions, see widgets.enable_touch_scrolling.
-_enable_touch_scrolling = enable_touch_scrolling
 
 
 class _ProtocolSurveyWorker(QObject):
@@ -533,6 +526,9 @@ class MainWindow(QMainWindow):
         self._profile_match_closing = False
 
         self._build_ui()
+        if self.lite:
+            from .lite_input import LiteInputMethodGuard
+            self._lite_input_guard = LiteInputMethodGuard(self)
         self._apply_capture_state(self._IDLE)
         self._build_shortcuts()
         self._apply_config_to_widgets()
@@ -659,7 +655,14 @@ class MainWindow(QMainWindow):
             self.lite_workspace_scroll.setFrameShape(QFrame.NoFrame)
             self.lite_workspace_scroll.setWidgetResizable(True)
             self.lite_workspace_scroll.setWidget(page)
-            _enable_touch_scrolling(self.lite_workspace_scroll)
+            from .lite_scroll import LiteScrollRouter
+            self._lite_scroll_router = LiteScrollRouter(self.lite_workspace_scroll, {
+                self.id_view: 'v', self.trace_view: 'v',
+                self.interpret_view.strip_scroll: 'h',
+                self.interpret_view.matrix_scroll: 'h',
+                self.interpret_view.table: 'both',
+                self.interpret_view.signals_table: 'both',
+            })
             browser_workspace = self.lite_workspace_scroll
         else:
             self.splitter = QSplitter(Qt.Horizontal)
@@ -1263,7 +1266,8 @@ class MainWindow(QMainWindow):
         self.id_view.selectionModel().selectionChanged.connect(self._on_id_selection)
 
         self.trace_model = TraceTableModel(
-            self.theme, int(self.config.get("capture.max_frames_retained", 200000)), self
+            self.theme, int(self.config.get("capture.max_frames_retained", 200000)), self,
+            lite=self.lite,
         )
         self.trace_view = QTableView()
         self.trace_view.setModel(self.trace_model)
@@ -1274,9 +1278,9 @@ class MainWindow(QMainWindow):
         #
         # fixed_row_cap/horizontal_touch_scroll=True, unlike id_view: Trace
         # always stays exactly _LITE_TABLE_VISIBLE_ROWS tall (never grows
-        # into free page space) and scrolls its own overflow, in both
-        # directions, by touch -- rather than handing wide rows to the
-        # page the way id_view still does.
+        # into free page space). Its horizontal scrollbar remains available
+        # for direct manipulation; Lite touch drags use the page horizontally
+        # and the table vertically, as selected by LiteScrollRouter.
         self._configure_table(
             self.trace_view, payload_column=5, lite_visible_columns=(0, 2, 5),
             fixed_row_cap=True, horizontal_touch_scroll=True)
@@ -1344,12 +1348,10 @@ class MainWindow(QMainWindow):
             # traffic (8 bytes) fits without any horizontal scrolling at
             # all with this reduced column set either way. When enabled,
             # the table gets a real horizontal scrollbar and touch-drags
-            # itself -- enable_touch_scrolling below already grabs
-            # LeftMouseButtonGesture regardless of which axes are on, so
-            # nothing further is needed to make that touch-scrollable too.
+            # itself through its scrollbar. LiteScrollRouter separately
+            # gives both Messages and Trace a vertical-only touch role.
             view.setHorizontalScrollBarPolicy(
                 Qt.ScrollBarAsNeeded if horizontal_touch_scroll else Qt.ScrollBarAlwaysOff)
-            _enable_touch_scrolling(view)
             # A readable, touch-comfortable number of rows at a glance
             # (see _LITE_TABLE_VISIBLE_ROWS) without letting the table eat
             # the whole page -- InterpretView sits directly below it on
@@ -1512,7 +1514,6 @@ class MainWindow(QMainWindow):
     def _apply_config_to_widgets(self) -> None:
         relative = bool(self.config.get("ui.relative_timestamps", True))
         self.id_model.relative_timestamps = relative
-        self.trace_model.relative_timestamps = relative
         self.trace_model.set_max_rows(int(self.config.get("capture.max_frames_retained", 200000)))
         self.id_model.bit_window = max(0, int(self.config.get("interpret.bit_window", 512)))
 
@@ -3172,7 +3173,8 @@ class MainWindow(QMainWindow):
                 return
 
         try:
-            count, spec = export(frames, path, spec.key)
+            count, spec = export(frames, path, spec.key,
+                                 time_base=self.trace_model.time_base)
         except ExportError as exc:
             QMessageBox.warning(self, "Export failed", str(exc))
             return
@@ -4310,6 +4312,8 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         self._teardown_thread()
+        if self.lite:
+            self._lite_input_guard.detach()
         super().closeEvent(event)
 
 

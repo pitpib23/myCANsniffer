@@ -11,6 +11,7 @@ import re
 from typing import Iterator, List, Optional, Tuple
 
 from ..model import CanFrame
+from ..timestamps import text_precision
 
 _SKIP_PREFIXES = (
     "//", "date", "base", "no internal events", "begin triggerblock",
@@ -48,6 +49,7 @@ def _parse_classic(tokens: List[str], base: str, raw_line: str) -> Optional[CanF
         return CanFrame(
             timestamp=timestamp, arb_id=0, data=b"", dlc=0,
             is_error_frame=True, channel=channel, raw_line=raw_line,
+            timestamp_basis="relative", timestamp_precision=text_precision(tokens[0]),
         )
 
     if len(tokens) < 5:
@@ -66,6 +68,7 @@ def _parse_classic(tokens: List[str], base: str, raw_line: str) -> Optional[CanF
             timestamp=timestamp, arb_id=arb_id, data=b"", dlc=dlc,
             is_extended=extended, is_remote_frame=True,
             channel=channel, raw_line=raw_line,
+            timestamp_basis="relative", timestamp_precision=text_precision(tokens[0]),
         )
     if not kind.startswith("d"):
         return None
@@ -77,6 +80,7 @@ def _parse_classic(tokens: List[str], base: str, raw_line: str) -> Optional[CanF
     return CanFrame(
         timestamp=timestamp, arb_id=arb_id, data=payload, dlc=dlc,
         is_extended=extended, channel=channel, raw_line=raw_line,
+        timestamp_basis="relative", timestamp_precision=text_precision(tokens[0]),
     )
 
 
@@ -139,6 +143,7 @@ def _parse_fd(tokens: List[str], base: str, raw_line: str) -> Optional[CanFrame]
         timestamp=timestamp, arb_id=arb_id, data=payload, dlc=length,
         is_extended=extended, is_fd=True, is_bitrate_switch=brs,
         is_error_state_indicator=esi, channel=channel, raw_line=raw_line,
+        timestamp_basis="relative", timestamp_precision=text_precision(tokens[0]),
     )
 
 

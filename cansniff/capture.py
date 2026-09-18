@@ -47,7 +47,7 @@ class FrameLogger:
         if self._writer is not None:
             for frame in frames:
                 self._writer.writerow([
-                    "{:.6f}".format(frame.timestamp), frame.channel, frame.id_hex,
+                    repr(frame.receive_timestamp), frame.channel, frame.id_hex,
                     int(frame.is_extended), frame.dlc, int(frame.is_fd),
                     int(frame.is_bitrate_switch),
                     "" if frame.is_error_state_indicator is None
@@ -57,7 +57,7 @@ class FrameLogger:
         else:
             for frame in frames:
                 self._fh.write(json.dumps({
-                    "timestamp": round(frame.timestamp, 6),
+                    "timestamp": frame.receive_timestamp,
                     "channel": frame.channel,
                     "id": frame.id_hex,
                     "extended": frame.is_extended,
