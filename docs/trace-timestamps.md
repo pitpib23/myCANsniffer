@@ -54,28 +54,42 @@ its Settings label states that scope explicitly.
 
 ## Trace presentation
 
-The first column is named **Time** in both modes. Other columns and the Lite
-visible subset remain unchanged.
+The first column is named **Timestamp** in both modes and shows the recorded
+receive time. The second column, **Elapsed (s)**, shows seconds since the first
+frame in the Trace session with six decimal places (for example `0.000721`).
+Lite shows Timestamp, Elapsed (s), CAN ID and Payload; full mode also shows
+channel, type and byte count. Both time columns have tooltips explaining the
+recorded instant and elapsed time.
 
 | Mode | Format for a Unix receive timestamp | Example, local UTC+07:00 |
 | --- | --- | --- |
 | Full | `YYYY-MM-DD HH:MM:SS.ffffff` | `2026-09-17 14:32:18.483271` |
 | Lite | `HH:MM:SS.mmm` | `14:32:18.483` |
 
+The clock uses 24-hour local time: for example, a message received at 11 AM
+shows `11:00:00.123` in Lite; 11 PM shows `23:00:00.123`, with no AM/PM suffix.
+Seconds and fractions distinguish messages
+received within the same minute. Formatting does not change the stored Unix
+timestamp, elapsed-time calculations, or exported UTC ISO/numeric timestamps.
+
 Both use the system local timezone for that instant. Lite omits the date and
 timezone in each row, but the underlying instant retains both its date and full
 numeric precision. Milliseconds are taken from the microsecond representation;
 they do not reorder rows. Known coarse text timestamps use only their recorded
-decimal places. A Time tooltip gives UTC ISO time and elapsed microseconds, or
+decimal places. A Timestamp tooltip gives UTC ISO time and elapsed microseconds, or
 explains why a log's date/timezone is unavailable.
 
 Imported ASC timestamps remain offsets: the existing reader ignores its date
 header, whose timezone is not established. Candump-style datasets may contain
 epoch seconds or relative offsets with the same line syntax and no date header;
 this reader conservatively labels them `unknown`, without guessing from their
-magnitude. Those frames display numeric seconds with an `s` suffix, and CSV's
-ISO field is blank. Python-can fallback readers retain that library's Unix-time
-contract. None of these formats are converted to the current replay date.
+magnitude. Those frames display `-` in Timestamp because no absolute date/time
+is known; their numeric offsets remain available for Elapsed (s) and exports.
+CSV's ISO field is blank. Python-can fallback readers retain that library's Unix-time
+contract when a timestamp is supplied. A missing timestamp is marked unknown
+and displays `-`, rather than showing January 1970. Live capture uses the
+backend's receive timestamp, falling back to the current receive time only if
+the backend omits it. No playback format is converted to the current replay date.
 
 File looping/resuming still advances the existing analysis timeline. Trace and
 exports now retain the original recorded times instead of fabricating later
@@ -125,6 +139,10 @@ Standalone calls to `export()` default to their first supplied frame unless a
 session `time_base` is passed. Wall-clock regressions can produce negative
 elapsed values: frames are never sorted or silently clamped to hide them.
 
+JSONL exports also include `timestamp_iso`, `elapsed_us` and `timestamp_basis`
+with the same meaning and session reference as CSV, alongside the existing raw
+numeric `timestamp`. Logs without a known epoch have a blank ISO timestamp.
+
 ASC, candump, JSONL and the optional capture logger also receive the original
 recorded timestamp. ASC/candump retain their existing python-can writers and
 their format-specific normalization/precision limits; JSONL and capture logger
@@ -133,6 +151,21 @@ CSV when exact retained order, original raw timestamps and elapsed time are
 needed together. CSV is an export format, not a new CSV import feature.
 
 ## Validation
+
+The Timestamp / Elapsed (s) update was checked with the timestamp unit tests
+and the production UI harness in both modes using Qt's offscreen platform.
+At 800×480, Lite's Timestamp and Elapsed columns are each 120 px, CAN ID is
+100 px and the Classic payload is 208 px; all fit in the 648 px viewport.
+The checks verify complete payload text, the 721 µs interval, exported UTC
+timestamps, JSONL session references, and elapsed time after filtering/clearing.
+These checks use synthetic frames, not a live CAN bus.
+
+Final regression runs: 131 tests passed across `test_timestamps`, `test_export`,
+`test_lite_layout`, `BrowserColumnSizingTests`, `test_display_filter`,
+`TraceModelFilterTests` and `test_playback_session`. Both full and Lite
+`tests/qualification/timestamp_ui.py` runs also passed, including CSV exports.
+
+### Earlier receive-timestamp validation
 
 Tests in `tests/test_timestamps.py` cover receive provenance and fallback,
 immutability, delayed rendering, both display modes, UTC conversion, known

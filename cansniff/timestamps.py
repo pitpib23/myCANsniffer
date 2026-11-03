@@ -47,16 +47,16 @@ def _fraction(instant: datetime, digits: int) -> str:
 
 def format_trace_time(frame: CanFrame, lite: bool = False,
                       local_zone: Optional[tzinfo] = None) -> str:
-    """Full local date/time or compact time-of-day from the very same frame.
+    """Local receive time in 24-hour form, with a date in full mode.
 
     Milliseconds are truncated from datetime's microsecond representation.
     A known coarse source uses only its recorded decimal places.
+    Missing absolute time is shown as a dash; offsets remain numeric internally.
     """
     digits = _precision(frame, lite)
     instant = _instant(frame)
     if instant is None:
-        # Explicit seconds marker avoids disguising an offset as wall time.
-        return "{:.{digits}f} s".format(frame.receive_timestamp, digits=digits)
+        return "-"
     local = instant.astimezone(local_zone)
     pattern = "%H:%M:%S" if lite else "%Y-%m-%d %H:%M:%S"
     return local.strftime(pattern) + _fraction(local, digits)

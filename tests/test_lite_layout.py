@@ -207,14 +207,15 @@ class TableColumnWidthTests(_LiteLayoutTestCase):
         self.assertFalse(window.id_view.isColumnHidden(0))  # ID
         self.assertFalse(window.id_view.isColumnHidden(6))  # Payload
 
-    def test_lite_trace_table_shows_only_time_id_and_payload(self):
+    def test_lite_trace_table_shows_timestamp_elapsed_id_and_payload(self):
         window = self._window()
         hidden = {c for c in range(window.trace_model.columnCount())
                  if window.trace_view.isColumnHidden(c)}
-        self.assertEqual(hidden, {1, 3, 4})  # Ch, Type, Bytes
-        self.assertFalse(window.trace_view.isColumnHidden(0))  # Time
-        self.assertFalse(window.trace_view.isColumnHidden(2))  # CAN ID
-        self.assertFalse(window.trace_view.isColumnHidden(5))  # Payload
+        self.assertEqual(hidden, {2, 4, 5})  # Ch, Type, Bytes
+        self.assertFalse(window.trace_view.isColumnHidden(0))  # Timestamp
+        self.assertFalse(window.trace_view.isColumnHidden(1))  # Elapsed (s)
+        self.assertFalse(window.trace_view.isColumnHidden(3))  # CAN ID
+        self.assertFalse(window.trace_view.isColumnHidden(6))  # Payload
 
     def test_full_edition_hides_no_columns(self):
         """Regression guard: Lite's reduced column set must not leak into
@@ -324,7 +325,7 @@ class TableColumnWidthTests(_LiteLayoutTestCase):
             self.assertEqual(header.sectionResizeMode(column), QHeaderView.Interactive)
         widths = exemplar_widths(window.trace_model, window.theme)
         for column, expected in enumerate(widths):
-            if column == 5 or window.trace_view.isColumnHidden(column):
+            if column == 6 or window.trace_view.isColumnHidden(column):
                 continue
             self.assertEqual(window.trace_view.columnWidth(column), max(expected, 72))
 
@@ -575,7 +576,7 @@ class RetainedBehaviorUnchangedTests(_LiteLayoutTestCase):
             ["ID", "Ch", "Type", "Bytes", "Rate", "Last", "Payload"])
         self.assertEqual(
             window.trace_model.COLUMNS,
-            ["Time", "Ch", "CAN ID", "Type", "Bytes", "Payload"])
+            ["Timestamp", "Elapsed (s)", "Ch", "CAN ID", "Type", "Bytes", "Payload"])
 
 
 class InterpretWorkspaceTableRowLockTests(_LiteLayoutTestCase):

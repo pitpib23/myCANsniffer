@@ -199,12 +199,18 @@ def write_csv(frames: Iterable[CanFrame], path: str,
     return count
 
 
-def write_jsonl(frames: Iterable[CanFrame], path: str) -> int:
+def write_jsonl(frames: Iterable[CanFrame], path: str,
+                time_base: Optional[float] = None) -> int:
     count = 0
     with open(path, "w", encoding="utf-8") as handle:
         for frame in frames:
+            if time_base is None:
+                time_base = frame.receive_timestamp
             handle.write(json.dumps({
+                "timestamp_iso": timestamp_iso(frame),
+                "elapsed_us": elapsed_us(frame.receive_timestamp, time_base),
                 "timestamp": frame.receive_timestamp,
+                "timestamp_basis": frame.timestamp_basis,
                 "channel": frame.channel,
                 "id": frame.id_hex,
                 "extended": frame.is_extended,
@@ -251,8 +257,12 @@ def export(frames: Sequence[CanFrame], path: str,
             raise ExportError("Cannot create {}: {}".format(directory, exc)) from exc
 
     try:
-        count = (write_csv(frames, path, time_base=time_base) if spec.key == "csv"
-                 else _WRITERS[spec.key](frames, path))
+        if spec.key == "csv":
+            count = write_csv(frames, path, time_base=time_base)
+        elif spec.key == "jsonl":
+            count = write_jsonl(frames, path, time_base=time_base)
+        else:
+            count = _WRITERS[spec.key](frames, path)
     except ExportError:
         raise
     except OSError as exc:

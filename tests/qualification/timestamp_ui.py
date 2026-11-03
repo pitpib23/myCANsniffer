@@ -50,7 +50,8 @@ def run():
             table = window.trace_view
             model = window.trace_model
             assert model.frame_at(0) is frames[0]
-            assert model.COLUMNS[0] == "Time"
+            assert model.COLUMNS[:2] == ["Timestamp", "Elapsed (s)"]
+            assert model.data(model.index(1, 1)) == "0.000721"
             metrics = QFontMetrics(model.data(model.index(0, 0), Qt.FontRole))
             displayed = model.data(model.index(0, 0))
             assert table.columnWidth(0) >= metrics.horizontalAdvance(displayed) + 16
@@ -61,9 +62,11 @@ def run():
             option.rect = table.visualRect(index)
             text_rect = table.style().subElementRect(QStyle.SE_ItemViewItemText, option, table)
             assert text_rect.width() >= metrics.horizontalAdvance(displayed) + 6, (text_rect, displayed)
-            available = table.viewport().width() - table.columnWidth(0) - table.columnWidth(2)
+            available = (table.viewport().width() - table.columnWidth(0)
+                         - table.columnWidth(1) - table.columnWidth(3))
             if args.lite:
                 assert available >= metrics.horizontalAdvance(frames[0].data_hex)
+                assert table.columnWidth(6) >= metrics.horizontalAdvance(frames[0].data_hex) + 16
                 assert table.horizontalScrollBarPolicy() == Qt.ScrollBarAsNeeded
             csv_path = os.path.join(args.output_dir, mode + ".csv")
             with patch("cansniff.ui.main_window.QFileDialog.getSaveFileName",
@@ -79,8 +82,9 @@ def run():
             result = dict(mode=mode, platform=QApplication.platformName(),
                           window=[window.width(), window.height()],
                           time=displayed, time_width=table.columnWidth(0),
-                          id_width=table.columnWidth(2),
-                          payload_width=table.columnWidth(5),
+                          elapsed_width=table.columnWidth(1),
+                          id_width=table.columnWidth(3),
+                          payload_width=table.columnWidth(6),
                           viewport_width=table.viewport().width(),
                           horizontal_max=table.horizontalScrollBar().maximum(),
                           image=image_path, csv=csv_path)

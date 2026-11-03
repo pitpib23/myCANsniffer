@@ -105,8 +105,32 @@ class ReceiveTimestampTests(unittest.TestCase):
                 received = reader(path).frames[0]
                 self.assertEqual(received.timestamp_basis, basis)
                 self.assertEqual(received.timestamp_precision, 3)
-                self.assertEqual(format_trace_time(received), "0.012 s")
+                for lite in (False, True):
+                    self.assertEqual(format_trace_time(received, lite=lite), "-")
+                self.assertEqual(received.receive_timestamp, 0.012)
                 self.assertEqual(timestamp_iso(received), "")
+
+    def test_fallback_file_reader_distinguishes_missing_and_recorded_timestamps(self):
+        messages = [can.Message(timestamp=t, arbitration_id=1, data=b"")
+                    for t in (0, 0, T0)]
+        messages[0].timestamp = None
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "capture.blf")
+            with open(path, "wb"):
+                pass
+            source = FileSource(path, speed=0)
+            with patch("can.LogReader", return_value=iter(messages)):
+                source.open()
+            try:
+                missing, zero, recorded = [source.receive() for _ in messages]
+            finally:
+                source.close()
+        self.assertEqual(format_trace_time(missing), "-")
+        self.assertEqual(timestamp_iso(missing), "")
+        self.assertEqual(zero.timestamp_basis, "unix")
+        self.assertNotEqual(format_trace_time(zero), "-")
+        self.assertEqual(format_trace_time(recorded, local_zone=ZONE),
+                         "2026-09-17 14:32:18.483271")
 
 
 class TimestampFormatTests(unittest.TestCase):
@@ -117,6 +141,18 @@ class TimestampFormatTests(unittest.TestCase):
         self.assertEqual(format_trace_time(received, lite=True, local_zone=ZONE),
                          "14:32:18.483")
         self.assertEqual(received.receive_timestamp, T0)
+
+    def test_24_hour_time_handles_morning_noon_and_midnight(self):
+        for hour, expected in ((0, "00:00:00.123"),
+                               (11, "11:00:00.123"),
+                               (12, "12:00:00.123"),
+                               (23, "23:00:00.123")):
+            with self.subTest(hour=hour):
+                received = frame(datetime(2026, 9, 17, hour, 0, 0, 123000,
+                                          tzinfo=ZONE).timestamp())
+                self.assertEqual(format_trace_time(received, True, ZONE), expected)
+                self.assertEqual(datetime.fromisoformat(timestamp_iso(received)).timestamp(),
+                                 received.receive_timestamp)
 
     def test_iso_uses_a_real_utc_offset(self):
         self.assertEqual(timestamp_iso(frame()), "2026-09-17T07:32:18.483271+00:00")
@@ -197,6 +233,20 @@ class TimestampCsvTests(unittest.TestCase):
                 record = next(csv.DictReader(handle)) if fmt == "csv" else json.loads(handle.readline())
             self.assertEqual(float(record["timestamp"]), T0)
 
+    def test_json_export_has_original_iso_elapsed_and_unknown_basis(self):
+        path = os.path.join(self.tmp.name, "capture.jsonl")
+        frames = [replace(frame(), timestamp=T0 + 10, recorded_timestamp=T0),
+                  frame(T0 + .000721), frame(2, timestamp_basis="relative")]
+        export(frames, path, time_base=T0 - 1)
+        with open(path, encoding="utf-8") as handle:
+            rows = [json.loads(line) for line in handle]
+        self.assertEqual(rows[0]["timestamp_iso"], timestamp_iso(frame()))
+        self.assertEqual(rows[0]["timestamp"], T0)
+        self.assertEqual(rows[0]["elapsed_us"], 1_000_000)
+        self.assertEqual(rows[1]["elapsed_us"], 1_000_721)
+        self.assertEqual(rows[2]["timestamp_iso"], "")
+        self.assertEqual(rows[2]["timestamp_basis"], "relative")
+
 
 class TimestampTraceTests(unittest.TestCase):
     @classmethod
@@ -210,9 +260,40 @@ class TimestampTraceTests(unittest.TestCase):
             model.add_frames([received])
             QTest.qWait(10)
             self.assertIs(model.frame_at(0), received)
-            self.assertEqual(model.headerData(0, Qt.Horizontal), "Time")
+            self.assertEqual(model.headerData(0, Qt.Horizontal), "Timestamp")
+            self.assertEqual(model.headerData(1, Qt.Horizontal), "Elapsed (s)")
             self.assertEqual(model.data(model.index(0, 0)), format_trace_time(received, lite))
             self.assertIn("2026-09-17T07:32:18.483271+00:00", model.data(model.index(0, 0), Qt.ToolTipRole))
+
+    def test_elapsed_seconds_match_csv_and_preserve_shifted_frame_columns(self):
+        for lite in (False, True):
+            model = TraceTableModel(Theme(), lite=lite)
+            model.add_frames([frame(), frame(T0 + .000721), frame(T0 - .000001)])
+            self.assertEqual([model.data(model.index(i, 1)) for i in range(3)],
+                             ["0.000000", "0.000721", "-0.000001"])
+            self.assertEqual([model.data(model.index(0, i)) for i in (2, 3, 5, 6)],
+                             ["can0", "0x181", "8", frame().data_hex])
+
+    def test_playback_without_absolute_time_shows_dash_but_keeps_elapsed(self):
+        for basis in ("relative", "unknown"):
+            for lite in (False, True):
+                with self.subTest(basis=basis, lite=lite):
+                    model = TraceTableModel(Theme(), lite=lite)
+                    model.add_frames([frame(2, timestamp_basis=basis),
+                                      frame(2.000721, timestamp_basis=basis)])
+                    self.assertEqual([model.data(model.index(i, 0)) for i in range(2)],
+                                     ["-", "-"])
+                    self.assertEqual(model.data(model.index(1, 1)), "0.000721")
+                    self.assertIn("date/timezone unavailable",
+                                  model.data(model.index(1, 0), Qt.ToolTipRole))
+
+    def test_playback_with_absolute_time_displays_original_recorded_instant(self):
+        received = replace(frame(), timestamp=T0 + 10, recorded_timestamp=T0)
+        for lite in (False, True):
+            model = TraceTableModel(Theme(), lite=lite)
+            model.add_frames([received])
+            self.assertEqual(model.data(model.index(0, 0)), format_trace_time(frame(), lite))
+            self.assertNotEqual(model.data(model.index(0, 0)), "-")
 
     def test_eviction_and_filter_keep_base_and_clear_resets_it(self):
         model = TraceTableModel(Theme(), max_rows=100)
@@ -221,10 +302,12 @@ class TimestampTraceTests(unittest.TestCase):
         self.assertEqual(model.time_base, T0)
         model.set_filter(DisplayFilter(id_min=100, id_max=100))
         self.assertEqual(model.time_base, T0)
+        self.assertEqual(model.data(model.index(0, 1)), "0.100000")
         model.clear()
         self.assertIsNone(model.time_base)
-        model.add_frames([frame(T0 + 9)])
+        model.add_frames([frame(T0 + 9, 100)])
         self.assertEqual(model.time_base, T0 + 9)
+        self.assertEqual(model.data(model.index(0, 1)), "0.000000")
 
     def test_production_theme_lite_widths_and_export_action_reset(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -257,9 +340,12 @@ class TimestampTraceTests(unittest.TestCase):
                 self.assertLessEqual(time_width, exemplar_widths(window.trace_model, window.theme)[0] + 1)
                 self.assertFalse(table.isColumnHidden(0))
                 self.assertEqual(table.horizontalScrollBarPolicy(), Qt.ScrollBarAsNeeded)
-                # At least a full Classic payload remains visible beside Time/ID.
-                available = table.viewport().width() - time_width - table.columnWidth(2)
+                # A full Classic payload fits beside Timestamp/Elapsed/ID.
+                self.assertFalse(table.isColumnHidden(1))
+                available = (table.viewport().width() - time_width
+                             - table.columnWidth(1) - table.columnWidth(3))
                 self.assertGreaterEqual(available, metrics.horizontalAdvance(frame().data_hex))
+                self.assertGreaterEqual(table.columnWidth(6), metrics.horizontalAdvance(frame().data_hex) + 16)
                 path = os.path.join(directory, "export")
                 with patch("cansniff.ui.main_window.QFileDialog.getSaveFileName", return_value=(path, FORMATS["csv"].filter)):
                     window._export_capture()

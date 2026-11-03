@@ -33,9 +33,11 @@ def _load_via_python_can(path: str) -> List[CanFrame]:
     reader = can.LogReader(path)
     try:
         for message in reader:
+            timestamp = getattr(message, "timestamp", None)
             frames.append(
                 CanFrame(
-                    timestamp=float(message.timestamp or 0.0),
+                    timestamp=float(timestamp if timestamp is not None else 0.0),
+                    timestamp_basis="unix" if timestamp is not None else "unknown",
                     arb_id=int(message.arbitration_id),
                     data=bytes(message.data or b""),
                     dlc=int(message.dlc or len(message.data or b"")),

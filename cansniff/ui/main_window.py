@@ -1271,7 +1271,7 @@ class MainWindow(QMainWindow):
         )
         self.trace_view = QTableView()
         self.trace_view.setModel(self.trace_model)
-        # Lite: Time + CAN ID + Payload -- Trace is chronological, so
+        # Lite: Timestamp + Elapsed + CAN ID + Payload -- Trace is chronological, so
         # (unlike Messages, already grouped by ID) it needs both "when"
         # and "which ID" alongside the payload. Channel/Type/Bytes are
         # never removed from the model, only hidden from this view.
@@ -1282,7 +1282,7 @@ class MainWindow(QMainWindow):
         # for direct manipulation; Lite touch drags use the page horizontally
         # and the table vertically, as selected by LiteScrollRouter.
         self._configure_table(
-            self.trace_view, payload_column=5, lite_visible_columns=(0, 2, 5),
+            self.trace_view, payload_column=6, lite_visible_columns=(0, 1, 3, 6),
             fixed_row_cap=True, horizontal_touch_scroll=True)
         self.trace_view.selectionModel().selectionChanged.connect(self._on_trace_selection)
         self.trace_view.verticalScrollBar().valueChanged.connect(self._on_trace_scrolled)
@@ -1326,7 +1326,7 @@ class MainWindow(QMainWindow):
         header.setMinimumSectionSize(72)
         if self.lite:
             # Lite shows only the essential columns (lite_visible_columns
-            # -- e.g. ID + Payload for Messages, Time + CAN ID + Payload
+            # -- e.g. ID + Payload for Messages, Timestamp + Elapsed + CAN ID + Payload
             # for Trace) at their own natural, non-shrinking widths (see
             # _size_table_columns) -- never a stretched-down payload, and
             # never a horizontal scrollbar on the table itself, on
@@ -1527,7 +1527,7 @@ class MainWindow(QMainWindow):
             # _lite_payload_column_width) rather than leaving it sized for
             # whichever FD state was configured at construction.
             self._size_table_columns(self.id_view, 6)
-            self._size_table_columns(self.trace_view, 5, propagate_width_to_page=False)
+            self._size_table_columns(self.trace_view, 6, propagate_width_to_page=False)
 
         self._update_source_chip()
 
@@ -3839,7 +3839,7 @@ class MainWindow(QMainWindow):
             restyle = getattr(widget, "restyle", None)
             if callable(restyle):
                 restyle()
-        for view, payload_column in ((self.id_view, 6), (self.trace_view, 5)):
+        for view, payload_column in ((self.id_view, 6), (self.trace_view, 6)):
             view.verticalHeader().setDefaultSectionSize(self.theme.density.row_height)
             if not reapply_stylesheet:
                 # A pure responsive-density transition: row height above

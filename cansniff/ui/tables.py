@@ -60,7 +60,7 @@ def exemplar_widths(model, theme: Theme) -> List[int]:
                                    else theme.ui_font(bold=bold))
             metrics_cache[key] = metrics
         padding = 2 * SPACE_SM + 6
-        if isinstance(model, TraceTableModel) and column == 0:
+        if isinstance(model, TraceTableModel) and column in (0, 1):
             # Lite's production QSS uses larger cell padding than SPACE_SM.
             # Keep every timestamp digit visible without sizing from rows.
             padding = max(padding, 2 * theme.density.cell_pad_h + 6)
@@ -413,18 +413,19 @@ class IdFilterProxy(QSortFilterProxyModel):
 class TraceTableModel(QAbstractTableModel):
     """Bounded scrollback of individual received frames."""
 
-    COLUMNS = ["Time", "Ch", "CAN ID", "Type", "Bytes", "Payload"]
+    COLUMNS = ["Timestamp", "Elapsed (s)", "Ch", "CAN ID", "Type", "Bytes", "Payload"]
     #: See IdTableModel.COLUMN_EXEMPLARS.
     COLUMN_EXEMPLARS = [
         ("2000-12-31 23:59:59.999999", True, False),
+        ("-9999.999999", True, False),
         ("8888", False, False),
         ("0x1FFFFFFF", True, True),
         ("29-bit FD error", False, False),
         ("64", True, False),
         ("", True, False),              # payload: stretched
     ]
-    _MONO_COLUMNS = {0, 2, 4, 5}
-    _MUTED_COLUMNS = {1, 3}
+    _MONO_COLUMNS = {0, 1, 3, 5, 6}
+    _MUTED_COLUMNS = {2, 4}
 
     #: Emitted whenever the *set* of distinct CanFrame.key values currently
     #: retained (see distinct_frames) actually changes -- a genuinely new
@@ -494,7 +495,13 @@ class TraceTableModel(QAbstractTableModel):
             return None
         if role == Qt.DisplayRole:
             return self.COLUMNS[section]
-        if role == Qt.TextAlignmentRole and section in (0, 4):
+        if role == Qt.ToolTipRole:
+            if section == 0:
+                return ("Frame receive timestamp in local time; imported logs retain their "
+                        "recorded time. '-' means no known date/time timestamp.")
+            if section == 1:
+                return "Seconds since the first frame in this Trace session; Clear resets the reference."
+        if role == Qt.TextAlignmentRole and section in (0, 1, 5):
             return int(Qt.AlignRight | Qt.AlignVCenter)
         return None
 
@@ -504,7 +511,7 @@ class TraceTableModel(QAbstractTableModel):
         frame = self._rows[index.row()]
         column = index.column()
 
-        if role == Qt.ToolTipRole and column == 0:
+        if role == Qt.ToolTipRole and column in (0, 1):
             absolute = timestamp_iso(frame)
             description = (absolute + " (Trace shows local time)" if absolute else
                            "{} seconds; {} time, date/timezone unavailable".format(
@@ -515,17 +522,17 @@ class TraceTableModel(QAbstractTableModel):
             return description
 
         if role == Qt.FontRole:
-            if column == 2:
+            if column == 3:
                 return self._theme.mono_font(bold=True)
             return (self._theme.mono_font() if column in self._MONO_COLUMNS
                     else self._theme.ui_font())
         if role == Qt.ForegroundRole:
             if column in self._MUTED_COLUMNS:
                 return self._theme.color("text_muted")
-            if column in (2, 5):
+            if column in (3, 6):
                 return self._theme.color("text")
             return self._theme.color("text_secondary")
-        if role == Qt.TextAlignmentRole and column in (0, 4):
+        if role == Qt.TextAlignmentRole and column in (0, 1, 5):
             return int(Qt.AlignRight | Qt.AlignVCenter)
         if role != Qt.DisplayRole:
             return None
@@ -533,14 +540,18 @@ class TraceTableModel(QAbstractTableModel):
         if column == 0:
             return format_trace_time(frame, lite=self._lite)
         if column == 1:
-            return frame.channel
+            if self._time_base is None:
+                return ""
+            return "{:.6f}".format(elapsed_us(frame.receive_timestamp, self._time_base) / 1_000_000)
         if column == 2:
-            return "0x" + frame.id_hex
+            return frame.channel
         if column == 3:
-            return IdTableModel._format_marks(frame)
+            return "0x" + frame.id_hex
         if column == 4:
-            return str(len(frame.data))
+            return IdTableModel._format_marks(frame)
         if column == 5:
+            return str(len(frame.data))
+        if column == 6:
             return frame.data_hex
         return None
 
